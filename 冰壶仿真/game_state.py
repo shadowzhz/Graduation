@@ -99,6 +99,29 @@ class GameState:
     difficulty: Any
     stone: StoneState | None = None
 
+    @classmethod
+    def from_vision(cls, stone: StoneState) -> "GameState":
+        """由视觉追踪结果创建尚未接入 AI 的游戏快照。
+
+        AI 相关字段保留中性初值，使实时视觉管线也能生产和检查完整的
+        ``GameState``，而不需要伪造摄像头、检测器或控制器。
+        """
+        return cls(
+            ai_x=0.0,
+            ai_y=0.0,
+            ai_home_y=0.0,
+            target_x=0.0,
+            target_y=0.0,
+            puck=PuckState.from_stone(stone),
+            awaiting_serve=False,
+            current_server="none",
+            serve_phase="idle",
+            stalled_puck_phase="idle",
+            reaction_timer=0.0,
+            difficulty=None,
+            stone=stone,
+        )
+
     @property
     def puck_x(self) -> float:
         return self.puck.x
