@@ -11,30 +11,26 @@ from __future__ import annotations
 
 import math
 import os
-import random
 import time
 import tkinter as tk
 from dataclasses import replace
 from tkinter import ttk
 
 from air_hockey_config import *
+from air_hockey_ai import AIDecision, AIGameState, AirHockeyAI
 from air_hockey_physics import (
     PuckMotion,
     circle_post_contact,
     clamp,
     goal_scorer,
     puck_inside_goal_mouth,
-    reflected_coordinate,
 )
-
-
-AI_SERVE_SETUP_GAP = 6.0
 
 
 class AirHockeyGame:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.random = random.Random()
+        self.ai_controller = AirHockeyAI()
         self.closed = False
         self.game_loop_id: str | None = None
         self.player_score = self.ai_score = 0
@@ -323,13 +319,7 @@ class AirHockeyGame:
 
     def _move_ai(self, dt: float) -> None:
         difficulty = self.difficulty
-        if self.awaiting_serve and self.current_server == "ai":
-            self._update_ai_serve_target(dt)
-        else:
-            self.ai_reaction_timer -= dt
-            if self.ai_reaction_timer <= 0:
-                self.ai_reaction_timer += difficulty.reaction_delay
-                self._choose_ai_target(difficulty)
+        self._apply_ai_decision(self.ai_controller.update(self._ai_game_state(), dt))
         ai_min_y = RINK_TOP + MALLET_RADIUS
         ai_max_y = RINK_CENTER_Y - MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "player":
@@ -339,20 +329,34 @@ class AirHockeyGame:
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._move_towards(self.ai_x, self.ai_y, self.ai_target_x, self.ai_target_y, difficulty.ai_speed, dt)
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._resolve_mallet_goal_posts(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._keep_mallet_clear_of_outer_corners(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
-        if self.awaiting_serve and self.current_server == "ai" and self.ai_serve_phase == "positioning":
-            setup_y = RINK_CENTER_Y - MALLET_RADIUS - PUCK_RADIUS - AI_SERVE_SETUP_GAP * UI_SCALE
-            arrival_tolerance = max(2.0 * UI_SCALE, difficulty.ai_speed * dt)
-            if math.hypot(self.ai_x - RINK_CENTER_X, self.ai_y - setup_y) <= arrival_tolerance:
-                self.ai_serve_phase = "striking"
+        self.ai_serve_phase = self.ai_controller.advance_serve_phase(self._ai_game_state(), dt)
 
-    def _update_ai_serve_target(self, dt: float) -> None:
-        """让 AI 先在冰球上方站稳，再进行开球撞击。"""
-        setup_y = RINK_CENTER_Y - MALLET_RADIUS - PUCK_RADIUS - AI_SERVE_SETUP_GAP * UI_SCALE
-        self.ai_target_x = RINK_CENTER_X
-        if self.ai_serve_phase == "positioning":
-            self.ai_target_y = setup_y
-        else:
-            self.ai_target_y = RINK_CENTER_Y
+    def _ai_game_state(self) -> AIGameState:
+        puck_velocity_x, puck_velocity_y = self.puck.collision_velocity()
+        return AIGameState(
+            ai_x=self.ai_x,
+            ai_y=self.ai_y,
+            ai_home_y=self.ai_home_y,
+            target_x=self.ai_target_x,
+            target_y=self.ai_target_y,
+            puck_x=self.puck.x,
+            puck_y=self.puck.y,
+            puck_velocity_x=puck_velocity_x,
+            puck_velocity_y=puck_velocity_y,
+            awaiting_serve=self.awaiting_serve,
+            current_server=self.current_server,
+            serve_phase=self.ai_serve_phase,
+            stalled_puck_phase=self.ai_stalled_puck_phase,
+            reaction_timer=self.ai_reaction_timer,
+            difficulty=self.difficulty,
+        )
+
+    def _apply_ai_decision(self, decision: AIDecision) -> None:
+        """控制器应用 AI 返回的目标；AI 本身不写入游戏状态。"""
+        self.ai_target_x = decision.target_x
+        self.ai_target_y = decision.target_y
+        self.ai_stalled_puck_phase = decision.stalled_puck_phase
+        self.ai_reaction_timer = decision.reaction_timer
 
     @staticmethod
     def _resolve_mallet_goal_posts(mallet_x: float, mallet_y: float, mallet_vx: float, mallet_vy: float) -> tuple[float, float, float, float]:
@@ -395,102 +399,6 @@ class AirHockeyGame:
                 mallet_y = corner_y + ny * minimum_distance
                 mallet_vx = mallet_vy = 0.0
         return mallet_x, mallet_y, mallet_vx, mallet_vy
-
-    def _choose_ai_target(self, difficulty: Difficulty) -> None:
-        if self.awaiting_serve:
-            self.ai_target_x = RINK_CENTER_X
-            if self.current_server == "ai":
-                self.ai_target_y = RINK_CENTER_Y - MALLET_RADIUS - PUCK_RADIUS - AI_SERVE_SETUP_GAP * UI_SCALE
-            else:
-                self.ai_target_y = self.ai_home_y
-            return
-
-        puck = self.puck
-        error = self.random.uniform(-difficulty.aim_error, difficulty.aim_error)
-        safe_left = RINK_LEFT + MALLET_RADIUS
-        safe_right = RINK_RIGHT - MALLET_RADIUS
-        _puck_velocity_x, puck_velocity_y = puck.collision_velocity()
-        puck_speed = math.hypot(_puck_velocity_x, puck_velocity_y)
-        puck_near_center = puck.y <= RINK_CENTER_Y + PUCK_RADIUS + 2 * UI_SCALE
-
-        if self.ai_stalled_puck_phase != "idle":
-            if puck_speed <= PUCK_STOP_SPEED:
-                self._choose_stalled_puck_target(puck, safe_left, safe_right)
-                return
-            self.ai_stalled_puck_phase = "idle"
-
-        # 冰球已经跑到 AI 球槌的“身后”时，绝不能继续追球。
-        # 此时追击会从冰球下方再次击球，把冰球重新推向 AI 自己的球门。
-        puck_behind_ai = puck.y < self.ai_y - PUCK_RADIUS * 0.35
-        puck_threatening_goal = puck_velocity_y < -25 * UI_SCALE
-        if puck_behind_ai:
-            # 冰球在 AI 身后停住时，不能只回防到中路，否则双方都会等球而死锁。
-            if puck_speed <= PUCK_STOP_SPEED:
-                self.ai_stalled_puck_phase = "positioning"
-                self._choose_stalled_puck_target(puck, safe_left, safe_right)
-                return
-            self.ai_target_y = self.ai_home_y
-            if puck_threatening_goal:
-                # 防守时只做横向封堵，不主动向冰球移动。
-                predicted_x = self._predict_puck_x(self.ai_home_y)
-                self.ai_target_x = clamp(predicted_x + error * 0.5, safe_left, safe_right)
-            else:
-                self.ai_target_x = clamp(RINK_CENTER_X + error * 0.25, safe_left, safe_right)
-            return
-
-        puck_in_attack_zone = puck.y <= difficulty.attack_line
-        if puck_speed <= PUCK_STOP_SPEED and puck_near_center:
-            self.ai_target_x = clamp(puck.x + error, safe_left, safe_right)
-            self.ai_target_y = clamp(puck.y, RINK_TOP + MALLET_RADIUS, RINK_CENTER_Y - MALLET_RADIUS)
-            return
-
-        # 只有冰球位于 AI 前方并进入攻击区时才主动追击。
-        if puck_in_attack_zone and not puck_behind_ai:
-            self.ai_target_x = clamp(puck.x + error, safe_left, safe_right)
-            self.ai_target_y = clamp(puck.y, self.ai_home_y, RINK_CENTER_Y - MALLET_RADIUS)
-            return
-
-        self.ai_target_y = self.ai_home_y
-        if puck_threatening_goal:
-            predicted_x = self._predict_puck_x(self.ai_home_y)
-            blended_x = RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
-            self.ai_target_x = clamp(blended_x + error, safe_left, safe_right)
-        else:
-            self.ai_target_x = clamp(RINK_CENTER_X + error * 0.35, safe_left, safe_right)
-
-    def _choose_stalled_puck_target(self, puck: PuckMotion, safe_left: float, safe_right: float) -> None:
-        """从球门侧绕到静止冰球旁边，再把它朝玩家半场击出。"""
-        minimum_distance = PUCK_RADIUS + MALLET_RADIUS
-        side = 1.0 if puck.x <= RINK_CENTER_X else -1.0
-        staging_x = clamp(puck.x + side * (minimum_distance + 8.0 * UI_SCALE), safe_left, safe_right)
-        staging_y = RINK_TOP + MALLET_RADIUS
-        if self.ai_stalled_puck_phase == "positioning":
-            self.ai_target_x = staging_x
-            self.ai_target_y = staging_y
-            if math.hypot(self.ai_x - staging_x, self.ai_y - staging_y) <= max(3.0 * UI_SCALE, minimum_distance * 0.1):
-                self.ai_stalled_puck_phase = "striking"
-            return
-        self.ai_target_x = clamp(puck.x - side * minimum_distance, safe_left, safe_right)
-        self.ai_target_y = clamp(puck.y + MALLET_RADIUS, RINK_TOP + MALLET_RADIUS, RINK_CENTER_Y - MALLET_RADIUS)
-
-    def _predict_puck_x(self, target_y: float) -> float:
-        puck = self.puck
-        velocity_x, velocity_y = puck.collision_velocity()
-        speed = math.hypot(velocity_x, velocity_y)
-        if speed <= COLLISION_EPSILON or velocity_y >= -COLLISION_EPSILON:
-            return reflected_coordinate(self.puck.x, RINK_LEFT + PUCK_RADIUS, RINK_RIGHT - PUCK_RADIUS)
-        direction_x = velocity_x / speed
-        direction_y = velocity_y / speed
-        distance_to_target = (target_y - self.puck.y) / direction_y
-        if distance_to_target <= 0:
-            return reflected_coordinate(self.puck.x, RINK_LEFT + PUCK_RADIUS, RINK_RIGHT - PUCK_RADIUS)
-        if PUCK_FRICTION_DECELERATION <= COLLISION_EPSILON:
-            travel_distance = distance_to_target
-        else:
-            stopping_distance = speed * speed / (2.0 * PUCK_FRICTION_DECELERATION)
-            travel_distance = min(distance_to_target, stopping_distance)
-        projected_x = self.puck.x + direction_x * travel_distance
-        return reflected_coordinate(projected_x, RINK_LEFT + PUCK_RADIUS, RINK_RIGHT - PUCK_RADIUS)
 
     @staticmethod
     def _move_towards(x: float, y: float, target_x: float, target_y: float, max_speed: float, dt: float) -> tuple[float, float, float, float]:
