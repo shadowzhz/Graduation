@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def draw_overlay(image, roi, detection, track, fps):
+def draw_overlay(image, roi, detection, track, fps, total_frames, detected_frames, max_consecutive_misses, current_misses):
     x, y, w, h = roi
     cv2.rectangle(image, (x, y), (x + w, y + h), (255, 255, 0), 2)
 
@@ -72,9 +72,21 @@ def draw_overlay(image, roi, detection, track, fps):
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
         )
 
+    detection_rate = (
+        100.0 * detected_frames / total_frames if total_frames else 0.0
+    )
     cv2.putText(
         image, f"FPS: {fps:.1f}", (20, 65),
         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
+    )
+    cv2.putText(
+        image,
+        f"Detection: {detection_rate:.2f}%  Miss: {current_misses}  Max: {max_consecutive_misses}",
+        (20, 95),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2,
     )
     cv2.putText(
         image, "Q / ESC: quit", (20, image.shape[0] - 20),
@@ -119,6 +131,10 @@ def main() -> None:
     last_sequence = -1
     display_fps = 0.0
     last_time = time.monotonic()
+    total_frames = 0
+    detected_frames = 0
+    current_misses = 0
+    max_consecutive_misses = 0
 
     try:
         while True:
@@ -142,12 +158,32 @@ def main() -> None:
                 )
             last_time = now
 
+            total_frames += 1
             detection = detector.detect(frame)
+            if detection is None:
+                current_misses += 1
+                max_consecutive_misses = max(
+                    max_consecutive_misses, current_misses
+                )
+            else:
+                detected_frames += 1
+                current_misses = 0
+
             tracks = tracker.update(detection)
             track = tracks[0] if tracks else None
 
             image = frame.image.copy()
-            draw_overlay(image, tuple(args.roi), detection, track, display_fps)
+            draw_overlay(
+                image,
+                tuple(args.roi),
+                detection,
+                track,
+                display_fps,
+                total_frames,
+                detected_frames,
+                max_consecutive_misses,
+                current_misses,
+            )
             cv2.imshow("Stone Tracker", image)
 
             key = cv2.waitKey(1) & 0xFF
@@ -164,8 +200,15 @@ def main() -> None:
         camera.stop()
         cv2.destroyAllWindows()
 
+    detection_rate = 100.0 * detected_frames / total_frames if total_frames else 0.0
     stats = camera.get_stats()
     print()
+    print("=== Detection statistics ===")
+    print(f"Frames: {total_frames}")
+    print(f"Detected: {detected_frames}")
+    print(f"Missed: {total_frames - detected_frames}")
+    print(f"Detection rate: {detection_rate:.2f}%")
+    print(f"Max consecutive misses: {max_consecutive_misses}")
     print("=== Camera statistics ===")
     print("Capture FPS: {:.1f}".format(stats.capture_fps))
 
