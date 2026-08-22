@@ -8,30 +8,10 @@ from dataclasses import dataclass, replace
 
 import air_hockey_config as layout
 from air_hockey_physics import clamp, reflected_coordinate
+from game_state import GameState
 
 
 AI_SERVE_SETUP_GAP = 6.0
-
-
-@dataclass(frozen=True)
-class AIGameState:
-    """AI 在一次决策中需要的只读游戏状态快照。"""
-
-    ai_x: float
-    ai_y: float
-    ai_home_y: float
-    target_x: float
-    target_y: float
-    puck_x: float
-    puck_y: float
-    puck_velocity_x: float
-    puck_velocity_y: float
-    awaiting_serve: bool
-    current_server: str
-    serve_phase: str
-    stalled_puck_phase: str
-    reaction_timer: float
-    difficulty: layout.Difficulty
 
 
 @dataclass(frozen=True)
@@ -50,7 +30,7 @@ class AirHockeyAI:
     def __init__(self) -> None:
         self._random = random.Random()
 
-    def update(self, state: AIGameState, dt: float) -> AIDecision:
+    def update(self, state: GameState, dt: float) -> AIDecision:
         """按既有反应延迟刷新 AI 目标，并返回下一次反应计时。"""
         if state.awaiting_serve and state.current_server == "ai":
             return replace(self.choose_target(state), reaction_timer=state.reaction_timer)
@@ -60,7 +40,7 @@ class AirHockeyAI:
             return replace(self.choose_target(state), reaction_timer=reaction_timer)
         return AIDecision(state.target_x, state.target_y, state.stalled_puck_phase, reaction_timer)
 
-    def choose_target(self, state: AIGameState) -> AIDecision:
+    def choose_target(self, state: GameState) -> AIDecision:
         """返回当前状态下的球槌目标和静止球阶段。"""
         if state.awaiting_serve:
             return self._choose_serve_target(state)
@@ -124,7 +104,7 @@ class AirHockeyAI:
             target_x = clamp(layout.RINK_CENTER_X + error * 0.35, safe_left, safe_right)
         return AIDecision(target_x, state.ai_home_y, stalled_puck_phase)
 
-    def advance_serve_phase(self, state: AIGameState, dt: float) -> str:
+    def advance_serve_phase(self, state: GameState, dt: float) -> str:
         """根据实际移动后的位置决定 AI 开球是否由就位转为击球。"""
         if not (state.awaiting_serve and state.current_server == "ai" and state.serve_phase == "positioning"):
             return state.serve_phase
@@ -135,7 +115,7 @@ class AirHockeyAI:
         return state.serve_phase
 
     @staticmethod
-    def _choose_serve_target(state: AIGameState) -> AIDecision:
+    def _choose_serve_target(state: GameState) -> AIDecision:
         if state.current_server == "ai":
             if state.serve_phase == "positioning":
                 target_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.PUCK_RADIUS - AI_SERVE_SETUP_GAP * layout.UI_SCALE
@@ -147,7 +127,7 @@ class AirHockeyAI:
 
     @staticmethod
     def _choose_stalled_puck_target(
-        state: AIGameState,
+        state: GameState,
         safe_left: float,
         safe_right: float,
         stalled_puck_phase: str | None = None,
@@ -169,7 +149,7 @@ class AirHockeyAI:
         )
 
     @staticmethod
-    def _predict_puck_x(state: AIGameState, target_y: float) -> float:
+    def _predict_puck_x(state: GameState, target_y: float) -> float:
         """按现有减速和边墙反射公式预测冰球在目标横线的横坐标。"""
         speed = math.hypot(state.puck_velocity_x, state.puck_velocity_y)
         if speed <= layout.COLLISION_EPSILON or state.puck_velocity_y >= -layout.COLLISION_EPSILON:
