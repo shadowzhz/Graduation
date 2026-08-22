@@ -17,7 +17,7 @@ from dataclasses import replace
 from tkinter import ttk
 
 from air_hockey_config import *
-from air_hockey_ai import AIDecision, AIGameState, AirHockeyAI
+from air_hockey_ai import AIDecision, AirHockeyAI
 from air_hockey_physics import (
     PuckMotion,
     circle_post_contact,
@@ -25,6 +25,7 @@ from air_hockey_physics import (
     goal_scorer,
     puck_inside_goal_mouth,
 )
+from game_state import GameState, PuckState
 
 
 class AirHockeyGame:
@@ -319,7 +320,7 @@ class AirHockeyGame:
 
     def _move_ai(self, dt: float) -> None:
         difficulty = self.difficulty
-        self._apply_ai_decision(self.ai_controller.update(self._ai_game_state(), dt))
+        self._apply_ai_decision(self.ai_controller.update(self._game_state(), dt))
         ai_min_y = RINK_TOP + MALLET_RADIUS
         ai_max_y = RINK_CENTER_Y - MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "player":
@@ -329,20 +330,22 @@ class AirHockeyGame:
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._move_towards(self.ai_x, self.ai_y, self.ai_target_x, self.ai_target_y, difficulty.ai_speed, dt)
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._resolve_mallet_goal_posts(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._keep_mallet_clear_of_outer_corners(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
-        self.ai_serve_phase = self.ai_controller.advance_serve_phase(self._ai_game_state(), dt)
+        self.ai_serve_phase = self.ai_controller.advance_serve_phase(self._game_state(), dt)
 
-    def _ai_game_state(self) -> AIGameState:
+    def _game_state(self) -> GameState:
         puck_velocity_x, puck_velocity_y = self.puck.collision_velocity()
-        return AIGameState(
+        return GameState(
             ai_x=self.ai_x,
             ai_y=self.ai_y,
             ai_home_y=self.ai_home_y,
             target_x=self.ai_target_x,
             target_y=self.ai_target_y,
-            puck_x=self.puck.x,
-            puck_y=self.puck.y,
-            puck_velocity_x=puck_velocity_x,
-            puck_velocity_y=puck_velocity_y,
+            puck=PuckState(
+                x=self.puck.x,
+                y=self.puck.y,
+                vx=puck_velocity_x,
+                vy=puck_velocity_y,
+            ),
             awaiting_serve=self.awaiting_serve,
             current_server=self.current_server,
             serve_phase=self.ai_serve_phase,

@@ -43,8 +43,9 @@ sys.path.insert(0, str(VISION_ROOT))
 sys.path.insert(0, str(SIMULATION_ROOT))
 
 import air_hockey_config as layout
-from air_hockey_ai import AIDecision, AIGameState, AirHockeyAI
+from air_hockey_ai import AIDecision, AirHockeyAI
 from air_hockey_physics import PuckMotion, goal_scorer
+from game_state import GameState, PuckState, StoneState
 from vision.tracker import StoneTracker
 from vision.types import Detection, Track
 
@@ -127,25 +128,24 @@ def simulate_detection(puck: PuckMotion, timestamp: float, rng: random.Random, n
     )
 
 
-def state_from_track(track: Track, target_x: float, target_y: float, reaction_timer: float, stalled_puck_phase: str, difficulty: layout.Difficulty) -> AIGameState:
-    """唯一的坐标适配层：将 Tracker 的 Track 转为 AIGameState。"""
+def game_state_from_track(track: Track, target_x: float, target_y: float, reaction_timer: float, stalled_puck_phase: str, difficulty: layout.Difficulty) -> GameState:
+    """唯一的 Vision → Game 适配层：Tracker 输出先转为 StoneState。"""
     ai_home_y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
-    return AIGameState(
+    stone = StoneState.from_tracker(track)
+    return GameState(
         ai_x=layout.RINK_CENTER_X,
         ai_y=ai_home_y,
         ai_home_y=ai_home_y,
         target_x=target_x,
         target_y=target_y,
-        puck_x=track.center_x,
-        puck_y=track.center_y,
-        puck_velocity_x=track.vx,
-        puck_velocity_y=track.vy,
+        puck=PuckState.from_stone(stone),
         awaiting_serve=False,
         current_server="player",
         serve_phase="idle",
         stalled_puck_phase=stalled_puck_phase,
         reaction_timer=reaction_timer,
         difficulty=difficulty,
+        stone=stone,
     )
 
 
@@ -264,7 +264,7 @@ def main() -> None:
     last_print = -args.print_interval
     started = time.monotonic()
 
-    print("Offline pipeline started: simulation -> Detection -> StoneTracker -> AIGameState -> AirHockeyAI")
+    print("Offline pipeline started: simulation -> Detection -> StoneTracker -> GameState -> AirHockeyAI")
     print(
         "Press Ctrl+C to stop"
         + (f", or Q / ESC in the {args.visualizer} window." if visualizer else ".")
@@ -285,7 +285,7 @@ def main() -> None:
             track = tracks[0] if tracks else None
             if track is not None:
                 path.append((round(track.center_x), round(track.center_y)))
-                state = state_from_track(
+                state = game_state_from_track(
                     track,
                     target[0],
                     target[1],
