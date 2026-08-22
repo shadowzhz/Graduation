@@ -11,8 +11,8 @@ from .types import Detection, Track, TrackState
 class StoneTracker:
     """Track one detected stone across consecutive frames.
 
-    The first version intentionally uses a simple nearest-distance model.
-    Kalman filtering and multi-object association can be added later.
+    Uses a constant-velocity prediction to make association more robust
+    during fast motion while keeping the tracker intentionally lightweight.
     """
 
     def __init__(
@@ -41,8 +41,9 @@ class StoneTracker:
     def update(self, detection: Optional[Detection]) -> List[Track]:
         """Update the tracker with the latest detection.
 
-        Returns a list for future compatibility with multi-object tracking.
-        The current implementation contains at most one track.
+        Association uses a constant-velocity prediction based on the
+        previous track state. The current implementation contains at most
+        one track.
         """
         if detection is None:
             return self._handle_missing_detection()
@@ -51,9 +52,10 @@ class StoneTracker:
             self._track = self._create_track(detection)
             return [self._track]
 
+        predicted_x, predicted_y = self._predict_position(detection.timestamp)
         distance = hypot(
-            detection.center_x - self._track.center_x,
-            detection.center_y - self._track.center_y,
+            detection.center_x - predicted_x,
+            detection.center_y - predicted_y,
         )
 
         if distance > self.max_distance:
@@ -65,6 +67,15 @@ class StoneTracker:
     def reset(self) -> None:
         """Remove the current track and reset tracker state."""
         self._track = None
+
+    def _predict_position(self, timestamp: float) -> tuple[float, float]:
+        assert self._track is not None
+
+        dt = max(0.0, timestamp - self._track.last_timestamp)
+        return (
+            self._track.center_x + self._track.vx * dt,
+            self._track.center_y + self._track.vy * dt,
+        )
 
     def _create_track(self, detection: Detection) -> Track:
         track = Track(
