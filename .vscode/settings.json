@@ -1,0 +1,7 @@
+{
+    // 让 Pylance 能找到 sys.path 运行时才加入的模块目录
+    "python.analysis.extraPaths": [
+        "air_hockey",
+        "冰壶仿真"
+    ]
+}
