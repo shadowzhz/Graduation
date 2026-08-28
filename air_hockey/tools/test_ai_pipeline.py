@@ -16,23 +16,14 @@ import time
 import tkinter as tk
 
 
-# 往上找包含 air_hockey_ai.py 的仿真工程目录
+# 视觉工程、根目录（共享的 game_state）、仿真工程都在搜索路径里
 SCRIPT_DIR = Path(__file__).resolve().parent
 VISION_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = VISION_ROOT.parent
-SIMULATION_ROOT = next(
-    (
-        directory
-        for directory in PROJECT_ROOT.iterdir()
-        if (directory / "air_hockey_ai.py").is_file()
-        and (directory / "air_hockey_physics.py").is_file()
-    ),
-    None,
-)
-if SIMULATION_ROOT is None:
-    raise RuntimeError("未找到包含 air_hockey_ai.py 的仿真工程")
+SIMULATION_ROOT = PROJECT_ROOT / "冰壶仿真"
 sys.path.insert(0, str(VISION_ROOT))
 sys.path.insert(0, str(SIMULATION_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import air_hockey_config as layout
 from air_hockey_ai import AIDecision, AirHockeyAI

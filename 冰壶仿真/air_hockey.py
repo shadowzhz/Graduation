@@ -6,10 +6,14 @@
 
 import math
 import os
+import sys
 import time
 import tkinter as tk
 from dataclasses import replace
+from pathlib import Path
 from tkinter import ttk
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from air_hockey_config import *
 from air_hockey_ai import AIDecision, AirHockeyAI
