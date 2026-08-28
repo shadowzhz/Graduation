@@ -1,6 +1,4 @@
-"""First-stage stone detection pipeline."""
+"""视觉层。"""
 
 from .detector import StoneDetector
 from .types import Detection, Frame, ROI
-
-__all__ = ["Detection", "Frame", "ROI", "StoneDetector"]

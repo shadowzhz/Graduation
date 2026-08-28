@@ -1,6 +1,4 @@
-"""空气冰球电脑球槌的目标决策。"""
-
-from __future__ import annotations
+"""电脑球槌的目标决策。"""
 
 import math
 import random
@@ -14,10 +12,8 @@ from game_state import GameState
 AI_SERVE_SETUP_GAP = 6.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class AIDecision:
-    """AI 返回给游戏控制器的目标与内部阶段变更。"""
-
     target_x: float
     target_y: float
     stalled_puck_phase: str
@@ -25,13 +21,13 @@ class AIDecision:
 
 
 class AirHockeyAI:
-    """根据状态快照选择 AI 球槌目标；不修改游戏实体。"""
+    """只根据状态快照给目标，不直接改游戏实体。"""
 
     def __init__(self) -> None:
         self._random = random.Random()
 
     def update(self, state: GameState, dt: float) -> AIDecision:
-        """按既有反应延迟刷新 AI 目标，并返回下一次反应计时。"""
+        """按难度反应延迟刷新目标。"""
         if state.awaiting_serve and state.current_server == "ai":
             return replace(self.choose_target(state), reaction_timer=state.reaction_timer)
         reaction_timer = state.reaction_timer - dt
@@ -41,7 +37,6 @@ class AirHockeyAI:
         return AIDecision(state.target_x, state.target_y, state.stalled_puck_phase, reaction_timer)
 
     def choose_target(self, state: GameState) -> AIDecision:
-        """返回当前状态下的球槌目标和静止球阶段。"""
         if state.awaiting_serve:
             return self._choose_serve_target(state)
 
@@ -59,12 +54,11 @@ class AirHockeyAI:
         else:
             stalled_puck_phase = "idle"
 
-        # 冰球已经跑到 AI 球槌的“身后”时，绝不能继续追球。
-        # 此时追击会从冰球下方再次击球，把冰球重新推向 AI 自己的球门。
+        # 冰球在 AI 身后时绝不能追，会把球撞向自家球门
         puck_behind_ai = state.puck.y < state.ai_y - layout.PUCK_RADIUS * 0.35
         puck_threatening_goal = state.puck.vy < -25 * layout.UI_SCALE
         if puck_behind_ai:
-            # 冰球在 AI 身后停住时，不能只回防到中路，否则双方都会等球而死锁。
+            # 停在身后时只回中路会两边干等，死锁
             if puck_speed <= layout.PUCK_STOP_SPEED:
                 return self._choose_stalled_puck_target(
                     state,
@@ -73,7 +67,7 @@ class AirHockeyAI:
                     stalled_puck_phase="positioning",
                 )
             if puck_threatening_goal:
-                # 防守时只做横向封堵，不主动向冰球移动。
+                # 防守只横向封堵，不主动凑近冰球
                 predicted_x = self._predict_puck_x(state, state.ai_home_y)
                 target_x = clamp(predicted_x + error * 0.5, safe_left, safe_right)
             else:
@@ -88,7 +82,7 @@ class AirHockeyAI:
                 stalled_puck_phase,
             )
 
-        # 只有冰球位于 AI 前方并进入攻击区时才主动追击。
+        # 冰球在自己前方且进了攻击区才主动追
         if puck_in_attack_zone and not puck_behind_ai:
             return AIDecision(
                 clamp(state.puck.x + error, safe_left, safe_right),
@@ -105,7 +99,7 @@ class AirHockeyAI:
         return AIDecision(target_x, state.ai_home_y, stalled_puck_phase)
 
     def advance_serve_phase(self, state: GameState, dt: float) -> str:
-        """根据实际移动后的位置决定 AI 开球是否由就位转为击球。"""
+        """AI 开球时，就位了才切到击球阶段。"""
         if not (state.awaiting_serve and state.current_server == "ai" and state.serve_phase == "positioning"):
             return state.serve_phase
         setup_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.PUCK_RADIUS - AI_SERVE_SETUP_GAP * layout.UI_SCALE
@@ -126,13 +120,8 @@ class AirHockeyAI:
         return AIDecision(layout.RINK_CENTER_X, target_y, state.stalled_puck_phase)
 
     @staticmethod
-    def _choose_stalled_puck_target(
-        state: GameState,
-        safe_left: float,
-        safe_right: float,
-        stalled_puck_phase: str | None = None,
-    ) -> AIDecision:
-        """从球门侧绕到静止冰球旁边，再把它朝玩家半场击出。"""
+    def _choose_stalled_puck_target(state, safe_left, safe_right, stalled_puck_phase=None) -> AIDecision:
+        """绕到静止冰球旁边把它打向玩家半场。"""
         phase = state.stalled_puck_phase if stalled_puck_phase is None else stalled_puck_phase
         minimum_distance = layout.PUCK_RADIUS + layout.MALLET_RADIUS
         side = 1.0 if state.puck.x <= layout.RINK_CENTER_X else -1.0
@@ -149,8 +138,8 @@ class AirHockeyAI:
         )
 
     @staticmethod
-    def _predict_puck_x(state: GameState, target_y: float) -> float:
-        """按现有减速和边墙反射公式预测冰球在目标横线的横坐标。"""
+    def _predict_puck_x(state, target_y) -> float:
+        """按减速和边墙反射公式预估冰球到 target_y 横线时的横坐标。"""
         speed = math.hypot(state.puck.vx, state.puck.vy)
         if speed <= layout.COLLISION_EPSILON or state.puck.vy >= -layout.COLLISION_EPSILON:
             return reflected_coordinate(state.puck.x, layout.RINK_LEFT + layout.PUCK_RADIUS, layout.RINK_RIGHT - layout.PUCK_RADIUS)

@@ -1,23 +1,18 @@
-"""测量 Jetson GStreamer appsink 到 NumPy 的图像传输开销。
+"""测量 GStreamer appsink 到 NumPy 的传输开销。
 
-本工具不使用 CameraManager、GUI 或检测逻辑，用于区分以下阶段的性能：
-
-* map: 只映射 appsink 缓冲区，不访问像素数据；
-* bgrx-copy: 复制完整的四通道 BGRx 图像；
-* bgr-copy: 将 BGRx 裁为三通道 BGR 并复制，与当前 Camera 层行为一致。
+mode 区分三个阶段：map=只映射缓冲区；bgrx-copy=完整四通道复制；
+bgr-copy=裁成三通道 BGR 再复制（和 Camera 层行为一致）。
 """
 
-from __future__ import annotations
 
 import argparse
 import sys
 import time
-from typing import List, Optional
 
 import numpy as np
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
     parser = argparse.ArgumentParser(description="测试 GStreamer appsink 到 NumPy 的传输 FPS")
     parser.add_argument("--device", default="/dev/video0")
     parser.add_argument("--width", type=int, default=1280)
@@ -43,7 +38,7 @@ def load_gst():
     return Gst
 
 
-def pipeline_description(args: argparse.Namespace) -> str:
+def pipeline_description(args):
     return (
         f"v4l2src device={args.device} io-mode=2 ! "
         f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! "
@@ -53,7 +48,7 @@ def pipeline_description(args: argparse.Namespace) -> str:
     )
 
 
-def run(args: argparse.Namespace) -> int:
+def run(args):
     if args.duration <= 0:
         print("--duration 必须大于 0", file=sys.stderr)
         return 2
@@ -91,7 +86,7 @@ def run(args: argparse.Namespace) -> int:
                         image = raw.copy()
                     else:
                         image = raw.reshape((args.height, args.width, 4))[:, :, :3].copy()
-                    # 防止解释器把数组计算优化为无效操作。
+                    # 防止复制被优化掉
                     if image.size == 0:
                         raise RuntimeError("空图像")
                 count += 1
@@ -104,8 +99,8 @@ def run(args: argparse.Namespace) -> int:
         pipeline.set_state(Gst.State.NULL)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    return run(build_parser().parse_args(argv))
+def main():
+    return run(build_parser().parse_args())
 
 
 if __name__ == "__main__":

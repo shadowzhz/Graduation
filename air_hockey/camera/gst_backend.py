@@ -1,29 +1,21 @@
-"""GStreamer camera backend with a native appsink path and OpenCV fallback."""
-
-from __future__ import annotations
-
-from typing import Any, Optional, Tuple
+"""GStreamer 摄像头后端，优先原生 appsink，不行再退 OpenCV。"""
 
 import cv2
 import numpy as np
 
 from .backend import CameraBackend
-from .types import CameraConfig, CameraInfo
+from .types import CameraInfo
 
 
 class GStreamerBackend(CameraBackend):
-    """通过原生 GStreamer appsink 读取解码后的 BGR 帧。
+    """Jetson 上 OpenCV 的 CAP_GSTREAMER 会多一层适配开销，
+    所以优先用 gi.repository.Gst 直接拉 appsink。"""
 
-    Jetson 上 OpenCV 的 ``CAP_GSTREAMER`` 会在 appsink 之后再次经过
-    OpenCV 的视频 I/O 适配层。这里优先使用 ``gi.repository.Gst`` 直接
-    拉取 sample；如果 Python GStreamer 绑定不可用，则回退到 OpenCV。
-    """
-
-    def __init__(self, config: CameraConfig, preview_window_handle: Optional[int] = None) -> None:
+    def __init__(self, config, preview_window_handle=None) -> None:
         super().__init__(config)
-        self.pipeline: Any = None
-        self._appsink: Any = None
-        self._gst: Any = None
+        self.pipeline = None
+        self._appsink = None
+        self._gst = None
         self._native = False
         self._native_pipeline = ""
         self._native_width = 0
@@ -35,25 +27,20 @@ class GStreamerBackend(CameraBackend):
 
     @property
     def hardware_preview(self) -> bool:
-        """是否已将硬件显示 sink 绑定到调用方提供的 X11 窗口。"""
         return self._hardware_preview
 
     @staticmethod
     def available() -> bool:
-        """判断 OpenCV 或 Python GStreamer 至少有一个可用。"""
-
         if cv2.CAP_GSTREAMER > 0:
             return True
         try:
-            import gi  # noqa: F401
+            import gi
             return True
         except ImportError:
             return False
 
     @staticmethod
-    def _load_gst() -> Any:
-        """延迟加载 Gst，避免没有 gi 的环境无法导入 camera 包。"""
-
+    def _load_gst():
         import gi
 
         gi.require_version("Gst", "1.0")
@@ -63,9 +50,7 @@ class GStreamerBackend(CameraBackend):
         return Gst
 
     @staticmethod
-    def _load_gst_video() -> Any:
-        """加载用于将 nveglglessink 绑定到 X11 窗口的 GstVideo。"""
-
+    def _load_gst_video():
         import gi
 
         gi.require_version("GstVideo", "1.0")
@@ -76,8 +61,6 @@ class GStreamerBackend(CameraBackend):
     def open(self, device: str) -> CameraInfo:
         if not self.available():
             raise RuntimeError("GStreamer backend unavailable")
-
-        # 原生 appsink 是主要路径；缺少 gi 或管道启动失败时使用旧实现。
         try:
             return self._open_native(device)
         except Exception as native_error:
@@ -87,7 +70,7 @@ class GStreamerBackend(CameraBackend):
             print(f"原生 GStreamer appsink 不可用，回退到 OpenCV: {native_error}")
             return self._open_opencv(device)
 
-    def _pipeline_descriptions(self, device: str) -> Tuple[str, ...]:
+    def _pipeline_descriptions(self, device):
         width = self.config.width
         height = self.config.height
         fps = int(self.config.requested_fps)
@@ -101,7 +84,7 @@ class GStreamerBackend(CameraBackend):
                 "nvv4l2decoder mjpeg=1 ! "
             )
             return (
-                # Jetson 的 nvvidconv 通常先稳定输出 BGRx；读取后再去掉 X 通道。
+                # Jetson 上 nvvidconv 输出 BGRx，读的时候再去掉 X 通道
                 source + f"nvvidconv ! video/x-raw,format=BGRx ! {sink}",
                 f"v4l2src device={device} io-mode=2 ! "
                 f"image/jpeg,width={width},height={height},framerate={fps}/1 ! "
@@ -116,9 +99,8 @@ class GStreamerBackend(CameraBackend):
             )
         raise ValueError(f"GStreamer 不支持输入格式: {self.config.pixel_format}")
 
-    def _hardware_preview_description(self, device: str) -> Optional[str]:
-        """构建同时供 GPU 显示和 Python 检测读取的 Jetson 管道。"""
-
+    def _hardware_preview_description(self, device):
+        """解码后 tee 一路给硬件显示，一路给 Python 检测。"""
         if self._preview_window_handle is None or self.config.pixel_format.upper() not in {"MJPG", "JPEG"}:
             return None
         width = self.config.width
@@ -137,7 +119,7 @@ class GStreamerBackend(CameraBackend):
             "appsink name=airhockeysink drop=true max-buffers=1 sync=false"
         )
 
-    def _open_native(self, device: str) -> CameraInfo:
+    def _open_native(self, device):
         Gst = self._load_gst()
         errors = []
         preview_description = self._hardware_preview_description(device)
@@ -187,9 +169,9 @@ class GStreamerBackend(CameraBackend):
                     pipeline.set_state(Gst.State.NULL)
         raise RuntimeError("原生 GStreamer 管道无法打开: " + "; ".join(errors))
 
-    def _open_opencv(self, device: str) -> CameraInfo:
+    def _open_opencv(self, device):
         descriptions = self._pipeline_descriptions(device)
-        # OpenCV 需要不带 name 的 appsink，但其余管道保持一致。
+        # OpenCV 的 appsink 不能带 name
         descriptions = tuple(description.replace(" name=airhockeysink", "") for description in descriptions)
         for description in descriptions:
             cap = cv2.VideoCapture(description, cv2.CAP_GSTREAMER)
@@ -205,7 +187,7 @@ class GStreamerBackend(CameraBackend):
             cap.release()
         raise RuntimeError("OpenCV GStreamer 管道无法打开")
 
-    def _set_info(self, device: str, width: int, height: int, fps: float) -> CameraInfo:
+    def _set_info(self, device, width, height, fps) -> CameraInfo:
         info = CameraInfo(
             device=device,
             backend="GStreamer",
@@ -219,7 +201,7 @@ class GStreamerBackend(CameraBackend):
         self.info = info
         return info
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+    def read(self):
         if self._released:
             return False, None
         if self._native:
@@ -227,8 +209,8 @@ class GStreamerBackend(CameraBackend):
         ok, frame = self.pipeline.read()
         return (ok, self._as_bgr(frame)) if ok and frame is not None else (False, None)
 
-    def _read_native(self) -> Tuple[bool, Optional[np.ndarray]]:
-        # try-pull-sample 同时实现阻塞读取和超时，停止时不会永久卡住采集线程。
+    def _read_native(self):
+        # try-pull-sample 自带超时，停止时不会卡死采集线程
         sample = self._appsink.emit("try-pull-sample", self._gst.SECOND // 2)
         if sample is None:
             return False, None
@@ -237,14 +219,14 @@ class GStreamerBackend(CameraBackend):
         if not success:
             return False, None
         try:
-            # 分辨率和通道数在打开管道时已确定，避免每帧查询 caps。
+            # 宽高和通道数在打开管道时缓存，避免每帧查 caps
             width = self._native_width
             height = self._native_height
             channels = self._native_channels
             expected_size = width * height * channels
             if len(mapped.data) < expected_size:
                 raise RuntimeError("GStreamer BGR 缓冲区大小不足")
-            # map 的内存只在 map/unmap 期间有效，所以必须复制给 NumPy。
+            # map 出来的内存在 unmap 前有效，必须复制成 NumPy 数组
             frame = np.frombuffer(mapped.data, dtype=np.uint8, count=expected_size)
             frame = frame.reshape((height, width, channels))
             if channels == 4:
@@ -254,7 +236,7 @@ class GStreamerBackend(CameraBackend):
             buffer.unmap(mapped)
 
     @staticmethod
-    def _as_bgr(frame: np.ndarray) -> np.ndarray:
+    def _as_bgr(frame):
         if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] not in {3, 4}:
             raise RuntimeError("GStreamer backend must output BGR uint8 HxWx3")
         if frame.shape[2] == 4:

@@ -1,13 +1,8 @@
-"""鼠标对战电脑的虚拟空气冰球。
+"""鼠标对战电脑的虚拟空气冰球，只用 tkinter。
 
-运行方式：
-    python air_hockey.py
-
-只使用 Python 标准库 tkinter，不需要安装第三方依赖。
-玩家按住鼠标左键控制下方蓝色球槌，电脑控制上方红色球槌。
+运行：python air_hockey.py
+玩家按住左键控制下方蓝色球槌，电脑控制上方红色球槌。
 """
-
-from __future__ import annotations
 
 import math
 import os
@@ -33,7 +28,7 @@ class AirHockeyGame:
         self.root = root
         self.ai_controller = AirHockeyAI()
         self.closed = False
-        self.game_loop_id: str | None = None
+        self.game_loop_id = None
         self.player_score = self.ai_score = 0
         self.running = False
         self.started = False
@@ -46,8 +41,8 @@ class AirHockeyGame:
         self.status_header_var = tk.StringVar(value=initial_message)
         self.last_rendered_status = initial_message
         self.difficulty = DIFFICULTIES["普通"]
-        self.prediction_cache: list[tuple[float, float]] = []
-        self.prediction_display_points: list[tuple[float, float]] = []
+        self.prediction_cache = []
+        self.prediction_display_points = []
         self.prediction_cache_age = PREDICTION_REFRESH_INTERVAL
         self.prediction_cache_origin = (RINK_CENTER_X, RINK_CENTER_Y)
         self.prediction_cache_velocity = (0.0, 0.0, 0.0, 0.0)
@@ -157,11 +152,11 @@ class AirHockeyGame:
         self.root.bind("2", lambda _event: self._set_difficulty("普通"))
         self.root.bind("3", lambda _event: self._set_difficulty("困难"))
 
-    def _update_mouse_target(self, event: tk.Event) -> None:
+    def _update_mouse_target(self, event) -> None:
         self.mouse_target_x = float(event.x)
         self.mouse_target_y = float(event.y)
 
-    def _mouse_pressed(self, event: tk.Event) -> None:
+    def _mouse_pressed(self, event) -> None:
         self._update_mouse_target(event)
         self.mouse_button_down = True
         self._sync_player_mouse_control()
@@ -182,17 +177,17 @@ class AirHockeyGame:
         else:
             self._stop_player_control()
 
-    def _mouse_released(self, _event: tk.Event) -> None:
+    def _mouse_released(self, _event) -> None:
         self.mouse_button_down = False
         self._sync_player_mouse_control()
 
-    def _space_pressed(self, event: tk.Event) -> str | None:
+    def _space_pressed(self, event):
         if event.widget.winfo_class() in {"Button", "TButton", "Radiobutton", "TRadiobutton"}:
             return None
         self.toggle_pause()
         return "break"
 
-    def read_player_target(self) -> tuple[float, float]:
+    def read_player_target(self):
         return self.mouse_target_x, self.mouse_target_y
 
     def toggle_pause(self) -> None:
@@ -228,10 +223,10 @@ class AirHockeyGame:
         self._difficulty_changed()
 
     @staticmethod
-    def _serve_instruction(server: str) -> str:
+    def _serve_instruction(server):
         return "玩家开球：按住左键，用球槌击球" if server == "player" else "电脑开球"
 
-    def _reset_round(self, message: str, server: str) -> None:
+    def _reset_round(self, message, server) -> None:
         previous_player_position = (self.player_x, self.player_y) if self.running and self.mouse_button_down else None
         previous_mouse_target = (self.mouse_target_x, self.mouse_target_y) if self.mouse_button_down else None
         self.mouse_control_active = False
@@ -301,7 +296,7 @@ class AirHockeyGame:
         self._render()
         self._schedule_game_loop()
 
-    def _move_player(self, dt: float) -> None:
+    def _move_player(self, dt) -> None:
         if not self.mouse_control_active:
             self.player_vx = self.player_vy = 0.0
             self.player_x, self.player_y, self.player_vx, self.player_vy = self._resolve_mallet_goal_posts(self.player_x, self.player_y, self.player_vx, self.player_vy)
@@ -317,7 +312,7 @@ class AirHockeyGame:
         self.player_x, self.player_y, self.player_vx, self.player_vy = self._resolve_mallet_goal_posts(self.player_x, self.player_y, self.player_vx, self.player_vy)
         self.player_x, self.player_y, self.player_vx, self.player_vy = self._keep_mallet_clear_of_outer_corners(self.player_x, self.player_y, self.player_vx, self.player_vy)
 
-    def _move_ai(self, dt: float) -> None:
+    def _move_ai(self, dt) -> None:
         difficulty = self.difficulty
         self._apply_ai_decision(self.ai_controller.update(self._game_state(), dt))
         ai_min_y = RINK_TOP + MALLET_RADIUS
@@ -331,7 +326,7 @@ class AirHockeyGame:
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._keep_mallet_clear_of_outer_corners(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
         self.ai_serve_phase = self.ai_controller.advance_serve_phase(self._game_state(), dt)
 
-    def _game_state(self) -> GameState:
+    def _game_state(self):
         puck_velocity_x, puck_velocity_y = self.puck.collision_velocity()
         return GameState(
             ai_x=self.ai_x,
@@ -353,15 +348,14 @@ class AirHockeyGame:
             difficulty=self.difficulty,
         )
 
-    def _apply_ai_decision(self, decision: AIDecision) -> None:
-        """控制器应用 AI 返回的目标；AI 本身不写入游戏状态。"""
+    def _apply_ai_decision(self, decision) -> None:
         self.ai_target_x = decision.target_x
         self.ai_target_y = decision.target_y
         self.ai_stalled_puck_phase = decision.stalled_puck_phase
         self.ai_reaction_timer = decision.reaction_timer
 
     @staticmethod
-    def _resolve_mallet_goal_posts(mallet_x: float, mallet_y: float, mallet_vx: float, mallet_vy: float) -> tuple[float, float, float, float]:
+    def _resolve_mallet_goal_posts(mallet_x, mallet_y, mallet_vx, mallet_vy):
         minimum_distance = MALLET_RADIUS + GOAL_POST_RADIUS
         for post_x, post_y in GOAL_POSTS:
             contact = circle_post_contact(mallet_x, mallet_y, post_x, post_y, minimum_distance)
@@ -378,7 +372,7 @@ class AirHockeyGame:
         return mallet_x, mallet_y, mallet_vx, mallet_vy
 
     @staticmethod
-    def _keep_mallet_clear_of_outer_corners(mallet_x: float, mallet_y: float, mallet_vx: float, mallet_vy: float) -> tuple[float, float, float, float]:
+    def _keep_mallet_clear_of_outer_corners(mallet_x, mallet_y, mallet_vx, mallet_vy):
         puck_x_values = (RINK_LEFT + PUCK_RADIUS, RINK_RIGHT - PUCK_RADIUS)
         puck_y_values = (RINK_TOP + PUCK_RADIUS, RINK_BOTTOM - PUCK_RADIUS)
         minimum_distance = MALLET_RADIUS + PUCK_RADIUS
@@ -403,7 +397,7 @@ class AirHockeyGame:
         return mallet_x, mallet_y, mallet_vx, mallet_vy
 
     @staticmethod
-    def _move_towards(x: float, y: float, target_x: float, target_y: float, max_speed: float, dt: float) -> tuple[float, float, float, float]:
+    def _move_towards(x, y, target_x, target_y, max_speed, dt):
         dx = target_x - x
         dy = target_y - y
         distance = math.hypot(dx, dy)
@@ -416,7 +410,7 @@ class AirHockeyGame:
         new_y = y + dy / distance * travel
         return new_x, new_y, (new_x - x) / dt, (new_y - y) / dt
 
-    def _move_puck(self, dt: float, player_previous: tuple[float, float], ai_previous: tuple[float, float]) -> bool:
+    def _move_puck(self, dt, player_previous, ai_previous) -> bool:
         puck = self.puck
         puck_previous = (puck.x, puck.y)
         puck.x += puck.vx * dt
@@ -426,7 +420,7 @@ class AirHockeyGame:
         self._swept_collide_with_mallet(puck_previous, player_previous, self.player_x, self.player_y, self.player_vx * PLAYER_IMPACT_SPEED_SCALE, self.player_vy * PLAYER_IMPACT_SPEED_SCALE)
         self._collide_with_mallet(self.player_x, self.player_y, self.player_vx * PLAYER_IMPACT_SPEED_SCALE, self.player_vy * PLAYER_IMPACT_SPEED_SCALE)
 
-        # 防守策略只影响 AI 的移动目标，不能跳过真实的球槌碰撞。
+        # 防守只改 AI 的移动目标，碰撞照常算
         self._swept_collide_with_mallet(puck_previous, ai_previous, self.ai_x, self.ai_y, self.ai_vx * AI_IMPACT_SPEED_SCALE, self.ai_vy * AI_IMPACT_SPEED_SCALE)
         self._collide_with_mallet(self.ai_x, self.ai_y, self.ai_vx * AI_IMPACT_SPEED_SCALE, self.ai_vy * AI_IMPACT_SPEED_SCALE)
 
@@ -442,8 +436,8 @@ class AirHockeyGame:
             self.awaiting_serve = False
         return False
 
-    def _swept_collide_with_mallet(self, puck_previous: tuple[float, float], mallet_previous: tuple[float, float], mallet_x: float, mallet_y: float, mallet_vx: float, mallet_vy: float) -> None:
-        """检测本物理步内的相对运动，避免高速球槌和冰球彼此穿过。"""
+    def _swept_collide_with_mallet(self, puck_previous, mallet_previous, mallet_x, mallet_y, mallet_vx, mallet_vy) -> None:
+        # 相对运动检测，防止高速时球槌和冰球互相穿过
         puck = self.puck
         start_x = puck_previous[0] - mallet_previous[0]
         start_y = puck_previous[1] - mallet_previous[1]
@@ -451,7 +445,7 @@ class AirHockeyGame:
         minimum_distance_sq = minimum_distance * minimum_distance
         end_x = puck.x - mallet_x
         end_y = puck.y - mallet_y
-        # 已接触的情况由普通碰撞处理；这里仅补足中途穿过而帧末未重叠的情况。
+        # 只处理帧内穿过但帧末没重叠的情况，接触态交给普通碰撞
         if start_x * start_x + start_y * start_y <= minimum_distance_sq or end_x * end_x + end_y * end_y <= minimum_distance_sq:
             return
         delta_x = (puck.x - puck_previous[0]) - (mallet_x - mallet_previous[0])
@@ -492,7 +486,7 @@ class AirHockeyGame:
         return True
 
     @staticmethod
-    def _fallback_mallet_contact_normal(x: float, y: float) -> tuple[float, float]:
+    def _fallback_mallet_contact_normal(x, y):
         candidates = ((1.0, 0.0, RINK_RIGHT - PUCK_RADIUS - x), (-1.0, 0.0, x - RINK_LEFT - PUCK_RADIUS))
         if puck_inside_goal_mouth(x):
             if y <= RINK_CENTER_Y:
@@ -504,7 +498,7 @@ class AirHockeyGame:
         nx, ny, _ = max(candidates, key=lambda candidate: candidate[2])
         return nx, ny
 
-    def _collide_with_mallet(self, mallet_x: float, mallet_y: float, mallet_vx: float, mallet_vy: float) -> None:
+    def _collide_with_mallet(self, mallet_x, mallet_y, mallet_vx, mallet_vy) -> None:
         puck = self.puck
         dx = puck.x - mallet_x
         dy = puck.y - mallet_y
@@ -611,7 +605,7 @@ class AirHockeyGame:
             self.canvas.itemconfigure(self.prediction_line_item, state="normal")
             self.prediction_line_visible = True
 
-    def _calculate_predicted_trajectory(self) -> list[tuple[float, float]]:
+    def _calculate_predicted_trajectory(self):
         motion = replace(self.puck)
         current_speed = math.hypot(motion.vx, motion.vy)
         target_speed = math.hypot(motion.target_vx, motion.target_vy)
@@ -619,7 +613,7 @@ class AirHockeyGame:
             return []
         sample_elapsed = 0.0
         bend_count = 0
-        first_bend_index: int | None = None
+        first_bend_index = None
         predicted_points: list[tuple[float, float]] = []
         simulation_steps = 0
         while len(predicted_points) < PREDICTION_POINT_COUNT and simulation_steps < PREDICTION_MAX_SIMULATION_STEPS:
@@ -666,7 +660,7 @@ class AirHockeyGame:
             predicted_points.extend([predicted_points[-1]] * (PREDICTION_POINT_COUNT - len(predicted_points)))
         return predicted_points
 
-    def _position_circle(self, item: int, x: float, y: float, radius: float) -> None:
+    def _position_circle(self, item, x, y, radius) -> None:
         self.canvas.coords(item, x - radius, y - radius, x + radius, y + radius)
 
     def _close(self) -> None:
@@ -686,7 +680,7 @@ class AirHockeyGame:
             pass
 
 
-def main() -> None:
+def main():
     if not os.environ.get("DISPLAY") and os.path.exists("/tmp/.X11-unix/X0"):
         os.environ["DISPLAY"] = ":0"
         xauthority = "/run/user/1000/gdm/Xauthority"

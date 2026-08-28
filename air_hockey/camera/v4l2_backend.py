@@ -1,22 +1,18 @@
-"""OpenCV V4L2 camera backend."""
+"""OpenCV V4L2 摄像头后端。"""
 
-from __future__ import annotations
-
-from typing import Optional, Tuple
 import cv2
 import numpy as np
+
 from .backend import CameraBackend
-from .types import CameraConfig, CameraInfo
+from .types import CameraInfo
 
 SUPPORTED_FOURCC = frozenset({"MJPG", "YUYV", "YUY2"})
 
 
 class V4L2Backend(CameraBackend):
-    """通过 OpenCV 的 V4L2 接口直接访问 Linux 摄像头设备。"""
-
-    def __init__(self, config: CameraConfig) -> None:
+    def __init__(self, config) -> None:
         super().__init__(config)
-        self.capture: Optional[cv2.VideoCapture] = None
+        self.capture = None
 
     def open(self, device: str) -> CameraInfo:
         c = self.config
@@ -32,7 +28,7 @@ class V4L2Backend(CameraBackend):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, c.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c.height)
         cap.set(cv2.CAP_PROP_FPS, c.requested_fps)
-        # 缓冲区只保留一帧，降低高帧率采集时的延迟。
+        # 缓冲区只留一帧，降低延迟
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.capture = cap
         self.info = CameraInfo(
@@ -47,7 +43,7 @@ class V4L2Backend(CameraBackend):
         )
         return self.info
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+    def read(self):
         if self.capture is None:
             return False, None
         ok, frame = self.capture.read()
@@ -56,7 +52,7 @@ class V4L2Backend(CameraBackend):
         return True, self._as_bgr(frame)
 
     @staticmethod
-    def _as_bgr(frame: np.ndarray) -> np.ndarray:
+    def _as_bgr(frame):
         if frame.dtype != np.uint8:
             raise RuntimeError("V4L2 backend returned a non-uint8 frame")
         if frame.ndim != 3:
@@ -64,7 +60,7 @@ class V4L2Backend(CameraBackend):
         if frame.shape[2] == 3:
             return frame
         if frame.shape[2] == 4:
-            # 某些驱动会附带 alpha 通道，统一转换为三通道 BGR。
+            # 有的驱动会多给一个 alpha 通道
             return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
         raise RuntimeError("V4L2 backend returned an unsupported channel count")
 
