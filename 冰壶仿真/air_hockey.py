@@ -235,8 +235,7 @@ class AirHockeyGame:
         previous_player_position = (self.player_x, self.player_y) if self.running and self.mouse_button_down else None
         previous_mouse_target = (self.mouse_target_x, self.mouse_target_y) if self.mouse_button_down else None
         self.mouse_control_active = False
-        if hasattr(self, "canvas"):
-            self.canvas.configure(cursor="arrow")
+        self.canvas.configure(cursor="arrow")
         self.current_server = server
         if previous_player_position is None:
             self.player_x = RINK_CENTER_X

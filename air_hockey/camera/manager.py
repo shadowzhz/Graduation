@@ -27,8 +27,6 @@ class CameraManager:
         self._thread: Optional[threading.Thread] = None; self._stop = threading.Event(); self._ready = threading.Event()
         self._lock = threading.RLock(); self._running = False
     @property
-    def running(self) -> bool: return self.is_running()
-    @property
     def info(self) -> Optional[CameraInfo]: return self._info
     @property
     def capture_device(self) -> Optional[str]: return self._info.device if self._info else None
@@ -102,4 +100,3 @@ class CameraManager:
         if backend is not None: backend.release()
         if thread is not None and thread.is_alive() and thread is not threading.current_thread(): thread.join(1.0)
         self.frame_buffer.clear()
-    release = stop

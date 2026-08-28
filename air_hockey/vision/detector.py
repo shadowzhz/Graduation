@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from math import inf, pi
 from typing import Optional, Sequence, Tuple, Union
 
@@ -87,15 +88,7 @@ class StoneDetector:
                 circularity=float(circularity),
             )
             score = self._score_candidate(detection)
-            candidates.append((score, Detection(
-                center_x=detection.center_x,
-                center_y=detection.center_y,
-                radius=detection.radius,
-                area=detection.area,
-                timestamp=detection.timestamp,
-                circularity=detection.circularity,
-                score=score,
-            )))
+            candidates.append((score, replace(detection, score=score)))
         if not candidates:
             return None
         # 先比较综合评分，评分相同时优先保留面积更大的候选。
