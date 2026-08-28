@@ -1,4 +1,4 @@
-from game_state import GameState, PuckState, StoneState, TrackingState
+from game_state import GameState, StoneState, TrackingState
 from vision.types import Track, TrackState
 
 
@@ -28,14 +28,16 @@ def test_lost_track_maps_to_lost():
     assert stone.tracking_state == TrackingState.LOST
 
 
-def test_puck_state_from_stone():
-    puck = PuckState.from_stone(StoneState.from_tracker(make_track()))
-    assert (puck.x, puck.y, puck.vx, puck.vy) == (10.0, 20.0, 1.5, -2.5)
+def test_sim_can_build_stone_state_without_tracking_info():
+    # 仿真侧自己构造冰壶状态，tracking 字段用默认值
+    stone = StoneState(x=1.0, y=2.0, vx=3.0, vy=4.0)
+    assert stone.tracking_state == TrackingState.UNKNOWN
+    assert (stone.x, stone.y, stone.vx, stone.vy) == (1.0, 2.0, 3.0, 4.0)
 
 
 def test_from_vision_fills_neutral_ai_fields():
     state = GameState.from_vision(StoneState.from_tracker(make_track()))
     assert state.current_server == "none"
     assert state.difficulty is None
-    assert state.puck.x == 10.0
+    assert state.stone.x == 10.0
     assert state.stone.tracking_state == TrackingState.ACTIVE

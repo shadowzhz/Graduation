@@ -1,4 +1,4 @@
-"""鼠标对战电脑的虚拟空气冰球，只用 tkinter。
+"""鼠标对战电脑的虚拟空气冰壶，只用 tkinter。
 
 运行：python air_hockey.py
 玩家按住左键控制下方蓝色球槌，电脑控制上方红色球槌。
@@ -18,13 +18,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from air_hockey_config import *
 from air_hockey_ai import AIDecision, AirHockeyAI
 from air_hockey_physics import (
-    PuckMotion,
+    StoneMotion,
     circle_post_contact,
     clamp,
     goal_scorer,
-    puck_inside_goal_mouth,
+    stone_inside_goal_mouth,
 )
-from game_state import GameState, PuckState
+from game_state import GameState, StoneState, TrackingState
 
 
 class AirHockeyGame:
@@ -73,7 +73,7 @@ class AirHockeyGame:
             self.closed = True
 
     def _configure_window(self) -> None:
-        self.root.title("虚拟空气冰球")
+        self.root.title("虚拟空气冰壶")
         self.root.configure(bg="#0b2239")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -91,7 +91,7 @@ class AirHockeyGame:
         title_row.pack(fill="x")
         title_box = tk.Frame(title_row, bg="#0b2239")
         title_box.pack(side="left")
-        tk.Label(title_box, text="虚拟空气冰球", bg="#0b2239", fg="#ffffff", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
+        tk.Label(title_box, text="虚拟空气冰壶", bg="#0b2239", fg="#ffffff", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
         tk.Label(title_box, text="红方电脑在上 · 蓝方玩家在下", bg="#0b2239", fg="#9fc6df", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(2, 0))
         tk.Label(title_box, textvariable=self.status_header_var, bg="#0b2239", fg="#f5cf70", font=("Microsoft YaHei UI", 9, "bold"), anchor="w", wraplength=max(240, int(CANVAS_WIDTH * 0.58))).pack(anchor="w", pady=(2, 0))
         score_box = tk.Frame(title_row, bg="#0b2239")
@@ -141,7 +141,7 @@ class AirHockeyGame:
         self.prediction_line_item = c.create_line(0, 0, 0, 0, fill=PREDICTION_COLOR, width=max(2, round(3.2 * scale)), capstyle=tk.BUTT, joinstyle=tk.ROUND, state="hidden")
         self.player_item = c.create_oval(0, 0, 0, 0, fill="#118fc5", outline="#075e83", width=4)
         self.ai_item = c.create_oval(0, 0, 0, 0, fill="#eb4f5d", outline="#9f2633", width=4)
-        self.puck_item = c.create_oval(0, 0, 0, 0, fill="#172b3b", outline="#07121b", width=3)
+        self.stone_item = c.create_oval(0, 0, 0, 0, fill="#172b3b", outline="#07121b", width=3)
         self.player_glint = c.create_oval(0, 0, 0, 0, fill="#76d1ee", outline="")
         self.ai_glint = c.create_oval(0, 0, 0, 0, fill="#ff9ca5", outline="")
 
@@ -242,7 +242,7 @@ class AirHockeyGame:
         else:
             player_min_y = RINK_CENTER_Y + MALLET_RADIUS
             if server == "ai":
-                player_min_y += PUCK_RADIUS + 8 * UI_SCALE
+                player_min_y += STONE_RADIUS + 8 * UI_SCALE
             self.player_x = clamp(previous_player_position[0], RINK_LEFT + MALLET_RADIUS, RINK_RIGHT - MALLET_RADIUS)
             self.player_y = clamp(previous_player_position[1], player_min_y, RINK_BOTTOM - MALLET_RADIUS)
         self.player_vx = self.player_vy = 0.0
@@ -258,8 +258,8 @@ class AirHockeyGame:
         self.ai_target_y = self.ai_home_y
         self.ai_reaction_timer = 0.0
         self.ai_serve_phase = "positioning" if server == "ai" else "idle"
-        self.ai_stalled_puck_phase = "idle"
-        self.puck = PuckMotion(x=RINK_CENTER_X, y=RINK_CENTER_Y)
+        self.ai_stalled_stone_phase = "idle"
+        self.stone = StoneMotion(x=RINK_CENTER_X, y=RINK_CENTER_Y)
         self.awaiting_serve = True
         self.round_message = message
         self.status_text = message
@@ -293,7 +293,7 @@ class AirHockeyGame:
                 ai_previous = (self.ai_x, self.ai_y)
                 self._move_player(step_time)
                 self._move_ai(step_time)
-                if self._move_puck(step_time, player_previous, ai_previous):
+                if self._move_stone(step_time, player_previous, ai_previous):
                     break
         if self.closed:
             return
@@ -310,7 +310,7 @@ class AirHockeyGame:
         target_x = clamp(target_x, RINK_LEFT + MALLET_RADIUS, RINK_RIGHT - MALLET_RADIUS)
         player_min_y = RINK_CENTER_Y + MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "ai":
-            player_min_y = RINK_CENTER_Y + MALLET_RADIUS + PUCK_RADIUS + 8 * UI_SCALE
+            player_min_y = RINK_CENTER_Y + MALLET_RADIUS + STONE_RADIUS + 8 * UI_SCALE
         target_y = clamp(target_y, player_min_y, RINK_BOTTOM - MALLET_RADIUS)
         self.player_x, self.player_y, self.player_vx, self.player_vy = self._move_towards(self.player_x, self.player_y, target_x, target_y, PLAYER_MAX_SPEED, dt)
         self.player_x, self.player_y, self.player_vx, self.player_vy = self._resolve_mallet_goal_posts(self.player_x, self.player_y, self.player_vx, self.player_vy)
@@ -322,7 +322,7 @@ class AirHockeyGame:
         ai_min_y = RINK_TOP + MALLET_RADIUS
         ai_max_y = RINK_CENTER_Y - MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "player":
-            ai_max_y = RINK_CENTER_Y - MALLET_RADIUS - PUCK_RADIUS - 8 * UI_SCALE
+            ai_max_y = RINK_CENTER_Y - MALLET_RADIUS - STONE_RADIUS - 8 * UI_SCALE
             self.ai_y = min(self.ai_y, ai_max_y)
         self.ai_target_y = clamp(self.ai_target_y, ai_min_y, ai_max_y)
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._move_towards(self.ai_x, self.ai_y, self.ai_target_x, self.ai_target_y, difficulty.ai_speed, dt)
@@ -331,23 +331,24 @@ class AirHockeyGame:
         self.ai_serve_phase = self.ai_controller.advance_serve_phase(self._game_state(), dt)
 
     def _game_state(self):
-        puck_velocity_x, puck_velocity_y = self.puck.collision_velocity()
+        stone_velocity_x, stone_velocity_y = self.stone.collision_velocity()
         return GameState(
             ai_x=self.ai_x,
             ai_y=self.ai_y,
             ai_home_y=self.ai_home_y,
             target_x=self.ai_target_x,
             target_y=self.ai_target_y,
-            puck=PuckState(
-                x=self.puck.x,
-                y=self.puck.y,
-                vx=puck_velocity_x,
-                vy=puck_velocity_y,
+            stone=StoneState(
+                x=self.stone.x,
+                y=self.stone.y,
+                vx=stone_velocity_x,
+                vy=stone_velocity_y,
+                tracking_state=TrackingState.ACTIVE,
             ),
             awaiting_serve=self.awaiting_serve,
             current_server=self.current_server,
             serve_phase=self.ai_serve_phase,
-            stalled_puck_phase=self.ai_stalled_puck_phase,
+            stalled_stone_phase=self.ai_stalled_stone_phase,
             reaction_timer=self.ai_reaction_timer,
             difficulty=self.difficulty,
         )
@@ -355,7 +356,7 @@ class AirHockeyGame:
     def _apply_ai_decision(self, decision) -> None:
         self.ai_target_x = decision.target_x
         self.ai_target_y = decision.target_y
-        self.ai_stalled_puck_phase = decision.stalled_puck_phase
+        self.ai_stalled_stone_phase = decision.stalled_stone_phase
         self.ai_reaction_timer = decision.reaction_timer
 
     @staticmethod
@@ -377,11 +378,11 @@ class AirHockeyGame:
 
     @staticmethod
     def _keep_mallet_clear_of_outer_corners(mallet_x, mallet_y, mallet_vx, mallet_vy):
-        puck_x_values = (RINK_LEFT + PUCK_RADIUS, RINK_RIGHT - PUCK_RADIUS)
-        puck_y_values = (RINK_TOP + PUCK_RADIUS, RINK_BOTTOM - PUCK_RADIUS)
-        minimum_distance = MALLET_RADIUS + PUCK_RADIUS
-        for corner_x in puck_x_values:
-            for corner_y in puck_y_values:
+        stone_x_values = (RINK_LEFT + STONE_RADIUS, RINK_RIGHT - STONE_RADIUS)
+        stone_y_values = (RINK_TOP + STONE_RADIUS, RINK_BOTTOM - STONE_RADIUS)
+        minimum_distance = MALLET_RADIUS + STONE_RADIUS
+        for corner_x in stone_x_values:
+            for corner_y in stone_y_values:
                 dx = mallet_x - corner_x
                 dy = mallet_y - corner_y
                 distance_sq = dx * dx + dy * dy
@@ -414,46 +415,46 @@ class AirHockeyGame:
         new_y = y + dy / distance * travel
         return new_x, new_y, (new_x - x) / dt, (new_y - y) / dt
 
-    def _move_puck(self, dt, player_previous, ai_previous) -> bool:
-        puck = self.puck
-        puck_previous = (puck.x, puck.y)
-        puck.x += puck.vx * dt
-        puck.y += puck.vy * dt
-        puck.resolve_walls()
-        puck.resolve_goal_posts()
-        self._swept_collide_with_mallet(puck_previous, player_previous, self.player_x, self.player_y, self.player_vx * PLAYER_IMPACT_SPEED_SCALE, self.player_vy * PLAYER_IMPACT_SPEED_SCALE)
+    def _move_stone(self, dt, player_previous, ai_previous) -> bool:
+        stone = self.stone
+        stone_previous = (stone.x, stone.y)
+        stone.x += stone.vx * dt
+        stone.y += stone.vy * dt
+        stone.resolve_walls()
+        stone.resolve_goal_posts()
+        self._swept_collide_with_mallet(stone_previous, player_previous, self.player_x, self.player_y, self.player_vx * PLAYER_IMPACT_SPEED_SCALE, self.player_vy * PLAYER_IMPACT_SPEED_SCALE)
         self._collide_with_mallet(self.player_x, self.player_y, self.player_vx * PLAYER_IMPACT_SPEED_SCALE, self.player_vy * PLAYER_IMPACT_SPEED_SCALE)
 
         # 防守只改 AI 的移动目标，碰撞照常算
-        self._swept_collide_with_mallet(puck_previous, ai_previous, self.ai_x, self.ai_y, self.ai_vx * AI_IMPACT_SPEED_SCALE, self.ai_vy * AI_IMPACT_SPEED_SCALE)
+        self._swept_collide_with_mallet(stone_previous, ai_previous, self.ai_x, self.ai_y, self.ai_vx * AI_IMPACT_SPEED_SCALE, self.ai_vy * AI_IMPACT_SPEED_SCALE)
         self._collide_with_mallet(self.ai_x, self.ai_y, self.ai_vx * AI_IMPACT_SPEED_SCALE, self.ai_vy * AI_IMPACT_SPEED_SCALE)
 
-        puck.resolve_walls()
-        puck.resolve_goal_posts()
+        stone.resolve_walls()
+        stone.resolve_goal_posts()
         if self._check_goal():
             return True
-        puck.advance_velocity(dt)
-        moving_speed = math.hypot(puck.vx, puck.vy)
-        if puck.response_active:
-            moving_speed = max(moving_speed, math.hypot(puck.target_vx, puck.target_vy))
-        if self.awaiting_serve and moving_speed > PUCK_STOP_SPEED:
+        stone.advance_velocity(dt)
+        moving_speed = math.hypot(stone.vx, stone.vy)
+        if stone.response_active:
+            moving_speed = max(moving_speed, math.hypot(stone.target_vx, stone.target_vy))
+        if self.awaiting_serve and moving_speed > STONE_STOP_SPEED:
             self.awaiting_serve = False
         return False
 
-    def _swept_collide_with_mallet(self, puck_previous, mallet_previous, mallet_x, mallet_y, mallet_vx, mallet_vy) -> None:
-        # 相对运动检测，防止高速时球槌和冰球互相穿过
-        puck = self.puck
-        start_x = puck_previous[0] - mallet_previous[0]
-        start_y = puck_previous[1] - mallet_previous[1]
-        minimum_distance = PUCK_RADIUS + MALLET_RADIUS
+    def _swept_collide_with_mallet(self, stone_previous, mallet_previous, mallet_x, mallet_y, mallet_vx, mallet_vy) -> None:
+        # 相对运动检测，防止高速时球槌和冰壶互相穿过
+        stone = self.stone
+        start_x = stone_previous[0] - mallet_previous[0]
+        start_y = stone_previous[1] - mallet_previous[1]
+        minimum_distance = STONE_RADIUS + MALLET_RADIUS
         minimum_distance_sq = minimum_distance * minimum_distance
-        end_x = puck.x - mallet_x
-        end_y = puck.y - mallet_y
+        end_x = stone.x - mallet_x
+        end_y = stone.y - mallet_y
         # 只处理帧内穿过但帧末没重叠的情况，接触态交给普通碰撞
         if start_x * start_x + start_y * start_y <= minimum_distance_sq or end_x * end_x + end_y * end_y <= minimum_distance_sq:
             return
-        delta_x = (puck.x - puck_previous[0]) - (mallet_x - mallet_previous[0])
-        delta_y = (puck.y - puck_previous[1]) - (mallet_y - mallet_previous[1])
+        delta_x = (stone.x - stone_previous[0]) - (mallet_x - mallet_previous[0])
+        delta_y = (stone.y - stone_previous[1]) - (mallet_y - mallet_previous[1])
         delta_length_sq = delta_x * delta_x + delta_y * delta_y
         if delta_length_sq <= COLLISION_EPSILON:
             return
@@ -465,17 +466,17 @@ class AirHockeyGame:
             return
         distance = math.sqrt(distance_sq)
         if distance <= COLLISION_EPSILON:
-            nx, ny = self._fallback_mallet_contact_normal(puck.x, puck.y)
+            nx, ny = self._fallback_mallet_contact_normal(stone.x, stone.y)
         else:
             nx, ny = relative_x / distance, relative_y / distance
         impact_mallet_x = mallet_previous[0] + (mallet_x - mallet_previous[0]) * impact_time
         impact_mallet_y = mallet_previous[1] + (mallet_y - mallet_previous[1]) * impact_time
-        puck.x = impact_mallet_x + nx * (minimum_distance - 1e-6)
-        puck.y = impact_mallet_y + ny * (minimum_distance - 1e-6)
+        stone.x = impact_mallet_x + nx * (minimum_distance - 1e-6)
+        stone.y = impact_mallet_y + ny * (minimum_distance - 1e-6)
         self._collide_with_mallet(impact_mallet_x, impact_mallet_y, mallet_vx, mallet_vy)
 
     def _check_goal(self) -> bool:
-        scorer = goal_scorer(self.puck)
+        scorer = goal_scorer(self.stone)
         if scorer is None:
             return False
         if scorer == "player":
@@ -491,26 +492,26 @@ class AirHockeyGame:
 
     @staticmethod
     def _fallback_mallet_contact_normal(x, y):
-        candidates = ((1.0, 0.0, RINK_RIGHT - PUCK_RADIUS - x), (-1.0, 0.0, x - RINK_LEFT - PUCK_RADIUS))
-        if puck_inside_goal_mouth(x):
+        candidates = ((1.0, 0.0, RINK_RIGHT - STONE_RADIUS - x), (-1.0, 0.0, x - RINK_LEFT - STONE_RADIUS))
+        if stone_inside_goal_mouth(x):
             if y <= RINK_CENTER_Y:
-                candidates += ((0.0, 1.0, RINK_BOTTOM - PUCK_RADIUS - y),)
+                candidates += ((0.0, 1.0, RINK_BOTTOM - STONE_RADIUS - y),)
             else:
-                candidates += ((0.0, -1.0, y - RINK_TOP - PUCK_RADIUS),)
+                candidates += ((0.0, -1.0, y - RINK_TOP - STONE_RADIUS),)
         else:
-            candidates += ((0.0, 1.0, RINK_BOTTOM - PUCK_RADIUS - y), (0.0, -1.0, y - RINK_TOP - PUCK_RADIUS))
+            candidates += ((0.0, 1.0, RINK_BOTTOM - STONE_RADIUS - y), (0.0, -1.0, y - RINK_TOP - STONE_RADIUS))
         nx, ny, _ = max(candidates, key=lambda candidate: candidate[2])
         return nx, ny
 
     def _collide_with_mallet(self, mallet_x, mallet_y, mallet_vx, mallet_vy) -> None:
-        puck = self.puck
-        dx = puck.x - mallet_x
-        dy = puck.y - mallet_y
-        minimum_distance = PUCK_RADIUS + MALLET_RADIUS
+        stone = self.stone
+        dx = stone.x - mallet_x
+        dy = stone.y - mallet_y
+        minimum_distance = STONE_RADIUS + MALLET_RADIUS
         distance_sq = dx * dx + dy * dy
         if distance_sq >= minimum_distance * minimum_distance:
             return
-        collision_vx, collision_vy = puck.collision_velocity()
+        collision_vx, collision_vy = stone.collision_velocity()
         if distance_sq <= COLLISION_EPSILON:
             relative_x = collision_vx - mallet_vx
             relative_y = collision_vy - mallet_vy
@@ -518,23 +519,23 @@ class AirHockeyGame:
             if relative_length > COLLISION_EPSILON:
                 nx, ny = -relative_x / relative_length, -relative_y / relative_length
             else:
-                nx, ny = self._fallback_mallet_contact_normal(puck.x, puck.y)
+                nx, ny = self._fallback_mallet_contact_normal(stone.x, stone.y)
             distance = 0.0
         else:
             distance = math.sqrt(distance_sq)
             nx, ny = dx / distance, dy / distance
         overlap = minimum_distance - distance
-        puck.x += nx * overlap
-        puck.y += ny * overlap
+        stone.x += nx * overlap
+        stone.y += ny * overlap
         relative_normal_speed = (collision_vx - mallet_vx) * nx + (collision_vy - mallet_vy) * ny
         if relative_normal_speed < 0:
             impulse = (1.0 + MALLET_RESTITUTION) * relative_normal_speed
             impact_vx = collision_vx - impulse * nx
             impact_vy = collision_vy - impulse * ny
-            if math.hypot(puck.vx, puck.vy) <= PUCK_STOP_SPEED:
-                puck.set_immediate_velocity(impact_vx, impact_vy)
+            if math.hypot(stone.vx, stone.vy) <= STONE_STOP_SPEED:
+                stone.set_immediate_velocity(impact_vx, impact_vy)
             else:
-                puck.set_target_velocity(impact_vx, impact_vy)
+                stone.set_target_velocity(impact_vx, impact_vy)
 
     def _update_score_text(self) -> None:
         score_text = f"{self.player_score} : {self.ai_score}"
@@ -548,13 +549,13 @@ class AirHockeyGame:
         self.prediction_render_counter += 1
         if self.prediction_render_counter >= 2:
             self.prediction_render_counter = 0
-            self._render_puck_prediction()
-        puck = self.puck
+            self._render_stone_prediction()
+        stone = self.stone
         glint_offset = MALLET_RADIUS * 0.27
         glint_radius = MALLET_RADIUS * 0.2
         self._position_circle(self.player_item, self.player_x, self.player_y, MALLET_RADIUS)
         self._position_circle(self.ai_item, self.ai_x, self.ai_y, MALLET_RADIUS)
-        self._position_circle(self.puck_item, puck.x, puck.y, PUCK_RADIUS)
+        self._position_circle(self.stone_item, stone.x, stone.y, STONE_RADIUS)
         self._position_circle(self.player_glint, self.player_x - glint_offset, self.player_y - glint_offset, glint_radius)
         self._position_circle(self.ai_glint, self.ai_x - glint_offset, self.ai_y - glint_offset, glint_radius)
         if self.running and self.awaiting_serve:
@@ -567,19 +568,19 @@ class AirHockeyGame:
             self.status_header_var.set(self.status_text)
             self.last_rendered_status = self.status_text
 
-    def _render_puck_prediction(self) -> None:
-        puck = self.puck
-        current_velocity = (puck.vx, puck.vy, puck.target_vx, puck.target_vy)
+    def _render_stone_prediction(self) -> None:
+        stone = self.stone
+        current_velocity = (stone.vx, stone.vy, stone.target_vx, stone.target_vy)
         cached_vx, cached_vy, cached_target_vx, cached_target_vy = self.prediction_cache_velocity
-        velocity_delta = math.hypot(puck.vx - cached_vx, puck.vy - cached_vy)
-        target_delta = math.hypot(puck.target_vx - cached_target_vx, puck.target_vy - cached_target_vy)
+        velocity_delta = math.hypot(stone.vx - cached_vx, stone.vy - cached_vy)
+        target_delta = math.hypot(stone.target_vx - cached_target_vx, stone.target_vy - cached_target_vy)
         reference_speed = max(math.hypot(cached_vx, cached_vy), math.hypot(cached_target_vx, cached_target_vy), UI_SCALE)
-        cache_state_changed = puck.response_active != self.prediction_cache_response_active or velocity_delta > max(10.0 * UI_SCALE, reference_speed * 0.25) or target_delta > max(10.0 * UI_SCALE, reference_speed * 0.25)
+        cache_state_changed = stone.response_active != self.prediction_cache_response_active or velocity_delta > max(10.0 * UI_SCALE, reference_speed * 0.25) or target_delta > max(10.0 * UI_SCALE, reference_speed * 0.25)
         if self.prediction_cache_age >= PREDICTION_REFRESH_INTERVAL or cache_state_changed:
             self.prediction_cache = self._calculate_predicted_trajectory()
-            self.prediction_cache_origin = (puck.x, puck.y)
+            self.prediction_cache_origin = (stone.x, stone.y)
             self.prediction_cache_velocity = current_velocity
-            self.prediction_cache_response_active = puck.response_active
+            self.prediction_cache_response_active = stone.response_active
             self.prediction_cache_age = 0.0
         origin_x, origin_y = self.prediction_cache_origin
         target_points = [(point_x - origin_x, point_y - origin_y) for point_x, point_y in self.prediction_cache]
@@ -590,8 +591,8 @@ class AirHockeyGame:
         else:
             blend = PREDICTION_DISPLAY_SMOOTHING
             self.prediction_display_points = [(display_x + (target_x - display_x) * blend, display_y + (target_y - display_y) * blend) for (display_x, display_y), (target_x, target_y) in zip(self.prediction_display_points, target_points)]
-        predicted_points = [(puck.x + point_x, puck.y + point_y) for point_x, point_y in self.prediction_display_points]
-        path_points = [(puck.x, puck.y)]
+        predicted_points = [(stone.x + point_x, stone.y + point_y) for point_x, point_y in self.prediction_display_points]
+        path_points = [(stone.x, stone.y)]
         minimum_render_distance = max(1.5, 2.5 * UI_SCALE)
         for point_x, point_y in predicted_points:
             last_x, last_y = path_points[-1]
@@ -610,10 +611,10 @@ class AirHockeyGame:
             self.prediction_line_visible = True
 
     def _calculate_predicted_trajectory(self):
-        motion = replace(self.puck)
+        motion = replace(self.stone)
         current_speed = math.hypot(motion.vx, motion.vy)
         target_speed = math.hypot(motion.target_vx, motion.target_vy)
-        if self.awaiting_serve or (current_speed <= PUCK_STOP_SPEED and (not motion.response_active or target_speed <= PUCK_STOP_SPEED)):
+        if self.awaiting_serve or (current_speed <= STONE_STOP_SPEED and (not motion.response_active or target_speed <= STONE_STOP_SPEED)):
             return []
         sample_elapsed = 0.0
         bend_count = 0
@@ -637,7 +638,7 @@ class AirHockeyGame:
                 sample_elapsed = 0.0
                 if bend_count > PREDICTION_MAX_BENDS or len(predicted_points) >= PREDICTION_POINT_COUNT:
                     break
-            collision_distance = PUCK_RADIUS + MALLET_RADIUS
+            collision_distance = STONE_RADIUS + MALLET_RADIUS
             if any((motion.x - mallet_x) ** 2 + (motion.y - mallet_y) ** 2 <= collision_distance ** 2 for mallet_x, mallet_y in ((self.player_x, self.player_y), (self.ai_x, self.ai_y))):
                 break
             motion.advance_velocity(PREDICTION_SUBSTEP)

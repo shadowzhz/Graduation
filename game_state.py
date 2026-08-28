@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class TrackingState(str, Enum):
@@ -13,13 +13,17 @@ class TrackingState(str, Enum):
 
 @dataclass
 class StoneState:
-    """视觉层追踪到的冰壶状态。"""
+    """冰壶状态：位置和速度。
+
+    视觉追踪出来的会带 tracking_state、radius、timestamp；
+    仿真侧自己构造时这些字段可以不填。
+    """
 
     x: float
     y: float
     vx: float
     vy: float
-    tracking_state: TrackingState
+    tracking_state: TrackingState = TrackingState.UNKNOWN
     radius: float = 0.0
     timestamp: float = 0.0
 
@@ -42,40 +46,21 @@ class StoneState:
 
 
 @dataclass
-class PuckState:
-    """游戏和 AI 用的运动状态。"""
-
-    x: float
-    y: float
-    vx: float
-    vy: float
-
-    @classmethod
-    def from_stone(cls, stone) -> "PuckState":
-        return cls(x=stone.x, y=stone.y, vx=stone.vx, vy=stone.vy)
-
-
-@dataclass
 class GameState:
-    """AI 决策需要的游戏快照。
-
-    stone 是视觉追踪状态，puck 是游戏坐标系里的运动实体，
-    视觉管线用 PuckState.from_stone 桥接。
-    """
+    """AI 决策需要的游戏快照，stone 是冰壶的运动状态。"""
 
     ai_x: float
     ai_y: float
     ai_home_y: float
     target_x: float
     target_y: float
-    puck: PuckState
+    stone: StoneState
     awaiting_serve: bool
     current_server: str
     serve_phase: str
-    stalled_puck_phase: str
+    stalled_stone_phase: str
     reaction_timer: float
     difficulty: Any
-    stone: Optional[StoneState] = None
 
     @classmethod
     def from_vision(cls, stone) -> "GameState":
@@ -86,12 +71,11 @@ class GameState:
             ai_home_y=0.0,
             target_x=0.0,
             target_y=0.0,
-            puck=PuckState.from_stone(stone),
+            stone=stone,
             awaiting_serve=False,
             current_server="none",
             serve_phase="idle",
-            stalled_puck_phase="idle",
+            stalled_stone_phase="idle",
             reaction_timer=0.0,
             difficulty=None,
-            stone=stone,
         )

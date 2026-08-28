@@ -16,7 +16,7 @@ AI_SERVE_SETUP_GAP = 6.0
 class AIDecision:
     target_x: float
     target_y: float
-    stalled_puck_phase: str
+    stalled_stone_phase: str
     reaction_timer: float = 0.0
 
 
@@ -26,7 +26,7 @@ class AirHockeyAI:
     def __init__(self, friction_deceleration=None) -> None:
         # 冰面摩擦衰减；真机上要按实测值传入，默认用仿真参数
         self.friction_deceleration = (
-            layout.PUCK_FRICTION_DECELERATION
+            layout.STONE_FRICTION_DECELERATION
             if friction_deceleration is None
             else float(friction_deceleration)
         )
@@ -40,7 +40,7 @@ class AirHockeyAI:
         if reaction_timer <= 0:
             reaction_timer += state.difficulty.reaction_delay
             return replace(self.choose_target(state), reaction_timer=reaction_timer)
-        return AIDecision(state.target_x, state.target_y, state.stalled_puck_phase, reaction_timer)
+        return AIDecision(state.target_x, state.target_y, state.stalled_stone_phase, reaction_timer)
 
     def choose_target(self, state: GameState) -> AIDecision:
         if state.awaiting_serve:
@@ -50,65 +50,65 @@ class AirHockeyAI:
         error = self._random.uniform(-difficulty.aim_error, difficulty.aim_error)
         safe_left = layout.RINK_LEFT + layout.MALLET_RADIUS
         safe_right = layout.RINK_RIGHT - layout.MALLET_RADIUS
-        puck_speed = math.hypot(state.puck.vx, state.puck.vy)
-        puck_near_center = state.puck.y <= layout.RINK_CENTER_Y + layout.PUCK_RADIUS + 2 * layout.UI_SCALE
+        stone_speed = math.hypot(state.stone.vx, state.stone.vy)
+        stone_near_center = state.stone.y <= layout.RINK_CENTER_Y + layout.STONE_RADIUS + 2 * layout.UI_SCALE
 
-        if state.stalled_puck_phase != "idle":
-            if puck_speed <= layout.PUCK_STOP_SPEED:
-                return self._choose_stalled_puck_target(state, safe_left, safe_right)
-            stalled_puck_phase = "idle"
+        if state.stalled_stone_phase != "idle":
+            if stone_speed <= layout.STONE_STOP_SPEED:
+                return self._choose_stalled_stone_target(state, safe_left, safe_right)
+            stalled_stone_phase = "idle"
         else:
-            stalled_puck_phase = "idle"
+            stalled_stone_phase = "idle"
 
-        # 冰球在 AI 身后时绝不能追，会把球撞向自家球门
-        puck_behind_ai = state.puck.y < state.ai_y - layout.PUCK_RADIUS * 0.35
-        puck_threatening_goal = state.puck.vy < -25 * layout.UI_SCALE
-        if puck_behind_ai:
+        # 冰壶在 AI 身后时绝不能追，会把球撞向自家球门
+        stone_behind_ai = state.stone.y < state.ai_y - layout.STONE_RADIUS * 0.35
+        stone_threatening_goal = state.stone.vy < -25 * layout.UI_SCALE
+        if stone_behind_ai:
             # 停在身后时只回中路会两边干等，死锁
-            if puck_speed <= layout.PUCK_STOP_SPEED:
-                return self._choose_stalled_puck_target(
+            if stone_speed <= layout.STONE_STOP_SPEED:
+                return self._choose_stalled_stone_target(
                     state,
                     safe_left,
                     safe_right,
-                    stalled_puck_phase="positioning",
+                    stalled_stone_phase="positioning",
                 )
-            if puck_threatening_goal:
-                # 防守只横向封堵，不主动凑近冰球
-                predicted_x = self._predict_puck_x(state, state.ai_home_y)
+            if stone_threatening_goal:
+                # 防守只横向封堵，不主动凑近冰壶
+                predicted_x = self._predict_stone_x(state, state.ai_home_y)
                 target_x = clamp(predicted_x + error * 0.5, safe_left, safe_right)
             else:
                 target_x = clamp(layout.RINK_CENTER_X + error * 0.25, safe_left, safe_right)
-            return AIDecision(target_x, state.ai_home_y, stalled_puck_phase)
+            return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)
 
-        puck_in_attack_zone = state.puck.y <= difficulty.attack_line
-        if puck_speed <= layout.PUCK_STOP_SPEED and puck_near_center:
+        stone_in_attack_zone = state.stone.y <= difficulty.attack_line
+        if stone_speed <= layout.STONE_STOP_SPEED and stone_near_center:
             return AIDecision(
-                clamp(state.puck.x + error, safe_left, safe_right),
-                clamp(state.puck.y, layout.RINK_TOP + layout.MALLET_RADIUS, layout.RINK_CENTER_Y - layout.MALLET_RADIUS),
-                stalled_puck_phase,
+                clamp(state.stone.x + error, safe_left, safe_right),
+                clamp(state.stone.y, layout.RINK_TOP + layout.MALLET_RADIUS, layout.RINK_CENTER_Y - layout.MALLET_RADIUS),
+                stalled_stone_phase,
             )
 
-        # 冰球在自己前方且进了攻击区才主动追
-        if puck_in_attack_zone and not puck_behind_ai:
+        # 冰壶在自己前方且进了攻击区才主动追
+        if stone_in_attack_zone and not stone_behind_ai:
             return AIDecision(
-                clamp(state.puck.x + error, safe_left, safe_right),
-                clamp(state.puck.y, state.ai_home_y, layout.RINK_CENTER_Y - layout.MALLET_RADIUS),
-                stalled_puck_phase,
+                clamp(state.stone.x + error, safe_left, safe_right),
+                clamp(state.stone.y, state.ai_home_y, layout.RINK_CENTER_Y - layout.MALLET_RADIUS),
+                stalled_stone_phase,
             )
 
-        if puck_threatening_goal:
-            predicted_x = self._predict_puck_x(state, state.ai_home_y)
+        if stone_threatening_goal:
+            predicted_x = self._predict_stone_x(state, state.ai_home_y)
             blended_x = layout.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
             target_x = clamp(blended_x + error, safe_left, safe_right)
         else:
             target_x = clamp(layout.RINK_CENTER_X + error * 0.35, safe_left, safe_right)
-        return AIDecision(target_x, state.ai_home_y, stalled_puck_phase)
+        return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)
 
     def advance_serve_phase(self, state: GameState, dt: float) -> str:
         """AI 开球时，就位了才切到击球阶段。"""
         if not (state.awaiting_serve and state.current_server == "ai" and state.serve_phase == "positioning"):
             return state.serve_phase
-        setup_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.PUCK_RADIUS - AI_SERVE_SETUP_GAP * layout.UI_SCALE
+        setup_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.STONE_RADIUS - AI_SERVE_SETUP_GAP * layout.UI_SCALE
         arrival_tolerance = max(2.0 * layout.UI_SCALE, state.difficulty.ai_speed * dt)
         if math.hypot(state.ai_x - layout.RINK_CENTER_X, state.ai_y - setup_y) <= arrival_tolerance:
             return "striking"
@@ -118,45 +118,45 @@ class AirHockeyAI:
     def _choose_serve_target(state: GameState) -> AIDecision:
         if state.current_server == "ai":
             if state.serve_phase == "positioning":
-                target_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.PUCK_RADIUS - AI_SERVE_SETUP_GAP * layout.UI_SCALE
+                target_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.STONE_RADIUS - AI_SERVE_SETUP_GAP * layout.UI_SCALE
             else:
                 target_y = layout.RINK_CENTER_Y
         else:
             target_y = state.ai_home_y
-        return AIDecision(layout.RINK_CENTER_X, target_y, state.stalled_puck_phase)
+        return AIDecision(layout.RINK_CENTER_X, target_y, state.stalled_stone_phase)
 
     @staticmethod
-    def _choose_stalled_puck_target(state, safe_left, safe_right, stalled_puck_phase=None) -> AIDecision:
-        """绕到静止冰球旁边把它打向玩家半场。"""
-        phase = state.stalled_puck_phase if stalled_puck_phase is None else stalled_puck_phase
-        minimum_distance = layout.PUCK_RADIUS + layout.MALLET_RADIUS
-        side = 1.0 if state.puck.x <= layout.RINK_CENTER_X else -1.0
-        staging_x = clamp(state.puck.x + side * (minimum_distance + 8.0 * layout.UI_SCALE), safe_left, safe_right)
+    def _choose_stalled_stone_target(state, safe_left, safe_right, stalled_stone_phase=None) -> AIDecision:
+        """绕到静止冰壶旁边把它打向玩家半场。"""
+        phase = state.stalled_stone_phase if stalled_stone_phase is None else stalled_stone_phase
+        minimum_distance = layout.STONE_RADIUS + layout.MALLET_RADIUS
+        side = 1.0 if state.stone.x <= layout.RINK_CENTER_X else -1.0
+        staging_x = clamp(state.stone.x + side * (minimum_distance + 8.0 * layout.UI_SCALE), safe_left, safe_right)
         staging_y = layout.RINK_TOP + layout.MALLET_RADIUS
         if phase == "positioning":
             if math.hypot(state.ai_x - staging_x, state.ai_y - staging_y) <= max(3.0 * layout.UI_SCALE, minimum_distance * 0.1):
                 phase = "striking"
             return AIDecision(staging_x, staging_y, phase)
         return AIDecision(
-            clamp(state.puck.x - side * minimum_distance, safe_left, safe_right),
-            clamp(state.puck.y + layout.MALLET_RADIUS, layout.RINK_TOP + layout.MALLET_RADIUS, layout.RINK_CENTER_Y - layout.MALLET_RADIUS),
+            clamp(state.stone.x - side * minimum_distance, safe_left, safe_right),
+            clamp(state.stone.y + layout.MALLET_RADIUS, layout.RINK_TOP + layout.MALLET_RADIUS, layout.RINK_CENTER_Y - layout.MALLET_RADIUS),
             phase,
         )
 
-    def _predict_puck_x(self, state, target_y):
-        """按减速和边墙反射公式预估冰球到 target_y 横线时的横坐标。"""
-        speed = math.hypot(state.puck.vx, state.puck.vy)
-        if speed <= layout.COLLISION_EPSILON or state.puck.vy >= -layout.COLLISION_EPSILON:
-            return reflected_coordinate(state.puck.x, layout.RINK_LEFT + layout.PUCK_RADIUS, layout.RINK_RIGHT - layout.PUCK_RADIUS)
-        direction_x = state.puck.vx / speed
-        direction_y = state.puck.vy / speed
-        distance_to_target = (target_y - state.puck.y) / direction_y
+    def _predict_stone_x(self, state, target_y):
+        """按减速和边墙反射公式预估冰壶到 target_y 横线时的横坐标。"""
+        speed = math.hypot(state.stone.vx, state.stone.vy)
+        if speed <= layout.COLLISION_EPSILON or state.stone.vy >= -layout.COLLISION_EPSILON:
+            return reflected_coordinate(state.stone.x, layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
+        direction_x = state.stone.vx / speed
+        direction_y = state.stone.vy / speed
+        distance_to_target = (target_y - state.stone.y) / direction_y
         if distance_to_target <= 0:
-            return reflected_coordinate(state.puck.x, layout.RINK_LEFT + layout.PUCK_RADIUS, layout.RINK_RIGHT - layout.PUCK_RADIUS)
+            return reflected_coordinate(state.stone.x, layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
         if self.friction_deceleration <= layout.COLLISION_EPSILON:
             travel_distance = distance_to_target
         else:
             stopping_distance = speed * speed / (2.0 * self.friction_deceleration)
             travel_distance = min(distance_to_target, stopping_distance)
-        projected_x = state.puck.x + direction_x * travel_distance
-        return reflected_coordinate(projected_x, layout.RINK_LEFT + layout.PUCK_RADIUS, layout.RINK_RIGHT - layout.PUCK_RADIUS)
+        projected_x = state.stone.x + direction_x * travel_distance
+        return reflected_coordinate(projected_x, layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
