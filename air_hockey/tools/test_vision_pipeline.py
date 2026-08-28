@@ -1,6 +1,6 @@
 """实时验证 Camera -> Detection -> Tracker -> GameState 管线。
 
-Tracker 的像素坐标直接映射成 StoneState / PuckState，先不接 AI 和 Homography。
+Tracker 的像素坐标直接映射成 StoneState，先不接 AI 和 Homography。
 用法: python3 air_hockey/tools/test_vision_pipeline.py --device /dev/video0
 """
 
@@ -79,7 +79,7 @@ def annotate(image, roi, detection, track, stone, game_state, display_fps):
     cv2.putText(output, f"Tracker: {track.state.value if track else 'none'}", (18, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
     cv2.putText(output, state_text, (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2)
     cv2.putText(output, state_text, (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (35, 35, 35), 1)
-    cv2.putText(output, f"GameState puck: {'ready' if game_state else 'none'}   Display FPS: {display_fps:.1f}", (18, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (35, 35, 35), 1)
+    cv2.putText(output, f"GameState stone: {'ready' if game_state else 'none'}   Display FPS: {display_fps:.1f}", (18, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (35, 35, 35), 1)
     return output
 
 
@@ -156,7 +156,7 @@ def main():
 
     try:
         camera.start()
-        print("Vision pipeline started: Camera -> StoneDetector -> StoneTracker -> StoneState -> PuckState/GameState")
+        print("Vision pipeline started: Camera -> StoneDetector -> StoneTracker -> StoneState -> StoneState/GameState")
         print("Press Ctrl+C to stop" + (", or Q / ESC in the preview window." if preview else "."))
         while True:
             frame = camera.get_latest_frame()
@@ -182,7 +182,7 @@ def main():
                 print(
                     f"StoneState(x={stone.x:.1f}, y={stone.y:.1f}, vx={stone.vx:.1f}, "
                     f"vy={stone.vy:.1f}, tracking_state={stone.tracking_state.value}) | "
-                    f"PuckState(x={game_state.puck.x:.1f}, y={game_state.puck.y:.1f})"
+                    f"StoneState(x={game_state.stone.x:.1f}, y={game_state.stone.y:.1f})"
                 )
             elif stone is None and now - last_print_time >= args.print_interval:
                 last_print_time = now

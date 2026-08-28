@@ -1,4 +1,4 @@
-"""离线闭环：仿真冰球 -> Detection -> StoneTracker -> GameState -> AirHockeyAI。
+"""离线闭环：仿真冰壶 -> Detection -> StoneTracker -> GameState -> AirHockeyAI。
 
 不启动摄像头，直接用仿真位置构造 Detection，验证视觉坐标到 AI 决策的链路。
 用法: python3 air_hockey/tools/test_ai_pipeline.py --visualize
@@ -27,8 +27,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import air_hockey_config as layout
 from air_hockey_ai import AIDecision, AirHockeyAI
-from air_hockey_physics import PuckMotion, goal_scorer
-from game_state import GameState, PuckState, StoneState
+from air_hockey_physics import StoneMotion, goal_scorer
+from game_state import GameState, StoneState
 from vision.tracker import StoneTracker
 from vision.types import Detection, Track
 
@@ -67,39 +67,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def reset_puck(puck):
-    """得分后重新发球，免得冰球跑到场地外。"""
-    puck.x = layout.RINK_CENTER_X - 90.0
-    puck.y = layout.RINK_BOTTOM - 120.0
-    puck.set_immediate_velocity(320.0, -570.0)
+def reset_stone(stone):
+    """得分后重新发球，免得冰壶跑到场地外。"""
+    stone.x = layout.RINK_CENTER_X - 90.0
+    stone.y = layout.RINK_BOTTOM - 120.0
+    stone.set_immediate_velocity(320.0, -570.0)
 
 
-def simulate_puck_step(puck, dt):
+def simulate_stone_step(stone, dt):
     """推进仿真，穿过球门就重新发球。"""
-    puck.advance_velocity(dt)
-    puck.x += puck.vx * dt
-    puck.y += puck.vy * dt
-    puck.resolve_walls()
+    stone.advance_velocity(dt)
+    stone.x += stone.vx * dt
+    stone.y += stone.vy * dt
+    stone.resolve_walls()
 
-    # PuckMotion 会允许球从球门口离场，真实游戏控制器随后会结算比分。
+    # StoneMotion 会允许球从球门口离场，真实游戏控制器随后会结算比分。
     # 离线脚本没有比分系统，因此在同一位置重新发球。
-    if goal_scorer(puck) is not None:
-        reset_puck(puck)
+    if goal_scorer(stone) is not None:
+        reset_stone(stone)
         return True
 
     # 速度衰减为零后再次发球，让离线演示一直产生有意义的 AI 输入。
-    if math.hypot(puck.vx, puck.vy) <= layout.PUCK_STOP_SPEED:
-        puck.set_immediate_velocity(260.0, -520.0)
+    if math.hypot(stone.vx, stone.vy) <= layout.STONE_STOP_SPEED:
+        stone.set_immediate_velocity(260.0, -520.0)
     return False
 
 
-def simulate_detection(puck, timestamp, rng, noise, drop_rate):
+def simulate_detection(stone, timestamp, rng, noise, drop_rate):
     """用仿真真值构造 Detection，带定位噪声和漏检。"""
     if rng.random() < drop_rate:
         return None
-    center_x = puck.x + rng.gauss(0.0, noise)
-    center_y = puck.y + rng.gauss(0.0, noise)
-    radius = max(1.0, layout.PUCK_RADIUS + rng.gauss(0.0, noise * 0.1))
+    center_x = stone.x + rng.gauss(0.0, noise)
+    center_y = stone.y + rng.gauss(0.0, noise)
+    radius = max(1.0, layout.STONE_RADIUS + rng.gauss(0.0, noise * 0.1))
     return Detection(
         center_x=center_x,
         center_y=center_y,
@@ -111,7 +111,7 @@ def simulate_detection(puck, timestamp, rng, noise, drop_rate):
     )
 
 
-def game_state_from_track(track, target_x, target_y, reaction_timer, stalled_puck_phase, difficulty):
+def game_state_from_track(track, target_x, target_y, reaction_timer, stalled_stone_phase, difficulty):
     """Tracker 输出转 StoneState 再包成 GameState。"""
     ai_home_y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
     stone = StoneState.from_tracker(track)
@@ -121,14 +121,13 @@ def game_state_from_track(track, target_x, target_y, reaction_timer, stalled_puc
         ai_home_y=ai_home_y,
         target_x=target_x,
         target_y=target_y,
-        puck=PuckState.from_stone(stone),
+        stone=stone,
         awaiting_serve=False,
         current_server="player",
         serve_phase="idle",
-        stalled_puck_phase=stalled_puck_phase,
+        stalled_stone_phase=stalled_stone_phase,
         reaction_timer=reaction_timer,
         difficulty=difficulty,
-        stone=stone,
     )
 
 
@@ -154,15 +153,15 @@ class TkVisualizer:
     def _close(self) -> None:
         self.closed = True
 
-    def draw(self, puck, track, target, path) -> None:
+    def draw(self, stone, track, target, path) -> None:
         canvas = self.canvas
         canvas.delete("all")
         canvas.create_rectangle(layout.RINK_LEFT, layout.RINK_TOP, layout.RINK_RIGHT, layout.RINK_BOTTOM, outline="#2882b4", width=2)
         canvas.create_line(layout.RINK_LEFT, layout.RINK_CENTER_Y, layout.RINK_RIGHT, layout.RINK_CENTER_Y, fill="#dc5565", width=2)
         if len(path) > 1:
             canvas.create_line(*[coordinate for point in path for coordinate in point], fill="#00a850", width=2)
-        canvas.create_oval(puck.x - layout.PUCK_RADIUS, puck.y - layout.PUCK_RADIUS, puck.x + layout.PUCK_RADIUS, puck.y + layout.PUCK_RADIUS, fill="#232323", outline="")
-        canvas.create_text(puck.x + 20, puck.y - 18, text="simulated puck", anchor="w", fill="#232323")
+        canvas.create_oval(stone.x - layout.STONE_RADIUS, stone.y - layout.STONE_RADIUS, stone.x + layout.STONE_RADIUS, stone.y + layout.STONE_RADIUS, fill="#232323", outline="")
+        canvas.create_text(stone.x + 20, stone.y - 18, text="simulated stone", anchor="w", fill="#232323")
         if track is not None:
             canvas.create_oval(track.center_x - track.radius - 4, track.center_y - track.radius - 4, track.center_x + track.radius + 4, track.center_y + track.radius + 4, outline="#e22b2b", width=2)
             canvas.create_line(track.center_x, track.center_y, track.center_x + track.vx * 0.10, track.center_y + track.vy * 0.10, fill="#e22b2b", width=2, arrow=tk.LAST)
@@ -191,12 +190,12 @@ class OpenCVVisualizer:
         self.np = np
         self.closed = False
 
-    def draw(self, puck, track, target, path) -> None:
+    def draw(self, stone, track, target, path) -> None:
         image = self.np.full((int(layout.CANVAS_HEIGHT), int(layout.CANVAS_WIDTH), 3), (242, 250, 255), dtype=self.np.uint8)
         self.cv2.rectangle(image, (int(layout.RINK_LEFT), int(layout.RINK_TOP)), (int(layout.RINK_RIGHT), int(layout.RINK_BOTTOM)), (180, 130, 40), 2)
         if len(path) > 1:
             self.cv2.polylines(image, [self.np.asarray(path, dtype=self.np.int32)], False, (0, 190, 0), 2)
-        self.cv2.circle(image, (round(puck.x), round(puck.y)), round(layout.PUCK_RADIUS), (35, 35, 35), -1)
+        self.cv2.circle(image, (round(stone.x), round(stone.y)), round(layout.STONE_RADIUS), (35, 35, 35), -1)
         if track is not None:
             self.cv2.circle(image, (round(track.center_x), round(track.center_y)), round(track.radius + 4), (0, 0, 255), 2)
         tx, ty = round(target[0]), round(target[1])
@@ -231,7 +230,7 @@ def main():
     tracker = StoneTracker(max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2)
     ai = AirHockeyAI()
     difficulty = replace(layout.DIFFICULTIES["普通"], aim_error=args.ai_aim_error)
-    puck = PuckMotion(
+    stone = StoneMotion(
         x=layout.RINK_CENTER_X - 90.0,
         y=layout.RINK_BOTTOM - 120.0,
         vx=320.0,
@@ -239,7 +238,7 @@ def main():
     )
     target = (layout.RINK_CENTER_X, layout.RINK_TOP + 90.0)
     reaction_timer = 0.0
-    stalled_puck_phase = "idle"
+    stalled_stone_phase = "idle"
     path = deque(maxlen=180)
     elapsed = 0.0
     last_print = -args.print_interval
@@ -253,15 +252,15 @@ def main():
     try:
         while args.duration <= 0.0 or elapsed < args.duration:
             frame_started = time.monotonic()
-            restarted = simulate_puck_step(puck, dt)
+            restarted = simulate_stone_step(stone, dt)
             if restarted:
                 # 让下一帧从新球开始建轨，避免跨球门的速度污染 Tracker。
                 tracker.reset()
                 path.clear()
                 target = (layout.RINK_CENTER_X, layout.RINK_TOP + 90.0)
                 reaction_timer = 0.0
-                stalled_puck_phase = "idle"
-            detection = simulate_detection(puck, elapsed, rng, args.noise, args.drop_rate)
+                stalled_stone_phase = "idle"
+            detection = simulate_detection(stone, elapsed, rng, args.noise, args.drop_rate)
             tracks = tracker.update(detection)
             track = tracks[0] if tracks else None
             if track is not None:
@@ -271,25 +270,25 @@ def main():
                     target[0],
                     target[1],
                     reaction_timer,
-                    stalled_puck_phase,
+                    stalled_stone_phase,
                     difficulty,
                 )
                 decision = ai.update(state, dt)
                 target = (decision.target_x, decision.target_y)
                 reaction_timer = decision.reaction_timer
-                stalled_puck_phase = decision.stalled_puck_phase
+                stalled_stone_phase = decision.stalled_stone_phase
                 if elapsed >= last_print + args.print_interval:
                     last_print = elapsed
                     print(
-                        f"t={elapsed:5.2f}s | simulated puck=({puck.x:6.1f}, {puck.y:6.1f}) "
-                        f"v=({puck.vx:6.1f}, {puck.vy:6.1f}) | "
+                        f"t={elapsed:5.2f}s | simulated stone=({stone.x:6.1f}, {stone.y:6.1f}) "
+                        f"v=({stone.vx:6.1f}, {stone.vy:6.1f}) | "
                         f"tracker=({track.center_x:6.1f}, {track.center_y:6.1f}) "
                         f"v=({track.vx:6.1f}, {track.vy:6.1f}) | "
-                        f"AI decision=phase:{decision.stalled_puck_phase} | "
+                        f"AI decision=phase:{decision.stalled_stone_phase} | "
                         f"AI target=({decision.target_x:6.1f}, {decision.target_y:6.1f})"
                     )
             if visualizer is not None:
-                visualizer.draw(puck, track, target, path)
+                visualizer.draw(stone, track, target, path)
                 if visualizer.closed:
                     break
             elapsed += dt

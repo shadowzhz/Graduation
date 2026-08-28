@@ -1,4 +1,4 @@
-"""冰球的几何辅助函数、运动和碰撞规则。"""
+"""冰壶的几何辅助函数、运动和碰撞规则。"""
 
 import math
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ def clamp(value, low, high):
 
 
 def reflected_coordinate(value, low, high):
-    """把坐标按镜面反射折叠回 [low, high]，预测冰球反弹位置用。"""
+    """把坐标按镜面反射折叠回 [low, high]，预测冰壶反弹位置用。"""
     span = high - low
     if span <= 0:
         return low
@@ -21,8 +21,8 @@ def reflected_coordinate(value, low, high):
     return low + folded
 
 
-def puck_inside_goal_mouth(x):
-    return layout.GOAL_LEFT + layout.PUCK_RADIUS < x < layout.GOAL_RIGHT - layout.PUCK_RADIUS
+def stone_inside_goal_mouth(x):
+    return layout.GOAL_LEFT + layout.STONE_RADIUS < x < layout.GOAL_RIGHT - layout.STONE_RADIUS
 
 
 def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
@@ -45,7 +45,7 @@ def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
 
 
 @dataclass
-class PuckMotion:
+class StoneMotion:
     x: float = field(default_factory=lambda: layout.RINK_CENTER_X)
     y: float = field(default_factory=lambda: layout.RINK_CENTER_Y)
     vx: float = 0.0
@@ -57,9 +57,9 @@ class PuckMotion:
     @staticmethod
     def _limited_velocity(vx, vy):
         speed = math.hypot(vx, vy)
-        if speed <= layout.MAX_PUCK_SPEED:
+        if speed <= layout.MAX_STONE_SPEED:
             return vx, vy
-        scale = layout.MAX_PUCK_SPEED / speed
+        scale = layout.MAX_STONE_SPEED / speed
         return vx * scale, vy * scale
 
     def collision_velocity(self):
@@ -98,7 +98,7 @@ class PuckMotion:
             delta_x = self.target_vx - self.vx
             delta_y = self.target_vy - self.vy
             delta_speed = math.hypot(delta_x, delta_y)
-            velocity_step = layout.PUCK_RESPONSE_ACCELERATION * dt
+            velocity_step = layout.STONE_RESPONSE_ACCELERATION * dt
             if delta_speed <= velocity_step + 1e-9:
                 self.vx = self.target_vx
                 self.vy = self.target_vy
@@ -108,7 +108,7 @@ class PuckMotion:
                 self.vx += delta_x * scale
                 self.vy += delta_y * scale
         speed = math.hypot(self.vx, self.vy)
-        new_speed = max(0.0, speed - layout.PUCK_FRICTION_DECELERATION * dt)
+        new_speed = max(0.0, speed - layout.STONE_FRICTION_DECELERATION * dt)
         if speed <= 1e-9 or new_speed <= 1e-9:
             self.vx = self.vy = 0.0
         else:
@@ -118,10 +118,10 @@ class PuckMotion:
         self.vx, self.vy = self._limited_velocity(self.vx, self.vy)
 
     def resolve_walls(self):
-        left_limit = layout.RINK_LEFT + layout.PUCK_RADIUS
-        right_limit = layout.RINK_RIGHT - layout.PUCK_RADIUS
-        top_limit = layout.RINK_TOP + layout.PUCK_RADIUS
-        bottom_limit = layout.RINK_BOTTOM - layout.PUCK_RADIUS
+        left_limit = layout.RINK_LEFT + layout.STONE_RADIUS
+        right_limit = layout.RINK_RIGHT - layout.STONE_RADIUS
+        top_limit = layout.RINK_TOP + layout.STONE_RADIUS
+        bottom_limit = layout.RINK_BOTTOM - layout.STONE_RADIUS
         vx, vy = self.vx, self.vy
         target_vx, target_vy = self.target_vx, self.target_vy
         reflected_vx, reflected_vy = vx, vy
@@ -154,7 +154,7 @@ class PuckMotion:
                 reflected_target_vx = -abs(target_vx) * layout.WALL_RESTITUTION
             bounced = True
         # 球门口不封上下边，让球能进洞
-        if not puck_inside_goal_mouth(self.x):
+        if not stone_inside_goal_mouth(self.x):
             if self.y < top_limit - layout.COLLISION_EPSILON:
                 self.y = top_limit
                 if vy < -layout.COLLISION_EPSILON:
@@ -207,7 +207,7 @@ class PuckMotion:
 
     def resolve_goal_posts(self):
         bounced = False
-        minimum_distance = layout.PUCK_RADIUS + layout.GOAL_POST_RADIUS
+        minimum_distance = layout.STONE_RADIUS + layout.GOAL_POST_RADIUS
         for post_x, post_y in layout.GOAL_POSTS:
             contact = circle_post_contact(self.x, self.y, post_x, post_y, minimum_distance)
             if contact is None:
@@ -224,12 +224,12 @@ class PuckMotion:
         return bounced
 
 
-def goal_scorer(puck):
+def goal_scorer(stone):
     """球整体越过门线时返回得分方，否则返回 None。"""
-    if not puck_inside_goal_mouth(puck.x):
+    if not stone_inside_goal_mouth(stone.x):
         return None
-    if puck.y + layout.PUCK_RADIUS < layout.RINK_TOP:
+    if stone.y + layout.STONE_RADIUS < layout.RINK_TOP:
         return "player"
-    if puck.y - layout.PUCK_RADIUS > layout.RINK_BOTTOM:
+    if stone.y - layout.STONE_RADIUS > layout.RINK_BOTTOM:
         return "ai"
     return None
