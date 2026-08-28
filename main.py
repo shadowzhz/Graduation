@@ -116,10 +116,10 @@ class VisionWindow:
         self.closed = True
 
     def draw(self, annotated, status_text):
-        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-        ok, encoded = cv2.imencode(".ppm", rgb)
+        # PNG 编码喂 PhotoImage；本机 Tk 的 PPM 解码有兼容问题
+        ok, encoded = cv2.imencode(".png", annotated, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         if ok:
-            self._photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()), format="PPM")
+            self._photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()))
             self.label.configure(image=self._photo)
         self.status.set(status_text)
         try:

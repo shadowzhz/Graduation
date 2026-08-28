@@ -111,11 +111,11 @@ class TkPreview:
         combined = cv2.hconcat((raw_preview, annotated_preview))
         cv2.putText(combined, "RAW", (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         cv2.putText(combined, "DETECTION / TRACKER / STATE", (size[0] + 14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
-        ok, encoded = cv2.imencode(".ppm", rgb)
+        # 本机 Tk 的 PPM base64 解码有问题，用 PNG
+        ok, encoded = cv2.imencode(".png", combined, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         if not ok:
             return
-        self._photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()), format="PPM")
+        self._photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()))
         self.label.configure(image=self._photo)
         self.status.set(
             "StoneState: none"
