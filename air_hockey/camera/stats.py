@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 from threading import Lock
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Optional
 
 
 @dataclass(frozen=True)
@@ -24,43 +24,8 @@ class CameraStats:
     requested_fps: float = 0.0
 
     @property
-    def fps(self) -> float:
-        return self.current_fps
-
-    @property
     def capture_fps(self) -> float:
         return self.current_fps
-
-    @property
-    def average(self) -> float:
-        return self.average_fps
-
-    @property
-    def maximum(self) -> float:
-        return self.max_fps
-
-    @property
-    def count(self) -> int:
-        return self.frame_count
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "current_fps": self.current_fps,
-            "average_fps": self.average_fps,
-            "max_fps": self.max_fps,
-            "frame_count": self.frame_count,
-            "elapsed": self.elapsed,
-            "requested_fps": self.requested_fps,
-            "capture_fps": self.capture_fps,
-        }
-
-    to_dict = as_dict
-
-    def __getitem__(self, key: str) -> Any:
-        return self.as_dict()[key]
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.as_dict().get(key, default)
 
 
 class FPSStats:
@@ -101,9 +66,6 @@ class FPSStats:
                 self._last_sample_time = captured_at
             self._frame_count += 1
 
-    record = record_frame
-    add_frame = record_frame
-
     def snapshot(self, now: Optional[float] = None) -> CameraStats:
         observed_at = self._clock() if now is None else float(now)
         with self._lock:
@@ -136,5 +98,3 @@ class FPSStats:
                 elapsed=elapsed,
                 requested_fps=self.requested_fps,
             )
-
-    get_stats = snapshot

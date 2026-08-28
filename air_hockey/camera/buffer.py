@@ -28,8 +28,6 @@ class FrameBuffer:
             self._condition.notify_all()
             return stored
 
-    publish = put
-
     def get_latest_frame(self) -> Optional[Frame]:
         with self._condition:
             return self._latest

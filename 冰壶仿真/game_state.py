@@ -82,7 +82,6 @@ class GameState:
 
     ``stone`` 保留视觉追踪状态；``puck`` 是游戏坐标系中的运动实体。离线视觉
     管线通过 ``PuckState.from_stone`` 桥接两者，纯物理仿真则可直接构造 ``puck``。
-    标量属性保留给既有 AI 策略使用，避免把策略与任何视觉实现耦合。
     """
 
     ai_x: float
@@ -121,22 +120,6 @@ class GameState:
             difficulty=None,
             stone=stone,
         )
-
-    @property
-    def puck_x(self) -> float:
-        return self.puck.x
-
-    @property
-    def puck_y(self) -> float:
-        return self.puck.y
-
-    @property
-    def puck_velocity_x(self) -> float:
-        return self.puck.vx
-
-    @property
-    def puck_velocity_y(self) -> float:
-        return self.puck.vy
 
 
 __all__ = ["GameState", "PuckState", "StoneState", "TrackingState"]

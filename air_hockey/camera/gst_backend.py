@@ -261,15 +261,6 @@ class GStreamerBackend(CameraBackend):
             return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
         return frame
 
-    def get(self, property_id: int) -> float:
-        if self.info is None:
-            return 0.0
-        return {
-            cv2.CAP_PROP_FRAME_WIDTH: self.info.width,
-            cv2.CAP_PROP_FRAME_HEIGHT: self.info.height,
-            cv2.CAP_PROP_FPS: self.info.negotiated_fps,
-        }.get(property_id, 0.0)
-
     def _release_native(self) -> None:
         if self.pipeline is not None and self._native and self._gst is not None:
             self.pipeline.set_state(self._gst.State.NULL)

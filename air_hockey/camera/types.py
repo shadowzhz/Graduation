@@ -18,14 +18,6 @@ class Frame:
     timestamp: float = field(default_factory=time.perf_counter)
     sequence: int = 0
 
-    @property
-    def data(self) -> Any:
-        return self.image
-
-    @property
-    def captured_at(self) -> float:
-        return self.timestamp
-
 
 @dataclass(frozen=True)
 class CameraConfig:
