@@ -1,35 +1,31 @@
-"""Offline StoneDetector test tool.
+"""离线跑一次 StoneDetector 并输出标注图。
 
-Example:
-    python3 tools/test_image.py ./test_image.jpg --output ./detected.jpg
+用法: python3 tools/test_image.py 图片路径 --output 结果图路径
 """
 
-from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import cv2
 
-# Allow running this file directly from the repository root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from camera.types import Frame  # noqa: E402
-from vision import ROI, StoneDetector  # noqa: E402
+from camera.types import Frame
+from vision import ROI, StoneDetector
 
 
-def _int_triplet(values: List[str]) -> Tuple[int, int, int]:
+def _int_triplet(values):
     if len(values) != 3:
         raise argparse.ArgumentTypeError("expected three integer values")
     try:
-        return tuple(int(value) for value in values)  # type: ignore[return-value]
+        return tuple(int(value) for value in values)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("threshold values must be integers") from exc
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
     parser = argparse.ArgumentParser(description="Run StoneDetector on one image")
     parser.add_argument("image", type=Path, help="input BGR image")
     parser.add_argument("--output", type=Path, help="annotated output image path")
@@ -44,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def annotate(image, detection, roi):
-    """在原图上绘制 ROI 和检测结果，便于离线调参核对。"""
+    """在原图上画 ROI 和检测结果。"""
     output = image.copy()
     height, width = output.shape[:2]
     if roi is not None:
@@ -58,7 +54,7 @@ def annotate(image, detection, roi):
                 2,
             )
     if detection is None:
-        # 即使未检测到目标也输出结果图，方便观察阈值是否过严。
+        # 没检到也输出结果图，方便看阈值是不是太严
         cv2.putText(output, "No detection", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
         return output
 
@@ -72,8 +68,8 @@ def annotate(image, detection, roi):
     return output
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+def main():
+    args = build_parser().parse_args()
     image = cv2.imread(str(args.image), cv2.IMREAD_COLOR)
     if image is None:
         print(f"无法读取图像: {args.image}", file=sys.stderr)
@@ -88,7 +84,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         min_radius=args.min_radius,
         min_circularity=args.min_circularity,
     )
-    # 离线图像没有采集时间，这里由 Frame 自动记录当前单调时钟值。
     detection = detector.detect(Frame(image))
     output_path = args.output or args.image.with_name(f"{args.image.stem}_detected{args.image.suffix}")
     annotated = annotate(image, detection, roi)

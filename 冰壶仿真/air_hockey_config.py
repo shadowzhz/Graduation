@@ -1,6 +1,4 @@
-"""空气冰球的可缩放场地与难度配置。"""
-
-from __future__ import annotations
+"""空气冰球的场地尺寸和难度配置。"""
 
 import threading
 import tkinter as tk
@@ -64,7 +62,7 @@ PREDICTION_POINT_COUNT = 18
 COLLISION_EPSILON = 1e-9
 
 
-@dataclass(frozen=True)
+@dataclass
 class Difficulty:
     ai_speed: float
     reaction_delay: float
@@ -80,7 +78,7 @@ DIFFICULTY_BASES = {
 }
 
 
-def build_difficulties(scale: float) -> dict[str, Difficulty]:
+def build_difficulties(scale):
     return {
         name: Difficulty(
             ai_speed * scale,
@@ -96,12 +94,13 @@ def build_difficulties(scale: float) -> dict[str, Difficulty]:
 
 DIFFICULTIES = build_difficulties(UI_SCALE)
 LAYOUT_CONFIG_LOCK = threading.RLock()
-LAYOUT_THREAD_ID: int | None = None
+LAYOUT_THREAD_ID = None
 LAYOUT_CONFIGURED = False
-LAYOUT_ROOT: tk.Tk | None = None
+LAYOUT_ROOT = None
 
 
-def configure_responsive_layout(root: tk.Tk) -> None:
+def configure_responsive_layout(root):
+    """按屏幕大小缩放场地，只能在 Tk 主线程调一次。"""
     global LAYOUT_THREAD_ID, LAYOUT_CONFIGURED, LAYOUT_ROOT
     thread_id = threading.get_ident()
     with LAYOUT_CONFIG_LOCK:
@@ -118,7 +117,7 @@ def configure_responsive_layout(root: tk.Tk) -> None:
         LAYOUT_ROOT = root
 
 
-def _apply_responsive_layout(root: tk.Tk) -> None:
+def _apply_responsive_layout(root):
     global UI_SCALE
     global CANVAS_WIDTH, CANVAS_HEIGHT
     global RINK_LEFT, RINK_RIGHT, RINK_TOP, RINK_BOTTOM
@@ -157,14 +156,14 @@ def _apply_responsive_layout(root: tk.Tk) -> None:
     DIFFICULTIES = build_difficulties(UI_SCALE)
 
 
-def sync_layout_globals(namespace: dict[str, object]) -> None:
-    """将缩放后的值同步到仍使用直接常量引用的界面模块。"""
+def sync_layout_globals(namespace):
+    """把缩放后的常量同步给直接引用常量的界面模块。"""
     for name, value in globals().items():
         if name.isupper() or name in {"DIFFICULTIES", "Difficulty"}:
             namespace[name] = value
 
 
-def center_window(root: tk.Tk) -> None:
+def center_window(root):
     root.update_idletasks()
     width = root.winfo_reqwidth()
     height = root.winfo_reqheight()

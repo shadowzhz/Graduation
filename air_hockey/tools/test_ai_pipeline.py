@@ -1,16 +1,9 @@
-"""离线验证：仿真冰壶 -> Detection -> StoneTracker -> AirHockeyAI。
+"""离线闭环：仿真冰球 -> Detection -> StoneTracker -> GameState -> AirHockeyAI。
 
-本脚本不启动 CameraManager，也不会调用 StoneDetector；它直接由仿真位置构造
-Detection，以便单独验证从视觉坐标到 AI 决策的闭环。
-
-Examples::
-
-    python3 air_hockey/tools/test_ai_pipeline.py
-    python3 air_hockey/tools/test_ai_pipeline.py --visualize --duration 0
-    python3 air_hockey/tools/test_ai_pipeline.py --drop-rate 0.08 --realtime
+不启动摄像头，直接用仿真位置构造 Detection，验证视觉坐标到 AI 决策的链路。
+用法: python3 air_hockey/tools/test_ai_pipeline.py --visualize
 """
 
-from __future__ import annotations
 
 import argparse
 from collections import deque
@@ -21,10 +14,9 @@ import random
 import sys
 import time
 import tkinter as tk
-from typing import Optional
 
 
-# ``tools`` 目录直接运行时，加入视觉工程和相邻仿真工程的模块根目录。
+# 往上找包含 air_hockey_ai.py 的仿真工程目录
 SCRIPT_DIR = Path(__file__).resolve().parent
 VISION_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = VISION_ROOT.parent
@@ -84,15 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def reset_puck(puck: PuckMotion) -> None:
-    """模拟得分后的发球，防止冰球穿过球门后持续跑到场地外。"""
+def reset_puck(puck):
+    """得分后重新发球，免得冰球跑到场地外。"""
     puck.x = layout.RINK_CENTER_X - 90.0
     puck.y = layout.RINK_BOTTOM - 120.0
     puck.set_immediate_velocity(320.0, -570.0)
 
 
-def simulate_puck_step(puck: PuckMotion, dt: float) -> bool:
-    """推进已有 PuckMotion；返回本帧是否因穿过球门而重新发球。"""
+def simulate_puck_step(puck, dt):
+    """推进仿真，穿过球门就重新发球。"""
     puck.advance_velocity(dt)
     puck.x += puck.vx * dt
     puck.y += puck.vy * dt
@@ -110,8 +102,8 @@ def simulate_puck_step(puck: PuckMotion, dt: float) -> bool:
     return False
 
 
-def simulate_detection(puck: PuckMotion, timestamp: float, rng: random.Random, noise: float, drop_rate: float) -> Optional[Detection]:
-    """用仿真真值构造单帧 Detection，模拟定位抖动和可选漏检。"""
+def simulate_detection(puck, timestamp, rng, noise, drop_rate):
+    """用仿真真值构造 Detection，带定位噪声和漏检。"""
     if rng.random() < drop_rate:
         return None
     center_x = puck.x + rng.gauss(0.0, noise)
@@ -128,8 +120,8 @@ def simulate_detection(puck: PuckMotion, timestamp: float, rng: random.Random, n
     )
 
 
-def game_state_from_track(track: Track, target_x: float, target_y: float, reaction_timer: float, stalled_puck_phase: str, difficulty: layout.Difficulty) -> GameState:
-    """唯一的 Vision → Game 适配层：Tracker 输出先转为 StoneState。"""
+def game_state_from_track(track, target_x, target_y, reaction_timer, stalled_puck_phase, difficulty):
+    """Tracker 输出转 StoneState 再包成 GameState。"""
     ai_home_y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
     stone = StoneState.from_tracker(track)
     return GameState(
@@ -150,7 +142,7 @@ def game_state_from_track(track: Track, target_x: float, target_y: float, reacti
 
 
 class TkVisualizer:
-    """不依赖 OpenCV HighGUI 的轻量可视化，适用于 Snap/Qt 冲突环境。"""
+    """Tk 可视化，避开 OpenCV HighGUI 冲突。"""
 
     def __init__(self) -> None:
         self.closed = False
@@ -171,7 +163,7 @@ class TkVisualizer:
     def _close(self) -> None:
         self.closed = True
 
-    def draw(self, puck: PuckMotion, track: Optional[Track], target: tuple[float, float], path: deque[tuple[int, int]]) -> None:
+    def draw(self, puck, track, target, path) -> None:
         canvas = self.canvas
         canvas.delete("all")
         canvas.create_rectangle(layout.RINK_LEFT, layout.RINK_TOP, layout.RINK_RIGHT, layout.RINK_BOTTOM, outline="#2882b4", width=2)
@@ -200,8 +192,6 @@ class TkVisualizer:
 
 
 class OpenCVVisualizer:
-    """可选 OpenCV HighGUI 后端；仅在用户显式选择时加载。"""
-
     def __init__(self) -> None:
         import cv2
         import numpy as np
@@ -210,7 +200,7 @@ class OpenCVVisualizer:
         self.np = np
         self.closed = False
 
-    def draw(self, puck: PuckMotion, track: Optional[Track], target: tuple[float, float], path: deque[tuple[int, int]]) -> None:
+    def draw(self, puck, track, target, path) -> None:
         image = self.np.full((int(layout.CANVAS_HEIGHT), int(layout.CANVAS_WIDTH), 3), (242, 250, 255), dtype=self.np.uint8)
         self.cv2.rectangle(image, (int(layout.RINK_LEFT), int(layout.RINK_TOP)), (int(layout.RINK_RIGHT), int(layout.RINK_BOTTOM)), (180, 130, 40), 2)
         if len(path) > 1:
@@ -228,7 +218,7 @@ class OpenCVVisualizer:
         self.cv2.destroyAllWindows()
 
 
-def main() -> None:
+def main():
     args = build_parser().parse_args()
     if args.fps <= 0 or args.print_interval <= 0:
         raise SystemExit("--fps 和 --print-interval 必须大于 0")
@@ -238,7 +228,7 @@ def main() -> None:
         raise SystemExit("--noise 不能为负数")
     if args.ai_aim_error < 0:
         raise SystemExit("--ai-aim-error 不能为负数")
-    visualizer: TkVisualizer | OpenCVVisualizer | None = None
+    visualizer = None
     if args.visualize:
         try:
             visualizer = TkVisualizer() if args.visualizer == "tk" else OpenCVVisualizer()
@@ -259,7 +249,7 @@ def main() -> None:
     target = (layout.RINK_CENTER_X, layout.RINK_TOP + 90.0)
     reaction_timer = 0.0
     stalled_puck_phase = "idle"
-    path: deque[tuple[int, int]] = deque(maxlen=180)
+    path = deque(maxlen=180)
     elapsed = 0.0
     last_print = -args.print_interval
     started = time.monotonic()
@@ -293,7 +283,7 @@ def main() -> None:
                     stalled_puck_phase,
                     difficulty,
                 )
-                decision: AIDecision = ai.update(state, dt)
+                decision = ai.update(state, dt)
                 target = (decision.target_x, decision.target_y)
                 reaction_timer = decision.reaction_timer
                 stalled_puck_phase = decision.stalled_puck_phase

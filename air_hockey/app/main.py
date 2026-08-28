@@ -15,7 +15,7 @@ CAMERA_CONFIG = CameraConfig()
 BENCHMARK_MODE = "--benchmark" in sys.argv
 PREVIEW_WIDTH, PREVIEW_HEIGHT = 960, 540
 FPS_UPDATE_MS = 500
-# GUI 只需平滑预览，不应以显示刷新率抢占高速采集线程。
+# 预览别抢占采集线程的时间片
 VIDEO_UPDATE_MS = 33
 VIDEO_CAPTURE_WIDTH, VIDEO_CAPTURE_HEIGHT = 320, 180
 
@@ -42,11 +42,10 @@ def preview_loop():
     seen_sequence = -1
     while not preview_stop.wait(VIDEO_UPDATE_MS / 1000.0):
         frame = camera.get_latest_frame()
-        # 只处理 sequence 变化后的新帧，避免重复编码同一图像。
+        # sequence 变了才算新帧
         if frame is None or frame.sequence == seen_sequence:
             continue
         seen_sequence = frame.sequence
-        # 预览缩放只影响显示，不改变 CameraManager 中的原始分辨率帧。
         preview = cv2.resize(frame.image, (VIDEO_CAPTURE_WIDTH, VIDEO_CAPTURE_HEIGHT), interpolation=cv2.INTER_AREA)
         ok, encoded = cv2.imencode(".png", preview, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         if ok:

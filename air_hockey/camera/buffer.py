@@ -1,24 +1,20 @@
-"""Thread-safe latest-frame buffer."""
-
-from __future__ import annotations
+"""只保留最新帧的线程安全缓存。"""
 
 from threading import Condition, Lock
-from typing import Optional, Union
+
 import numpy as np
+
 from .types import Frame
 
 
 class FrameBuffer:
-    """线程安全的最新帧缓存，只保留当前最新图像。"""
-
     def __init__(self) -> None:
         self._condition = Condition(Lock())
-        self._latest: Optional[Frame] = None
+        self._latest = None
         self._sequence = 0
 
-    def put(self, frame: Union[Frame, np.ndarray], timestamp: Optional[float] = None) -> Frame:
-        """Publish a Frame or an ndarray directly as the latest frame."""
-        # 无论输入是 ndarray 还是 Frame，都在这里统一分配递增序号。
+    def put(self, frame, timestamp=None) -> Frame:
+        # 传 Frame 或裸 ndarray 都行，序号在这里统一分配
         if not isinstance(frame, Frame):
             frame = Frame(frame, timestamp=timestamp)
         with self._condition:
@@ -28,14 +24,13 @@ class FrameBuffer:
             self._condition.notify_all()
             return stored
 
-    def get_latest_frame(self) -> Optional[Frame]:
+    def get_latest_frame(self):
         with self._condition:
             return self._latest
 
-    def wait_for_frame(self, timeout: Optional[float] = None) -> Optional[Frame]:
+    def wait_for_frame(self, timeout=None):
         with self._condition:
             if self._latest is None:
-                # 首帧到达时由 put() 唤醒等待线程，避免轮询消耗 CPU。
                 self._condition.wait(timeout)
             return self._latest
 

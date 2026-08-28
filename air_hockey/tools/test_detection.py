@@ -1,13 +1,8 @@
 """实时 StoneDetector 测试 GUI。
 
-Examples::
-
-    python3 tools/test_detection.py
-    python3 tools/test_detection.py --roi 250 100 780 520
-    python3 tools/test_detection.py --lower 170 100 80 --upper 179 255 255
+用法: python3 tools/test_detection.py --roi 250 100 780 520 --lower 170 100 80 --upper 179 255 255
 """
 
-from __future__ import annotations
 
 import argparse
 import base64
@@ -17,16 +12,15 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox
-from typing import Optional
 
 import cv2
 
 # Keep direct execution (``python3 tools/test_detection.py``) convenient.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from camera import CameraConfig, CameraManager  # noqa: E402
-from camera.types import Frame  # noqa: E402
-from vision import Detection, ROI, StoneDetector  # noqa: E402
+from camera import CameraConfig, CameraManager
+from camera.types import Frame
+from vision import Detection, ROI, StoneDetector
 
 
 PREVIEW_WIDTH, PREVIEW_HEIGHT = 960, 540
@@ -35,7 +29,7 @@ VIDEO_CAPTURE_WIDTH, VIDEO_CAPTURE_HEIGHT = 320, 180
 CAMERA_CONFIG = CameraConfig()
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
     parser = argparse.ArgumentParser(description="实时 StoneDetector 测试")
     parser.add_argument("--roi", nargs=4, type=int, metavar=("X", "Y", "W", "H"))
     parser.add_argument("--color-space", choices=("hsv", "lab"), default="hsv")
@@ -80,22 +74,19 @@ preview_stop = threading.Event()
 preview_lock = threading.Lock()
 latest_preview_data = None
 latest_preview_sequence = 0
-latest_detection: Optional[Detection] = None
+latest_detection = None
 display_image = None
 displayed_preview_sequence = -1
 
 
 def show_tk_preview():
-    """确保预览标签可见，并清除启动前的占位内容。"""
     if not video_label.winfo_ismapped():
         video_label.pack(fill="both", expand=True)
     video_label.config(text="", image="")
 
 
-def annotate(frame_image, detection: Optional[Detection]):
-    """Draw detector diagnostics on a BGR frame before preview encoding."""
-
-    # 标注使用副本，不能修改 CameraManager 缓存中的原始帧。
+def annotate(frame_image, detection):
+    # 画在副本上，别动缓存里的原帧
     output = frame_image.copy()
     height, width = output.shape[:2]
     if detector.roi is not None:
@@ -129,7 +120,7 @@ def annotate(frame_image, detection: Optional[Detection]):
 
 
 def preview_loop():
-    """按预览帧率处理最新帧，避免显示负载拖慢高速采集。"""
+    """按预览帧率处理最新帧，别拖慢采集线程。"""
 
     global latest_preview_data, latest_preview_sequence, latest_detection
     seen_sequence = -1
@@ -137,15 +128,15 @@ def preview_loop():
         if camera is None:
             continue
         frame = camera.get_latest_frame()
-        # CameraManager 只保留最新帧；sequence 可避免重复处理同一帧。
+        # sequence 变了才是新帧
         if frame is None or frame.sequence == seen_sequence:
             continue
         seen_sequence = frame.sequence
         detection = detector.detect(frame)
-        # 检测结果和编码后的预览由 GUI 定时器读取，写入时必须加锁。
+        # GUI 定时器会读，写入要加锁
         with preview_lock:
             latest_detection = detection
-        # 硬件预览由 GStreamer 直接绘制，Python 线程只保留检测工作。
+        # 硬件预览由 GStreamer 直接画，Python 只做检测
         if camera is not None and camera.hardware_preview:
             continue
         annotated = annotate(frame.image, detection)
@@ -162,7 +153,6 @@ def preview_loop():
 
 
 def start_camera():
-    """启动摄像头和检测线程，并重置界面上的旧统计值。"""
     global camera, preview_thread, running
     if running:
         return
@@ -202,7 +192,6 @@ def start_camera():
 
 
 def stop_camera():
-    """停止采集和预览线程，同时清理线程共享数据。"""
     global camera, preview_thread, latest_preview_data, latest_preview_sequence, latest_detection, running
     if camera is None and not running:
         return
@@ -224,7 +213,6 @@ def stop_camera():
 
 
 def update_video():
-    """仅在出现新预览帧时，由 Tk 主线程更新视频控件。"""
     global display_image, displayed_preview_sequence
     if running and camera is not None and not camera.hardware_preview:
         with preview_lock:
@@ -238,7 +226,6 @@ def update_video():
 
 
 def update_statistics():
-    """定时读取采集统计和最新检测结果并刷新右侧面板。"""
     if running and camera is not None:
         stats = camera.get_stats()
         fps_value.config(text=f"{stats.current_fps:.1f}")
@@ -263,7 +250,6 @@ def update_statistics():
 
 
 def create_row(parent, name, default="0"):
-    """创建一行标签和值，并返回可更新的值标签。"""
     row = tk.Frame(parent)
     row.pack(fill="x", pady=6)
     tk.Label(row, text=name, font=("Microsoft YaHei", 10)).pack(side="left")
@@ -273,7 +259,6 @@ def create_row(parent, name, default="0"):
 
 
 def close_app():
-    """窗口关闭时先释放摄像头，再销毁 Tk 根窗口。"""
     stop_camera()
     root.destroy()
 

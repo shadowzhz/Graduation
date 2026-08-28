@@ -1,39 +1,19 @@
-"""Vision 与 Game 之间共享的只读状态契约。
-
-本模块不依赖 Camera、Detector 或 StoneTracker。视觉层只需把公开的追踪字段
-转为 :class:`StoneState`，游戏和 AI 只消费这里定义的状态对象。
-"""
-
-from __future__ import annotations
+"""视觉和游戏之间共享的状态定义。"""
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Optional
 
 
 class TrackingState(str, Enum):
-    """统一的视觉跟踪生命周期，不暴露视觉实现自己的枚举类型。"""
-
     ACTIVE = "active"
     LOST = "lost"
     UNKNOWN = "unknown"
 
 
-class TrackOutput(Protocol):
-    """Tracker 输出适配所需的最小公共字段。"""
-
-    center_x: float
-    center_y: float
-    vx: float
-    vy: float
-    radius: float
-    last_timestamp: float
-    state: Any
-
-
-@dataclass(frozen=True)
+@dataclass
 class StoneState:
-    """视觉层追踪到的冰壶状态，坐标及速度单位由调用方保持一致。"""
+    """视觉层追踪到的冰壶状态。"""
 
     x: float
     y: float
@@ -44,11 +24,10 @@ class StoneState:
     timestamp: float = 0.0
 
     @classmethod
-    def from_tracker(cls, track: TrackOutput) -> "StoneState":
-        """将任意兼容 Tracker 的公共输出转为统一状态。"""
-        raw_state = getattr(track.state, "value", track.state)
+    def from_tracker(cls, track) -> "StoneState":
+        # state 可能是枚举也可能是裸值，统一转成 TrackingState
         try:
-            tracking_state = TrackingState(str(raw_state))
+            tracking_state = TrackingState(str(getattr(track.state, "value", track.state)))
         except ValueError:
             tracking_state = TrackingState.UNKNOWN
         return cls(
@@ -62,9 +41,9 @@ class StoneState:
         )
 
 
-@dataclass(frozen=True)
+@dataclass
 class PuckState:
-    """游戏和 AI 消费的冰球/冰壶运动状态。"""
+    """游戏和 AI 用的运动状态。"""
 
     x: float
     y: float
@@ -72,16 +51,16 @@ class PuckState:
     vy: float
 
     @classmethod
-    def from_stone(cls, stone: StoneState) -> "PuckState":
+    def from_stone(cls, stone) -> "PuckState":
         return cls(x=stone.x, y=stone.y, vx=stone.vx, vy=stone.vy)
 
 
-@dataclass(frozen=True)
+@dataclass
 class GameState:
-    """AI 决策所需的统一游戏快照。
+    """AI 决策需要的游戏快照。
 
-    ``stone`` 保留视觉追踪状态；``puck`` 是游戏坐标系中的运动实体。离线视觉
-    管线通过 ``PuckState.from_stone`` 桥接两者，纯物理仿真则可直接构造 ``puck``。
+    stone 是视觉追踪状态，puck 是游戏坐标系里的运动实体，
+    视觉管线用 PuckState.from_stone 桥接。
     """
 
     ai_x: float
@@ -96,15 +75,11 @@ class GameState:
     stalled_puck_phase: str
     reaction_timer: float
     difficulty: Any
-    stone: StoneState | None = None
+    stone: Optional[StoneState] = None
 
     @classmethod
-    def from_vision(cls, stone: StoneState) -> "GameState":
-        """由视觉追踪结果创建尚未接入 AI 的游戏快照。
-
-        AI 相关字段保留中性初值，使实时视觉管线也能生产和检查完整的
-        ``GameState``，而不需要伪造摄像头、检测器或控制器。
-        """
+    def from_vision(cls, stone) -> "GameState":
+        """只有视觉结果、还没接 AI 时的快照，AI 字段给中性初值。"""
         return cls(
             ai_x=0.0,
             ai_y=0.0,
@@ -120,6 +95,3 @@ class GameState:
             difficulty=None,
             stone=stone,
         )
-
-
-__all__ = ["GameState", "PuckState", "StoneState", "TrackingState"]

@@ -1,6 +1,4 @@
-"""空气冰球的几何辅助函数、冰球运动与碰撞规则。"""
-
-from __future__ import annotations
+"""冰球的几何辅助函数、运动和碰撞规则。"""
 
 import math
 from dataclasses import dataclass, field
@@ -8,11 +6,12 @@ from dataclasses import dataclass, field
 import air_hockey_config as layout
 
 
-def clamp(value: float, low: float, high: float) -> float:
+def clamp(value, low, high):
     return max(low, min(high, value))
 
 
-def reflected_coordinate(value: float, low: float, high: float) -> float:
+def reflected_coordinate(value, low, high):
+    """把坐标按镜面反射折叠回 [low, high]，预测冰球反弹位置用。"""
     span = high - low
     if span <= 0:
         return low
@@ -22,11 +21,12 @@ def reflected_coordinate(value: float, low: float, high: float) -> float:
     return low + folded
 
 
-def puck_inside_goal_mouth(x: float) -> bool:
+def puck_inside_goal_mouth(x):
     return layout.GOAL_LEFT + layout.PUCK_RADIUS < x < layout.GOAL_RIGHT - layout.PUCK_RADIUS
 
 
-def circle_post_contact(circle_x: float, circle_y: float, post_x: float, post_y: float, minimum_distance: float) -> tuple[float, float, float] | None:
+def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
+    """圆和门柱的接触检测，没碰到返回 None。"""
     dx = circle_x - post_x
     dy = circle_y - post_y
     distance_sq = dx * dx + dy * dy
@@ -35,6 +35,7 @@ def circle_post_contact(circle_x: float, circle_y: float, post_x: float, post_y:
     if distance_sq > layout.COLLISION_EPSILON:
         distance = math.sqrt(distance_sq)
         return distance, dx / distance, dy / distance
+    # 重合时拿指向场地中心的方向当法线
     nx = layout.RINK_CENTER_X - post_x
     ny = layout.RINK_CENTER_Y - post_y
     length = math.hypot(nx, ny)
@@ -54,19 +55,20 @@ class PuckMotion:
     response_active: bool = False
 
     @staticmethod
-    def _limited_velocity(vx: float, vy: float) -> tuple[float, float]:
+    def _limited_velocity(vx, vy):
         speed = math.hypot(vx, vy)
         if speed <= layout.MAX_PUCK_SPEED:
             return vx, vy
         scale = layout.MAX_PUCK_SPEED / speed
         return vx * scale, vy * scale
 
-    def collision_velocity(self) -> tuple[float, float]:
+    def collision_velocity(self):
+        # 碰撞时用目标速度算，避免刚撞完速度还没跟上导致二次穿透
         if self.response_active and math.hypot(self.target_vx, self.target_vy) > 1e-9:
             return self.target_vx, self.target_vy
         return self.vx, self.vy
 
-    def set_target_velocity(self, target_vx: float, target_vy: float) -> None:
+    def set_target_velocity(self, target_vx, target_vy):
         self.vx, self.vy = self._limited_velocity(self.vx, self.vy)
         self.target_vx, self.target_vy = self._limited_velocity(target_vx, target_vy)
         current_speed = math.hypot(self.vx, self.vy)
@@ -76,13 +78,13 @@ class PuckMotion:
             self.vy = self.target_vy / target_speed * current_speed
         self.response_active = math.hypot(self.target_vx - self.vx, self.target_vy - self.vy) > 1e-9
 
-    def set_immediate_velocity(self, vx: float, vy: float) -> None:
+    def set_immediate_velocity(self, vx, vy):
         self.vx, self.vy = self._limited_velocity(vx, vy)
         self.target_vx = self.vx
         self.target_vy = self.vy
         self.response_active = False
 
-    def set_wall_reflection(self, vx: float, vy: float, target_vx: float, target_vy: float) -> None:
+    def set_wall_reflection(self, vx, vy, target_vx, target_vy):
         self.vx, self.vy = self._limited_velocity(vx, vy)
         if self.response_active:
             self.target_vx, self.target_vy = self._limited_velocity(target_vx, target_vy)
@@ -91,7 +93,7 @@ class PuckMotion:
             self.target_vx = self.vx
             self.target_vy = self.vy
 
-    def advance_velocity(self, dt: float) -> None:
+    def advance_velocity(self, dt):
         if self.response_active and dt > 0:
             delta_x = self.target_vx - self.vx
             delta_y = self.target_vy - self.vy
@@ -115,7 +117,7 @@ class PuckMotion:
             self.vy *= scale
         self.vx, self.vy = self._limited_velocity(self.vx, self.vy)
 
-    def resolve_walls(self) -> bool:
+    def resolve_walls(self):
         left_limit = layout.RINK_LEFT + layout.PUCK_RADIUS
         right_limit = layout.RINK_RIGHT - layout.PUCK_RADIUS
         top_limit = layout.RINK_TOP + layout.PUCK_RADIUS
@@ -151,6 +153,7 @@ class PuckMotion:
             if target_vx > layout.COLLISION_EPSILON:
                 reflected_target_vx = -abs(target_vx) * layout.WALL_RESTITUTION
             bounced = True
+        # 球门口不封上下边，让球能进洞
         if not puck_inside_goal_mouth(self.x):
             if self.y < top_limit - layout.COLLISION_EPSILON:
                 self.y = top_limit
@@ -178,6 +181,7 @@ class PuckMotion:
                 if target_vy > layout.COLLISION_EPSILON:
                     reflected_target_vy = -abs(target_vy) * layout.WALL_RESTITUTION
                 bounced = True
+        # 卡在角落出不来时给一个最小弹出速度
         at_left_or_right = self.x <= left_limit + layout.COLLISION_EPSILON or self.x >= right_limit - layout.COLLISION_EPSILON
         at_top_or_bottom = self.y <= top_limit + layout.COLLISION_EPSILON or self.y >= bottom_limit - layout.COLLISION_EPSILON
         current_speed = math.hypot(vx, vy)
@@ -201,7 +205,7 @@ class PuckMotion:
                 self.set_wall_reflection(reflected_vx, reflected_vy, reflected_target_vx, reflected_target_vy)
         return bounced
 
-    def resolve_goal_posts(self) -> bool:
+    def resolve_goal_posts(self):
         bounced = False
         minimum_distance = layout.PUCK_RADIUS + layout.GOAL_POST_RADIUS
         for post_x, post_y in layout.GOAL_POSTS:
@@ -220,7 +224,8 @@ class PuckMotion:
         return bounced
 
 
-def goal_scorer(puck: PuckMotion) -> str | None:
+def goal_scorer(puck):
+    """球整体越过门线时返回得分方，否则返回 None。"""
     if not puck_inside_goal_mouth(puck.x):
         return None
     if puck.y + layout.PUCK_RADIUS < layout.RINK_TOP:

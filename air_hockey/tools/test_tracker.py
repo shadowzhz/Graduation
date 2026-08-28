@@ -1,6 +1,5 @@
-"""Real-time StoneDetector + StoneTracker test with visualization."""
+"""实时跑 StoneDetector + StoneTracker，带可视化。"""
 
-from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -16,7 +15,7 @@ from vision import StoneDetector
 from vision.tracker import StoneTracker
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Test StoneDetector and StoneTracker with a camera."
     )
@@ -94,7 +93,7 @@ def draw_overlay(image, roi, detection, track, fps, total_frames, detected_frame
     )
 
 
-def main() -> None:
+def main():
     args = parse_args()
 
     camera = CameraManager(

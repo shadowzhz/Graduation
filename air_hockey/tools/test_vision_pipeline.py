@@ -1,16 +1,9 @@
 """实时验证 Camera -> Detection -> Tracker -> GameState 管线。
 
-不接入 AI，也不做 Homography；Tracker 的像素坐标直接映射为统一状态中的
-StoneState / PuckState，方便在实体台面接入前检查视觉链路。
-
-Examples::
-
-    python3 air_hockey/tools/test_vision_pipeline.py --device /dev/video0
-    python3 air_hockey/tools/test_vision_pipeline.py --roi 350 0 580 650
-    python3 air_hockey/tools/test_vision_pipeline.py --backend v4l2 --no-display
+Tracker 的像素坐标直接映射成 StoneState / PuckState，先不接 AI 和 Homography。
+用法: python3 air_hockey/tools/test_vision_pipeline.py --device /dev/video0
 """
 
-from __future__ import annotations
 
 import argparse
 import base64
@@ -18,12 +11,11 @@ from pathlib import Path
 import sys
 import time
 import tkinter as tk
-from typing import Optional
 
 import cv2
 
 
-# 允许从项目根目录直接执行，而不要求安装为 Python package。
+# 往上找包含 game_state.py 的仿真工程目录
 SCRIPT_DIR = Path(__file__).resolve().parent
 VISION_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = VISION_ROOT.parent
@@ -72,8 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def annotate(image, roi: tuple[int, int, int, int], detection: Optional[Detection], track: Optional[Track], stone: Optional[StoneState], game_state: Optional[GameState], display_fps: float):
-    """在副本上画 Detection、Tracker 和统一状态，不修改 Camera 原帧。"""
+def annotate(image, roi, detection, track, stone, game_state, display_fps):
+    """画 Detection、Tracker 和统一状态，画在副本上。"""
     output = image.copy()
     x, y, width, height = roi
     cv2.rectangle(output, (x, y), (x + width, y + height), (0, 255, 255), 2)
@@ -101,7 +93,7 @@ def annotate(image, roi: tuple[int, int, int, int], detection: Optional[Detectio
 
 
 class TkPreview:
-    """显示原始画面和标注画面，避开当前环境的 OpenCV/Qt HighGUI 冲突。"""
+    """Tk 双画面预览，避开 OpenCV HighGUI 冲突。"""
 
     def __init__(self) -> None:
         self.closed = False
@@ -114,12 +106,12 @@ class TkPreview:
         tk.Label(self.root, textvariable=self.status, anchor="w").pack(fill="x", padx=8, pady=(0, 8))
         self.root.bind("q", lambda _event: self._close())
         self.root.bind("<Escape>", lambda _event: self._close())
-        self._photo: Optional[tk.PhotoImage] = None
+        self._photo = None
 
     def _close(self) -> None:
         self.closed = True
 
-    def draw(self, raw, annotated, stone: Optional[StoneState]) -> None:
+    def draw(self, raw, annotated, stone) -> None:
         target_width = 640
         scale = min(1.0, target_width / raw.shape[1])
         size = (round(raw.shape[1] * scale), round(raw.shape[0] * scale))
@@ -150,11 +142,11 @@ class TkPreview:
             self.root.destroy()
 
 
-def main() -> None:
+def main():
     args = build_parser().parse_args()
     if args.print_interval <= 0 or args.preview_fps <= 0 or args.fps <= 0:
         raise SystemExit("--print-interval、--preview-fps 和 --fps 必须大于 0")
-    preview: Optional[TkPreview] = None
+    preview = None
     if not args.no_display:
         try:
             preview = TkPreview()

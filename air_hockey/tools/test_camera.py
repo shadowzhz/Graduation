@@ -1,27 +1,20 @@
-"""无 GUI、无检测的摄像头采集 FPS 基准工具。
+"""纯摄像头采集 FPS 基准，不开 GUI 也不做检测。
 
-示例::
-
-    python3 tools/test_camera.py --benchmark
-    python3 tools/test_camera.py --benchmark --backend v4l2
-    python3 tools/test_camera.py --benchmark --backend gstreamer --duration 10
+用法: python3 tools/test_camera.py --benchmark --backend gstreamer --duration 10
 """
 
-from __future__ import annotations
 
 import argparse
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
 
-# 允许从项目根目录直接运行本文件。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from camera import CameraConfig, CameraManager  # noqa: E402
+from camera import CameraConfig, CameraManager
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
     parser = argparse.ArgumentParser(description="测试纯摄像头采集 FPS，不启动 GUI 和检测")
     parser.add_argument("--benchmark", action="store_true", help="运行 FPS 基准测试")
     parser.add_argument(
@@ -39,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_benchmark(args: argparse.Namespace) -> int:
+def run_benchmark(args):
     if args.duration <= 0:
         print("--duration 必须大于 0", file=sys.stderr)
         return 2
@@ -80,8 +73,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
         camera.stop()
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+def main():
+    args = build_parser().parse_args()
     if not args.benchmark:
         print("请添加 --benchmark 运行纯摄像头 FPS 测试")
         return 2
