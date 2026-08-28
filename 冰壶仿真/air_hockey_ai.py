@@ -23,7 +23,13 @@ class AIDecision:
 class AirHockeyAI:
     """只根据状态快照给目标，不直接改游戏实体。"""
 
-    def __init__(self) -> None:
+    def __init__(self, friction_deceleration=None) -> None:
+        # 冰面摩擦衰减；真机上要按实测值传入，默认用仿真参数
+        self.friction_deceleration = (
+            layout.PUCK_FRICTION_DECELERATION
+            if friction_deceleration is None
+            else float(friction_deceleration)
+        )
         self._random = random.Random()
 
     def update(self, state: GameState, dt: float) -> AIDecision:
@@ -137,8 +143,7 @@ class AirHockeyAI:
             phase,
         )
 
-    @staticmethod
-    def _predict_puck_x(state, target_y) -> float:
+    def _predict_puck_x(self, state, target_y):
         """按减速和边墙反射公式预估冰球到 target_y 横线时的横坐标。"""
         speed = math.hypot(state.puck.vx, state.puck.vy)
         if speed <= layout.COLLISION_EPSILON or state.puck.vy >= -layout.COLLISION_EPSILON:
@@ -148,10 +153,10 @@ class AirHockeyAI:
         distance_to_target = (target_y - state.puck.y) / direction_y
         if distance_to_target <= 0:
             return reflected_coordinate(state.puck.x, layout.RINK_LEFT + layout.PUCK_RADIUS, layout.RINK_RIGHT - layout.PUCK_RADIUS)
-        if layout.PUCK_FRICTION_DECELERATION <= layout.COLLISION_EPSILON:
+        if self.friction_deceleration <= layout.COLLISION_EPSILON:
             travel_distance = distance_to_target
         else:
-            stopping_distance = speed * speed / (2.0 * layout.PUCK_FRICTION_DECELERATION)
+            stopping_distance = speed * speed / (2.0 * self.friction_deceleration)
             travel_distance = min(distance_to_target, stopping_distance)
         projected_x = state.puck.x + direction_x * travel_distance
         return reflected_coordinate(projected_x, layout.RINK_LEFT + layout.PUCK_RADIUS, layout.RINK_RIGHT - layout.PUCK_RADIUS)

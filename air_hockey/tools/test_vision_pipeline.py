@@ -15,23 +15,14 @@ import tkinter as tk
 import cv2
 
 
-# 往上找包含 game_state.py 的仿真工程目录
+# 视觉工程、根目录（共享的 game_state）、仿真工程都在搜索路径里
 SCRIPT_DIR = Path(__file__).resolve().parent
 VISION_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = VISION_ROOT.parent
-SIMULATION_ROOT = next(
-    (
-        directory
-        for directory in PROJECT_ROOT.iterdir()
-        if (directory / "game_state.py").is_file()
-        and (directory / "air_hockey_ai.py").is_file()
-    ),
-    None,
-)
-if SIMULATION_ROOT is None:
-    raise RuntimeError("未找到包含 game_state.py 的游戏工程")
+SIMULATION_ROOT = PROJECT_ROOT / "冰壶仿真"
 sys.path.insert(0, str(VISION_ROOT))
 sys.path.insert(0, str(SIMULATION_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
