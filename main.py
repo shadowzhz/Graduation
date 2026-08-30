@@ -9,6 +9,7 @@ import argparse
 import base64
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -29,8 +30,8 @@ from game_state import GameState, StoneState
 from vision import StoneDetector
 from vision.tracker import StoneTracker
 
-DISPLAY_WIDTH = 800
-PREVIEW_FPS = 30
+DISPLAY_WIDTH = 640
+STATS_INTERVAL = 5.0
 AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
 
 
@@ -97,7 +98,7 @@ def annotate(image, roi, detection, track, ai_target_pixel, display_fps):
 
 
 class VisionWindow:
-    """单窗口预览，主循环直接调 draw() 刷新。"""
+    """窗口只负责显示；图像编码在独立预览线程完成，不阻塞处理主循环。"""
 
     def __init__(self):
         self.closed = False
@@ -111,22 +112,39 @@ class VisionWindow:
         self.status = tk.StringVar(value="等待画面")
         tk.Label(self.root, textvariable=self.status, anchor="w").pack(fill="x")
         self._photo = None
+        self._seen_seq = -1
+        self._lock = None
+        self._data = None
 
     def _close(self):
         self.closed = True
 
-    def draw(self, annotated, status_text):
-        # PNG 编码喂 PhotoImage；本机 Tk 的 PPM 解码有兼容问题
-        ok, encoded = cv2.imencode(".png", annotated, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-        if ok:
-            self._photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()))
-            self.label.configure(image=self._photo)
-        self.status.set(status_text)
+    def start_timer(self, lock, data):
+        """Tk 主线程定时器：把预览线程编码好的 PNG 贴到界面。"""
+        self._lock = lock
+        self._data = data
+        self._update_image()
+
+    def _update_image(self):
+        if self.closed:
+            return
+        with self._lock:
+            png = self._data["png"]
+            seq = self._data["seq"]
+        if png is not None and seq != self._seen_seq:
+            try:
+                self._photo = tk.PhotoImage(data=png)
+                self.label.configure(image=self._photo)
+                self._seen_seq = seq
+            except tk.TclError:
+                self.closed = True
         try:
-            self.root.update_idletasks()
-            self.root.update()
+            self.root.after(33, self._update_image)
         except tk.TclError:
             self.closed = True
+
+    def set_status(self, text):
+        self.status.set(text)
 
     def close(self):
         if self.root.winfo_exists():
@@ -134,7 +152,7 @@ class VisionWindow:
 
 
 def run_vision(args):
-    """实时演示的主循环，也是将来正式应用的主循环雏形。"""
+    """实时演示：处理主循环只做检测/追踪/决策，显示由预览线程独立完成。"""
     roi = tuple(args.roi)
     try:
         window = VisionWindow()
@@ -159,13 +177,47 @@ def run_vision(args):
         raise SystemExit(f"摄像头启动失败：{exc}")
 
     print("实时视觉演示开始，Q / ESC 或关闭窗口退出")
+
+    # 预览线程：把最新标注帧编码成 PNG，按预览帧率限速
+    preview_lock = threading.Lock()
+    preview_data = {"png": None, "seq": 0}
+    annotated = {"img": None, "seq": -1}
+    display_stop = threading.Event()
+
+    def preview_loop():
+        seen = -1
+        while not display_stop.wait(1.0 / args.preview_fps):
+            with preview_lock:
+                img = annotated["img"]
+                seq = annotated["seq"]
+            if img is None or seq == seen:
+                continue
+            seen = seq
+            scale = DISPLAY_WIDTH / img.shape[1]
+            small = cv2.resize(
+                img, (DISPLAY_WIDTH, round(img.shape[0] * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+            ok, encoded = cv2.imencode(".png", small, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            if ok:
+                with preview_lock:
+                    preview_data["png"] = base64.b64encode(encoded.tobytes())
+                    preview_data["seq"] += 1
+
+    preview_thread = threading.Thread(target=preview_loop, name="preview", daemon=True)
+    preview_thread.start()
+    window.start_timer(preview_lock, preview_data)
+
     target = (layout.RINK_CENTER_X, AI_HOME_Y)
     reaction_timer = 0.0
     stalled_phase = "idle"
     last_timestamp = None
     last_sequence = -1
-    last_draw = 0.0
     display_fps = 0.0
+    stats_timer = time.perf_counter()
+    detect_ms = 0.0
+    frame_ms = 0.0
+    processed = 0
 
     try:
         while not window.closed:
@@ -182,7 +234,10 @@ def run_vision(args):
                 instant = 1.0 / dt
                 display_fps = instant if display_fps == 0.0 else display_fps * 0.9 + instant * 0.1
 
+            t0 = time.perf_counter()
             detection = detector.detect(frame)
+            detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
+
             tracks = tracker.update(detection)
             track = tracks[0] if tracks else None
 
@@ -214,14 +269,25 @@ def run_vision(args):
                     f"追踪 {track.state.value} | 场地坐标 ({stone.x:.0f}, {stone.y:.0f}) "
                     f"v=({stone.vx:.0f}, {stone.vy:.0f}) | AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
                 )
+            window.set_status(status_text + "    Q / ESC 退出")
 
-            if now - last_draw >= 1.0 / PREVIEW_FPS:
-                last_draw = now
-                annotated = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps)
-                scale = DISPLAY_WIDTH / annotated.shape[1]
-                resized = cv2.resize(annotated, (DISPLAY_WIDTH, round(annotated.shape[0] * scale)))
-                window.draw(resized, status_text + "    Q / ESC 退出")
+            # 标注本身很便宜，每帧都做；缩放和 PNG 编码留给预览线程
+            marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps)
+            with preview_lock:
+                annotated["img"] = marked
+                annotated["seq"] = frame.sequence
+
+            frame_ms = frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
+            processed += 1
+            if time.perf_counter() - stats_timer >= STATS_INTERVAL:
+                stats_timer = time.perf_counter()
+                capture = camera.get_stats()
+                print(
+                    f"[stats] 处理 {display_fps:.1f} FPS | 单帧 {frame_ms:.1f} ms "
+                    f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS | 累计 {processed} 帧"
+                )
     finally:
+        display_stop.set()
         camera.stop()
         window.close()
 
@@ -229,6 +295,7 @@ def run_vision(args):
 def main():
     parser = argparse.ArgumentParser(description="空气冰壶项目入口")
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
+    parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
