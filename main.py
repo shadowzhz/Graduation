@@ -3,6 +3,11 @@
 用法：
     python main.py               # 启动冰壶仿真游戏
     python main.py --vision      # 实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI
+
+线程分工（Tk 只能在创建它的线程里操作）：
+    主线程    Tk mainloop + 显示定时器
+    处理线程  取帧 -> 检测 -> 追踪 -> AI -> 标注
+    编码线程  最新标注帧 -> 缩放 -> PNG（按预览帧率限速）
 """
 
 import argparse
@@ -98,7 +103,7 @@ def annotate(image, roi, detection, track, ai_target_pixel, display_fps):
 
 
 class VisionWindow:
-    """窗口只负责显示；图像编码在独立预览线程完成，不阻塞处理主循环。"""
+    """Tk 窗口，只在主线程使用；定时器从共享区取编码好的 PNG 显示。"""
 
     def __init__(self):
         self.closed = False
@@ -107,52 +112,59 @@ class VisionWindow:
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.bind("q", lambda _event: self._close())
         self.root.bind("<Escape>", lambda _event: self._close())
-        self.label = tk.Label(self.root)
+        self.label = tk.Label(self.root, bg="black")
         self.label.pack()
         self.status = tk.StringVar(value="等待画面")
         tk.Label(self.root, textvariable=self.status, anchor="w").pack(fill="x")
         self._photo = None
         self._seen_seq = -1
         self._lock = None
-        self._data = None
+        self._shared = None
 
-    def _close(self):
-        self.closed = True
-
-    def start_timer(self, lock, data):
-        """Tk 主线程定时器：把预览线程编码好的 PNG 贴到界面。"""
+    def start(self, lock, shared):
         self._lock = lock
-        self._data = data
-        self._update_image()
+        self._shared = shared
+        self.root.after(33, self._tick)
 
-    def _update_image(self):
+    def _tick(self):
         if self.closed:
             return
-        with self._lock:
-            png = self._data["png"]
-            seq = self._data["seq"]
-        if png is not None and seq != self._seen_seq:
-            try:
+        try:
+            with self._lock:
+                png = self._shared["png"]
+                seq = self._shared["png_seq"]
+                status = self._shared["status"]
+                fatal = self._shared["fatal"]
+            if png is not None and seq != self._seen_seq:
                 self._photo = tk.PhotoImage(data=png)
                 self.label.configure(image=self._photo)
                 self._seen_seq = seq
-            except tk.TclError:
+            self.status.set(fatal or status)
+            if fatal:
                 self.closed = True
-        try:
-            self.root.after(33, self._update_image)
+                self.root.after(2500, self.root.destroy)
+                return
+            self.root.after(33, self._tick)
         except tk.TclError:
             self.closed = True
 
-    def set_status(self, text):
-        self.status.set(text)
+    def _close(self):
+        self.closed = True
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def close(self):
-        if self.root.winfo_exists():
-            self.root.destroy()
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except tk.TclError:
+            # 窗口已被销毁（例如用户关闭后再收尾），忽略即可
+            pass
 
 
 def run_vision(args):
-    """实时演示：处理主循环只做检测/追踪/决策，显示由预览线程独立完成。"""
     roi = tuple(args.roi)
     try:
         window = VisionWindow()
@@ -178,18 +190,101 @@ def run_vision(args):
 
     print("实时视觉演示开始，Q / ESC 或关闭窗口退出")
 
-    # 预览线程：把最新标注帧编码成 PNG，按预览帧率限速
+    # Tk 线程与工作线程之间只通过这个加锁的共享区交换数据
     preview_lock = threading.Lock()
-    preview_data = {"png": None, "seq": 0}
-    annotated = {"img": None, "seq": -1}
-    display_stop = threading.Event()
+    shared = {"img": None, "img_seq": -1, "png": None, "png_seq": 0,
+              "status": "等待画面", "fatal": None}
+    stop = threading.Event()
 
-    def preview_loop():
-        seen = -1
-        while not display_stop.wait(1.0 / args.preview_fps):
+    def processing_loop():
+        """取帧 -> 检测 -> 追踪 -> AI -> 标注；不碰任何 Tk 对象。"""
+        last_sequence = -1
+        last_timestamp = None
+        display_fps = 0.0
+        stats_timer = time.perf_counter()
+        detect_ms = 0.0
+        frame_ms = 0.0
+        target = [layout.RINK_CENTER_X, AI_HOME_Y]
+        reaction_timer = 0.0
+        stalled_phase = "idle"
+        try:
+            while not stop.is_set() and not window.closed:
+                frame = camera.get_latest_frame()
+                if frame is None or frame.sequence == last_sequence:
+                    time.sleep(0.001)
+                    continue
+                last_sequence = frame.sequence
+
+                now = frame.timestamp
+                dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
+                last_timestamp = now
+                if dt > 0:
+                    instant = 1.0 / dt
+                    display_fps = instant if display_fps == 0.0 else display_fps * 0.9 + instant * 0.1
+
+                t0 = time.perf_counter()
+                detection = detector.detect(frame)
+                detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
+
+                tracks = tracker.update(detection)
+                track = tracks[0] if tracks else None
+
+                status_text = "未检测到冰壶"
+                ai_target_pixel = None
+                if track is not None:
+                    stone = track_to_rink_state(track, roi)
+                    state = GameState(
+                        ai_x=layout.RINK_CENTER_X,
+                        ai_y=AI_HOME_Y,
+                        ai_home_y=AI_HOME_Y,
+                        target_x=target[0],
+                        target_y=target[1],
+                        stone=stone,
+                        awaiting_serve=False,
+                        current_server="player",
+                        serve_phase="idle",
+                        stalled_stone_phase=stalled_phase,
+                        reaction_timer=reaction_timer,
+                        difficulty=layout.DIFFICULTIES["普通"],
+                    )
+                    decision = ai.update(state, dt)
+                    target[0], target[1] = decision.target_x, decision.target_y
+                    reaction_timer = decision.reaction_timer
+                    stalled_phase = decision.stalled_stone_phase
+                    tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
+                    ai_target_pixel = (round(tx), round(ty))
+                    status_text = (
+                        f"追踪 {track.state.value} | 场地坐标 ({stone.x:.0f}, {stone.y:.0f}) "
+                        f"v=({stone.vx:.0f}, {stone.vy:.0f}) | AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
+                    )
+
+                marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps)
+                with preview_lock:
+                    shared["img"] = marked
+                    shared["img_seq"] = frame.sequence
+                    shared["status"] = status_text + "    Q / ESC 退出"
+
+                frame_ms = frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
+                if time.perf_counter() - stats_timer >= STATS_INTERVAL:
+                    stats_timer = time.perf_counter()
+                    capture = camera.get_stats()
+                    print(
+                        f"[stats] 处理 {display_fps:.1f} FPS | 单帧 {frame_ms:.1f} ms "
+                        f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
+                    )
+        except Exception as exc:
             with preview_lock:
-                img = annotated["img"]
-                seq = annotated["seq"]
+                shared["fatal"] = f"处理线程异常退出：{exc!r}"
+        finally:
+            stop.set()
+
+    def encoding_loop():
+        """最新标注帧 -> 缩放 -> PNG，按预览帧率限速。"""
+        seen = -1
+        while not stop.wait(1.0 / args.preview_fps):
+            with preview_lock:
+                img = shared["img"]
+                seq = shared["img_seq"]
             if img is None or seq == seen:
                 continue
             seen = seq
@@ -201,95 +296,19 @@ def run_vision(args):
             ok, encoded = cv2.imencode(".png", small, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             if ok:
                 with preview_lock:
-                    preview_data["png"] = base64.b64encode(encoded.tobytes())
-                    preview_data["seq"] += 1
+                    shared["png"] = base64.b64encode(encoded.tobytes())
+                    shared["png_seq"] += 1
 
-    preview_thread = threading.Thread(target=preview_loop, name="preview", daemon=True)
-    preview_thread.start()
-    window.start_timer(preview_lock, preview_data)
-
-    target = (layout.RINK_CENTER_X, AI_HOME_Y)
-    reaction_timer = 0.0
-    stalled_phase = "idle"
-    last_timestamp = None
-    last_sequence = -1
-    display_fps = 0.0
-    stats_timer = time.perf_counter()
-    detect_ms = 0.0
-    frame_ms = 0.0
-    processed = 0
+    threading.Thread(target=processing_loop, name="processing", daemon=True).start()
+    threading.Thread(target=encoding_loop, name="encoder", daemon=True).start()
+    window.start(preview_lock, shared)
 
     try:
-        while not window.closed:
-            frame = camera.get_latest_frame()
-            if frame is None or frame.sequence == last_sequence:
-                time.sleep(0.001)
-                continue
-            last_sequence = frame.sequence
-
-            now = frame.timestamp
-            dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
-            last_timestamp = now
-            if dt > 0:
-                instant = 1.0 / dt
-                display_fps = instant if display_fps == 0.0 else display_fps * 0.9 + instant * 0.1
-
-            t0 = time.perf_counter()
-            detection = detector.detect(frame)
-            detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
-
-            tracks = tracker.update(detection)
-            track = tracks[0] if tracks else None
-
-            status_text = "未检测到冰壶"
-            ai_target_pixel = None
-            if track is not None:
-                stone = track_to_rink_state(track, roi)
-                state = GameState(
-                    ai_x=layout.RINK_CENTER_X,
-                    ai_y=AI_HOME_Y,
-                    ai_home_y=AI_HOME_Y,
-                    target_x=target[0],
-                    target_y=target[1],
-                    stone=stone,
-                    awaiting_serve=False,
-                    current_server="player",
-                    serve_phase="idle",
-                    stalled_stone_phase=stalled_phase,
-                    reaction_timer=reaction_timer,
-                    difficulty=layout.DIFFICULTIES["普通"],
-                )
-                decision = ai.update(state, dt)
-                target = (decision.target_x, decision.target_y)
-                reaction_timer = decision.reaction_timer
-                stalled_phase = decision.stalled_stone_phase
-                tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
-                ai_target_pixel = (round(tx), round(ty))
-                status_text = (
-                    f"追踪 {track.state.value} | 场地坐标 ({stone.x:.0f}, {stone.y:.0f}) "
-                    f"v=({stone.vx:.0f}, {stone.vy:.0f}) | AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
-                )
-            window.set_status(status_text + "    Q / ESC 退出")
-
-            # 标注本身很便宜，每帧都做；缩放和 PNG 编码留给预览线程
-            marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps)
-            with preview_lock:
-                annotated["img"] = marked
-                annotated["seq"] = frame.sequence
-
-            frame_ms = frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
-            processed += 1
-            if time.perf_counter() - stats_timer >= STATS_INTERVAL:
-                stats_timer = time.perf_counter()
-                capture = camera.get_stats()
-                print(
-                    f"[stats] 处理 {display_fps:.1f} FPS | 单帧 {frame_ms:.1f} ms "
-                    f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS | 累计 {processed} 帧"
-                )
+        window.root.mainloop()
     except KeyboardInterrupt:
         pass
     finally:
-        display_stop.set()
+        stop.set()
         camera.stop()
         window.close()
 
