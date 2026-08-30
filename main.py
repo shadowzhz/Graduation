@@ -286,6 +286,8 @@ def run_vision(args):
                     f"[stats] 处理 {display_fps:.1f} FPS | 单帧 {frame_ms:.1f} ms "
                     f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS | 累计 {processed} 帧"
                 )
+    except KeyboardInterrupt:
+        pass
     finally:
         display_stop.set()
         camera.stop()
