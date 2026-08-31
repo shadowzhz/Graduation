@@ -18,7 +18,6 @@ from pathlib import Path
 
 import cv2
 
-# 允许直接执行 air_hockey/tools/calibrate_camera.py。
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -36,7 +35,7 @@ def parse_args():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=200.0)
-    parser.add_argument("--detect-fps", type=float, default=10.0, help="棋盘格检测频率，默认 10 FPS")
+    parser.add_argument("--detect-fps", type=float, default=10.0, help="棋盘格检测频率")
     parser.add_argument("--backend", choices=("gstreamer", "v4l2", "auto"), default="gstreamer")
     parser.add_argument("--output", default="calibration/camera_calibration.npz", help="标定结果保存路径")
     return parser.parse_args()
@@ -48,14 +47,15 @@ def main() -> int:
         raise ValueError("detect-fps 必须大于 0")
 
     calibrator = CameraCalibrator((args.cols, args.rows), args.square_size)
-    config = CameraConfig(
-        device=args.device,
-        width=args.width,
-        height=args.height,
-        requested_fps=args.fps,
-        backend=args.backend,
+    camera = CameraManager(
+        CameraConfig(
+            device=args.device,
+            width=args.width,
+            height=args.height,
+            requested_fps=args.fps,
+            backend=args.backend,
+        )
     )
-    camera = CameraManager(config)
 
     print(f"棋盘格内角点：{args.cols} x {args.rows}")
     print(f"单格尺寸：{args.square_size}")
@@ -69,22 +69,26 @@ def main() -> int:
 
     try:
         camera.start()
-        cv2.namedWindow("Camera Calibration", cv2.WINDOW_NORMAL)
+        # start() 已确认首帧后，再通过 wait_for_frame 获取实际图像，避免
+        # 高速后台线程刚切换时 get_latest_frame() 读到空状态。
+        first_frame = camera.wait_for_frame(timeout=1.0)
+        if first_frame is None:
+            raise RuntimeError("摄像头启动后未获取到图像帧")
+        latest_frame = first_frame.image.copy()
+        print(f"已获取首帧：{latest_frame.shape[1]}x{latest_frame.shape[0]}")
+
+        window = "Camera Calibration"
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window, min(args.width, 1280), min(args.height, 720))
 
         while True:
             frame = camera.get_latest_frame()
-            if frame is not None:
+            if frame is not None and frame.image is not None:
                 latest_frame = frame.image.copy()
                 now = time.monotonic()
                 if now - last_detect_time >= detect_interval:
                     latest_corners = calibrator.detect(latest_frame)
                     last_detect_time = now
-
-            if latest_frame is None:
-                key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord("q"), ord("Q")):
-                    break
-                continue
 
             image = latest_frame.copy()
             if latest_corners is not None:
@@ -96,24 +100,16 @@ def main() -> int:
             cv2.putText(
                 image,
                 f"Samples: {calibrator.sample_count} | SPACE capture | C calibrate | Q quit",
-                (20, 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (0, 255, 0) if detected else (0, 0, 255),
-                2,
-                cv2.LINE_AA,
+                (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                (0, 255, 0) if detected else (0, 0, 255), 2, cv2.LINE_AA,
             )
-            status = "Chessboard detected" if detected else "Chessboard not detected"
             cv2.putText(
                 image,
-                status,
-                (20, 65),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0) if detected else (0, 0, 255),
-                2,
+                "Chessboard detected" if detected else "Chessboard not detected",
+                (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (0, 255, 0) if detected else (0, 0, 255), 2,
             )
-            cv2.imshow("Camera Calibration", image)
+            cv2.imshow(window, image)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q"), ord("Q")):
