@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ class CalibrationResult:
 
     camera_matrix: np.ndarray
     dist_coeffs: np.ndarray
-    image_size: tuple[int, int]
+    image_size: Tuple[int, int]
     reprojection_error: float
     rms: float
 
@@ -21,7 +22,7 @@ class CalibrationResult:
 class CameraCalibrator:
     """使用棋盘格角点计算相机内参和畸变参数。"""
 
-    def __init__(self, pattern_size: tuple[int, int], square_size: float = 1.0):
+    def __init__(self, pattern_size: Tuple[int, int], square_size: float = 1.0):
         cols, rows = pattern_size
         if cols < 2 or rows < 2:
             raise ValueError("pattern_size 必须是至少 2x2 的内角点")
@@ -30,9 +31,9 @@ class CameraCalibrator:
 
         self.pattern_size = (cols, rows)
         self.square_size = float(square_size)
-        self._object_points: list[np.ndarray] = []
-        self._image_points: list[np.ndarray] = []
-        self._image_size: tuple[int, int] | None = None
+        self._object_points: List[np.ndarray] = []
+        self._image_points: List[np.ndarray] = []
+        self._image_size: Optional[Tuple[int, int]] = None
 
         objp = np.zeros((rows * cols, 3), np.float32)
         objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
@@ -61,8 +62,7 @@ class CameraCalibrator:
             30,
             0.001,
         )
-        refined = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-        return refined
+        return cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
 
     def add_sample(self, image: np.ndarray, corners=None) -> bool:
         """加入一组标定样本；返回是否成功加入。"""
@@ -118,7 +118,7 @@ class CameraCalibrator:
         )
 
     @staticmethod
-    def save(result: CalibrationResult, path: str | Path) -> None:
+    def save(result: CalibrationResult, path: str) -> None:
         """保存为 NumPy npz 文件。"""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,7 +132,7 @@ class CameraCalibrator:
         )
 
     @staticmethod
-    def load(path: str | Path) -> CalibrationResult:
+    def load(path: str) -> CalibrationResult:
         """加载已保存的标定结果。"""
         with np.load(path) as data:
             return CalibrationResult(
@@ -146,8 +146,4 @@ class CameraCalibrator:
     @staticmethod
     def undistort(image: np.ndarray, result: CalibrationResult) -> np.ndarray:
         """使用标定结果进行畸变校正。"""
-        return cv2.undistort(
-            image,
-            result.camera_matrix,
-            result.dist_coeffs,
-        )
+        return cv2.undistort(image, result.camera_matrix, result.dist_coeffs)
