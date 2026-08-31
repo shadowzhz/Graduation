@@ -30,7 +30,7 @@ class GStreamerBackend:
         fps = self.config.requested_fps
         pipeline_desc = (
             f"v4l2src device={device} io-mode=2 ! "
-            f"image/jpeg,width={width},height={height},framerate={fps}/1 ! "
+            f"image/jpeg,width={width},height={height},framerate={int(fps)}/1 ! "
             "nvv4l2decoder mjpeg=1 ! "
             "nvvidconv ! video/x-raw,format=BGRx ! "
             "appsink name=sink emit-signals=false max-buffers=1 drop=true sync=false "
