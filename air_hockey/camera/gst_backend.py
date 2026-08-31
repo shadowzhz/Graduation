@@ -75,7 +75,10 @@ class GStreamerBackend(CameraBackend):
         height = self.config.height
         fps = int(self.config.requested_fps)
         source_format = self.config.pixel_format.upper()
-        sink = "appsink name=airhockeysink drop=true max-buffers=1 sync=false"
+        sink = (
+            "appsink name=airhockeysink drop=true max-buffers=1 "
+            "sync=false qos=false enable-last-sample=false wait-on-eos=false"
+        )
 
         if source_format in {"MJPG", "JPEG"}:
             source = (
@@ -116,7 +119,8 @@ class GStreamerBackend(CameraBackend):
             f"window-width={width} window-height={height} "
             "split. ! queue max-size-buffers=1 leaky=downstream ! "
             "nvvidconv ! video/x-raw,format=BGRx ! "
-            "appsink name=airhockeysink drop=true max-buffers=1 sync=false"
+            "appsink name=airhockeysink drop=true max-buffers=1 sync=false "
+            "qos=false enable-last-sample=false wait-on-eos=false"
         )
 
     def _open_native(self, device):
@@ -210,8 +214,9 @@ class GStreamerBackend(CameraBackend):
         return (ok, self._as_bgr(frame)) if ok and frame is not None else (False, None)
 
     def _read_native(self):
-        # try-pull-sample 自带超时，停止时不会卡死采集线程
-        sample = self._appsink.emit("try-pull-sample", self._gst.SECOND // 2)
+        # 直接调用 GstAppSink 的 try_pull_sample，避免通用 signal emit 的额外分发开销。
+        # timeout 保持有限，停止时不会长期卡死采集线程。
+        sample = self._appsink.try_pull_sample(self._gst.SECOND // 2)
         if sample is None:
             return False, None
         buffer = sample.get_buffer()
