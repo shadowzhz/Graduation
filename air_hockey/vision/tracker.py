@@ -6,9 +6,9 @@ from .types import Detection, Track, TrackState
 
 
 class StoneTracker:
-    """常速模型预测 + 速度指数平滑的单目标跟踪。"""
+    """常速模型预测 + 速度指数平滑的单目标跟踪器。"""
 
-    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) -> None:
+    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) ->
         if max_distance <= 0.0:
             raise ValueError("max_distance must be positive")
         if max_missed_frames < 0:
@@ -26,7 +26,7 @@ class StoneTracker:
         return self._track
 
     def update(self, detection):
-        """喂入一帧检测结果，返回当前轨迹列表。"""
+        """喂入检测结果，校正当前轨迹。"""
         if detection is None:
             return self._handle_missing_detection()
 
@@ -43,11 +43,30 @@ class StoneTracker:
             detection.center_x - self._track.center_x,
             detection.center_y - self._track.center_y,
         )
-        # 静止目标的速度预测会乱飘，两种距离取更近的，避免没必要的换 ID
         if min(predicted_distance, actual_distance) > self.max_distance:
             return self._handle_unmatched_detection(detection)
 
         self._update_track(detection)
+        return [self._track]
+
+    def predict(self, timestamp):
+        """在没有新检测结果的帧上按常速模型推进轨迹。"""
+        if self._track is None:
+            return []
+
+        dt = max(0.0, float(timestamp) - self._track.last_timestamp)
+        self._track.center_x += self._track.vx * dt
+        self._track.center_y += self._track.vy * dt
+        self._track.last_timestamp = float(timestamp)
+        self._track.age += 1
+        self._track.missed_frames += 1
+
+        if self._track.missed_frames > self.max_missed_frames:
+            self._track.state = TrackState.LOST
+            self._track = None
+            return []
+
+        self._track.state = TrackState.LOST
         return [self._track]
 
     def reset(self) -> None:
@@ -97,7 +116,6 @@ class StoneTracker:
             return []
 
         self._track.missed_frames += 1
-
         if self._track.missed_frames > self.max_missed_frames:
             self._track.state = TrackState.LOST
             self._track = None
@@ -107,6 +125,5 @@ class StoneTracker:
         return [self._track]
 
     def _handle_unmatched_detection(self, detection):
-        # 离得远就当新目标，重新建轨
         self._track = self._create_track(detection)
         return [self._track]
