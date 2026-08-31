@@ -23,7 +23,8 @@ class CameraConfig:
     height: int = 720
     requested_fps: float = 200.0
     pixel_format: str = "MJPG"
-    backend: str = "auto"
+    # Jetson 视觉主链路固定使用硬件 GStreamer，避免 auto 静默回退到低性能 V4L2。
+    backend: str = "gstreamer"
 
 
 @dataclass
