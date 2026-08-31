@@ -4,9 +4,9 @@
     python main.py               # 启动冰壶仿真游戏
     python main.py --vision      # 实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI
 
-线程分工（Tk 只能在创建它的线程里操作）：
+线程分工：
     主线程    Tk mainloop + 显示定时器
-    处理线程  取帧 -> 检测 -> 追踪 -> AI -> 标注
+    处理线程  取最新帧 -> 间隔检测/追踪 -> AI -> 标注
     编码线程  最新标注帧 -> 缩放 -> PNG（按预览帧率限速）
 """
 
@@ -37,6 +37,7 @@ from vision.tracker import StoneTracker
 
 DISPLAY_WIDTH = 640
 STATS_INTERVAL = 5.0
+DETECTION_INTERVAL = 3
 AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
 
 
@@ -45,7 +46,6 @@ def run_game():
 
 
 def _rink_scales(roi):
-    """ROI 的像素尺度和场地尺度的比值，坐标换算用。"""
     _x, _y, w, h = roi
     return (
         (layout.RINK_RIGHT - layout.RINK_LEFT) / w,
@@ -54,10 +54,6 @@ def _rink_scales(roi):
 
 
 def pixel_to_rink(x, y, roi):
-    """临时的线性映射：把检测 ROI 拉伸到虚拟场地。
-
-    这只是占位实现，实体台子搭好后要换成四点 Homography 标定。
-    """
     roi_x, roi_y, _w, _h = roi
     scale_x, scale_y = _rink_scales(roi)
     return (
@@ -76,7 +72,6 @@ def rink_to_pixel(x, y, roi):
 
 
 def track_to_rink_state(track, roi):
-    """视觉链路 -> 游戏侧的桥：像素坐标的追踪结果转成场地坐标的 StoneState。"""
     stone = StoneState.from_tracker(track)
     x, y = pixel_to_rink(stone.x, stone.y, roi)
     scale_x, scale_y = _rink_scales(roi)
@@ -84,7 +79,6 @@ def track_to_rink_state(track, roi):
 
 
 def annotate(image, roi, detection, track, ai_target_pixel, display_fps):
-    """画在副本上：ROI 框、检测圆、追踪速度箭头、AI 目标十字。"""
     output = image.copy()
     x, y, w, h = roi
     cv2.rectangle(output, (x, y), (x + w, y + h), (0, 255, 255), 2)
@@ -160,7 +154,6 @@ class VisionWindow:
             if self.root.winfo_exists():
                 self.root.destroy()
         except tk.TclError:
-            # 窗口已被销毁（例如用户关闭后再收尾），忽略即可
             pass
 
 
@@ -179,7 +172,7 @@ def run_vision(args):
         min_radius=25.0,
         min_circularity=0.65,
     )
-    tracker = StoneTracker()
+    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)
     ai = AirHockeyAI()
     camera = CameraManager(CameraConfig())
     try:
@@ -189,17 +182,18 @@ def run_vision(args):
         raise SystemExit(f"摄像头启动失败：{exc}")
 
     print("实时视觉演示开始，Q / ESC 或关闭窗口退出")
+    print(f"视觉管线：最新帧 + 每 {DETECTION_INTERVAL} 帧检测，其余帧使用 tracker 预测")
 
-    # Tk 线程与工作线程之间只通过这个加锁的共享区交换数据
     preview_lock = threading.Lock()
     shared = {"img": None, "img_seq": -1, "png": None, "png_seq": 0,
               "status": "等待画面", "fatal": None}
     stop = threading.Event()
 
     def processing_loop():
-        """取帧 -> 检测 -> 追踪 -> AI -> 标注；不碰任何 Tk 对象。"""
+        """只取最新帧；检测按固定间隔运行，中间帧由 tracker 预测。"""
         last_sequence = -1
         last_timestamp = None
+        frame_index = 0
         display_fps = 0.0
         stats_timer = time.perf_counter()
         detect_ms = 0.0
@@ -214,6 +208,7 @@ def run_vision(args):
                     time.sleep(0.001)
                     continue
                 last_sequence = frame.sequence
+                frame_index += 1
 
                 now = frame.timestamp
                 dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
@@ -223,10 +218,13 @@ def run_vision(args):
                     display_fps = instant if display_fps == 0.0 else display_fps * 0.9 + instant * 0.1
 
                 t0 = time.perf_counter()
-                detection = detector.detect(frame)
-                detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
-
-                tracks = tracker.update(detection)
+                detection = None
+                if frame_index == 1 or frame_index % DETECTION_INTERVAL == 0:
+                    detection = detector.detect(frame)
+                    detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
+                    tracks = tracker.update(detection)
+                else:
+                    tracks = tracker.predict(frame.timestamp)
                 track = tracks[0] if tracks else None
 
                 status_text = "未检测到冰壶"
@@ -289,10 +287,7 @@ def run_vision(args):
                 continue
             seen = seq
             scale = DISPLAY_WIDTH / img.shape[1]
-            small = cv2.resize(
-                img, (DISPLAY_WIDTH, round(img.shape[0] * scale)),
-                interpolation=cv2.INTER_AREA,
-            )
+            small = cv2.resize(img, (DISPLAY_WIDTH, round(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
             ok, encoded = cv2.imencode(".png", small, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             if ok:
                 with preview_lock:
