@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -35,6 +36,7 @@ def parse_args():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=200.0)
+    parser.add_argument("--detect-fps", type=float, default=10.0, help="棋盘格检测频率，默认 10 FPS")
     parser.add_argument("--backend", choices=("gstreamer", "v4l2", "auto"), default="gstreamer")
     parser.add_argument("--output", default="calibration/camera_calibration.npz", help="标定结果保存路径")
     return parser.parse_args()
@@ -42,6 +44,9 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
+    if args.detect_fps <= 0:
+        raise ValueError("detect-fps 必须大于 0")
+
     calibrator = CameraCalibrator((args.cols, args.rows), args.square_size)
     config = CameraConfig(
         device=args.device,
@@ -54,42 +59,69 @@ def main() -> int:
 
     print(f"棋盘格内角点：{args.cols} x {args.rows}")
     print(f"单格尺寸：{args.square_size}")
+    print(f"摄像头 FPS：{args.fps:.0f}，棋盘格检测 FPS：{args.detect_fps:.1f}")
     print("SPACE=采集，C=标定并保存，Q/ESC=退出")
+
+    detect_interval = 1.0 / args.detect_fps
+    last_detect_time = 0.0
+    latest_corners = None
+    latest_frame = None
 
     try:
         camera.start()
+        cv2.namedWindow("Camera Calibration", cv2.WINDOW_NORMAL)
+
         while True:
             frame = camera.get_latest_frame()
-            if frame is None:
+            if frame is not None:
+                latest_frame = frame.image.copy()
+                now = time.monotonic()
+                if now - last_detect_time >= detect_interval:
+                    latest_corners = calibrator.detect(latest_frame)
+                    last_detect_time = now
+
+            if latest_frame is None:
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q"), ord("Q")):
+                    break
                 continue
 
-            image = frame.image.copy()
-            corners = calibrator.detect(image)
-            if corners is not None:
-                cv2.drawChessboardCorners(image, calibrator.pattern_size, corners, True)
+            image = latest_frame.copy()
+            if latest_corners is not None:
+                cv2.drawChessboardCorners(
+                    image, calibrator.pattern_size, latest_corners, True
+                )
 
+            detected = latest_corners is not None
             cv2.putText(
                 image,
                 f"Samples: {calibrator.sample_count} | SPACE capture | C calibrate | Q quit",
                 (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
-                (0, 255, 0) if corners is not None else (0, 0, 255),
+                (0, 255, 0) if detected else (0, 0, 255),
                 2,
                 cv2.LINE_AA,
             )
-            status = "Chessboard detected" if corners is not None else "Chessboard not detected"
-            cv2.putText(image, status, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0, 255, 0) if corners is not None else (0, 0, 255), 2)
+            status = "Chessboard detected" if detected else "Chessboard not detected"
+            cv2.putText(
+                image,
+                status,
+                (20, 65),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0) if detected else (0, 0, 255),
+                2,
+            )
             cv2.imshow("Camera Calibration", image)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q"), ord("Q")):
                 break
             if key == ord(" "):
-                if corners is None:
+                if latest_corners is None:
                     print("当前画面未检测到完整棋盘格，未采集。")
-                elif calibrator.add_sample(image, corners):
+                elif calibrator.add_sample(latest_frame, latest_corners):
                     print(f"已采集第 {calibrator.sample_count} 组样本。")
             elif key in (ord("c"), ord("C")):
                 if calibrator.sample_count < 5:
@@ -100,7 +132,10 @@ def main() -> int:
                 if not output.is_absolute():
                     output = ROOT / output
                 calibrator.save(result, output)
-                print(f"标定完成：RMS={result.rms:.6f}, 平均重投影误差={result.reprojection_error:.6f}")
+                print(
+                    f"标定完成：RMS={result.rms:.6f}, "
+                    f"平均重投影误差={result.reprojection_error:.6f}"
+                )
                 print(f"已保存：{output}")
 
     finally:
