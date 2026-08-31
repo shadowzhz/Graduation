@@ -323,7 +323,7 @@ def main():
     parser = argparse.ArgumentParser(description="空气冰壶项目入口")
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
-    parser.add_argument("--calibration", default="camera_calibration.npz", help="相机标定文件")
+    parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正")
     parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
