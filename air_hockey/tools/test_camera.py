@@ -20,8 +20,8 @@ def build_parser():
     parser.add_argument(
         "--backend",
         choices=("auto", "gstreamer", "v4l2"),
-        default="auto",
-        help="选择摄像头后端，默认自动尝试 GStreamer 后再尝试 V4L2",
+        default="gstreamer",
+        help="选择摄像头后端，默认使用 GStreamer，避免自动回退影响性能测试",
     )
     parser.add_argument("--device", default=None, help="摄像头设备，例如 /dev/video0")
     parser.add_argument("--width", type=int, default=1280)
