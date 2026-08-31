@@ -33,7 +33,6 @@ class CameraManager:
 
     @property
     def hardware_preview(self) -> bool:
-        """GStreamer 后端当前是否在往嵌入窗口做硬件预览。"""
         return bool(getattr(self._backend, "hardware_preview", False))
 
     def is_running(self) -> bool:
@@ -47,11 +46,12 @@ class CameraManager:
 
     def _open(self) -> None:
         errors = []
+        backend_name = self.config.backend.strip().lower()
         backend_types = {
             "gstreamer": (GStreamerBackend,),
             "v4l2": (V4L2Backend,),
             "auto": (GStreamerBackend, V4L2Backend),
-        }.get(self.config.backend.strip().lower())
+        }.get(backend_name)
         if backend_types is None:
             raise ValueError("backend must be 'auto', 'gstreamer', or 'v4l2'")
         for device in self._devices():
@@ -73,6 +73,11 @@ class CameraManager:
                 except Exception as exc:
                     errors.append(f"{backend_type.__name__}: {exc}")
                     backend.release()
+                    # 显式选择后端时不允许静默切换，避免性能测试得到误导结果。
+                    if backend_name != "auto":
+                        raise RuntimeError(
+                            f"指定的 {backend_name} 后端启动失败: {exc}"
+                        ) from exc
         raise RuntimeError(
             "找不到可用摄像头，请检查 /dev/video* 和 video 组权限。"
             + "; ".join(errors[-4:])
@@ -82,7 +87,6 @@ class CameraManager:
         with self._lock:
             if self._running:
                 return
-            # 重启时清掉上一轮的帧和统计
             self.frame_buffer.clear()
             self._stats.reset()
             self._stop.clear()
@@ -114,7 +118,6 @@ class CameraManager:
                         break
                     time.sleep(0.001)
                     continue
-                # Frame 时间戳在采集线程里生成，统计和检测共用这个时间
                 frame = self.frame_buffer.put(Frame(image))
                 self._stats.record_frame(frame.timestamp)
                 self._ready.set()
@@ -139,7 +142,6 @@ class CameraManager:
             self._stop.set()
             self._backend = None
             self._thread = None
-        # 先发停止信号并摘掉后端，再等线程退出
         if backend is not None:
             backend.release()
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
