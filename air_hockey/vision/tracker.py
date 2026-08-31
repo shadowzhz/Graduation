@@ -1,5 +1,6 @@
 """单目标轨迹跟踪。"""
 
+from dataclasses import replace
 from math import hypot
 
 from .types import Detection, Track, TrackState
@@ -26,58 +27,46 @@ class StoneTracker:
         return self._track
 
     def update(self, detection):
-        """喂入检测结果，校正当前轨迹。"""
+        """用新的检测结果校正轨迹。"""
         if detection is None:
             return self._handle_missing_detection()
-
         if self._track is None:
             self._track = self._create_track(detection)
             return [self._track]
 
         predicted_x, predicted_y = self._predict_position(detection.timestamp)
-        predicted_distance = hypot(
-            detection.center_x - predicted_x,
-            detection.center_y - predicted_y,
-        )
-        actual_distance = hypot(
-            detection.center_x - self._track.center_x,
-            detection.center_y - self._track.center_y,
-        )
+        predicted_distance = hypot(detection.center_x - predicted_x, detection.center_y - predicted_y)
+        actual_distance = hypot(detection.center_x - self._track.center_x, detection.center_y - self._track.center_y)
         if min(predicted_distance, actual_distance) > self.max_distance:
             return self._handle_unmatched_detection(detection)
-
         self._update_track(detection)
         return [self._track]
 
     def predict(self, timestamp):
-        """在没有新检测结果的帧上按常速模型推进轨迹。"""
+        """在检测间隔帧上按常速模型返回预测轨迹，不修改内部观测状态。"""
         if self._track is None:
             return []
-
-        dt = max(0.0, float(timestamp) - self._track.last_timestamp)
-        self._track.center_x += self._track.vx * dt
-        self._track.center_y += self._track.vy * dt
-        self._track.last_timestamp = float(timestamp)
-        self._track.age += 1
-        self._track.missed_frames += 1
-
-        if self._track.missed_frames > self.max_missed_frames:
-            self._track.state = TrackState.LOST
-            self._track = None
+        timestamp = float(timestamp)
+        dt = max(0.0, timestamp - self._track.last_timestamp)
+        missed = self._track.missed_frames + 1
+        if missed > self.max_missed_frames:
             return []
-
-        self._track.state = TrackState.LOST
-        return [self._track]
+        return [replace(
+            self._track,
+            center_x=self._track.center_x + self._track.vx * dt,
+            center_y=self._track.center_y + self._track.vy * dt,
+            last_timestamp=timestamp,
+            age=self._track.age + 1,
+            missed_frames=missed,
+            state=TrackState.LOST,
+        )]
 
     def reset(self) -> None:
         self._track = None
 
     def _predict_position(self, timestamp):
         dt = max(0.0, timestamp - self._track.last_timestamp)
-        return (
-            self._track.center_x + self._track.vx * dt,
-            self._track.center_y + self._track.vy * dt,
-        )
+        return (self._track.center_x + self._track.vx * dt, self._track.center_y + self._track.vy * dt)
 
     def _create_track(self, detection) -> Track:
         track = Track(
@@ -95,14 +84,12 @@ class StoneTracker:
     def _update_track(self, detection) -> None:
         track = self._track
         dt = detection.timestamp - track.last_timestamp
-
         if dt > 0.0:
             measured_vx = (detection.center_x - track.center_x) / dt
             measured_vy = (detection.center_y - track.center_y) / dt
             alpha = self.velocity_alpha
             track.vx = (1.0 - alpha) * track.vx + alpha * measured_vx
             track.vy = (1.0 - alpha) * track.vy + alpha * measured_vy
-
         track.center_x = detection.center_x
         track.center_y = detection.center_y
         track.radius = detection.radius
@@ -114,13 +101,11 @@ class StoneTracker:
     def _handle_missing_detection(self):
         if self._track is None:
             return []
-
         self._track.missed_frames += 1
         if self._track.missed_frames > self.max_missed_frames:
             self._track.state = TrackState.LOST
             self._track = None
             return []
-
         self._track.state = TrackState.LOST
         return [self._track]
 
