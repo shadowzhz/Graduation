@@ -32,7 +32,7 @@ import air_hockey_config as layout
 from air_hockey_ai import AirHockeyAI
 from camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
-from vision import StoneDetector
+from vision import StoneDetector, VisionPipeline
 from vision.tracker import StoneTracker
 
 DISPLAY_WIDTH = 640
@@ -174,6 +174,10 @@ def run_vision(args):
     )
     tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)
     ai = AirHockeyAI()
+    vision_pipeline = VisionPipeline(
+        calibration_file=args.calibration,
+        enabled=not args.disable_undistort,
+    )
     camera = CameraManager(CameraConfig())
     try:
         camera.start()
@@ -183,6 +187,9 @@ def run_vision(args):
 
     print("实时视觉演示开始，Q / ESC 或关闭窗口退出")
     print(f"视觉管线：最新帧 + 每 {DETECTION_INTERVAL} 帧检测，其余帧使用 tracker 预测")
+    print("视觉校正:")
+    print(f"  calibration: {args.calibration}")
+    print(f"  undistort: {'enabled' if not args.disable_undistort else 'disabled'}")
 
     preview_lock = threading.Lock()
     shared = {"img": None, "img_seq": -1, "png": None, "png_seq": 0,
@@ -209,6 +216,7 @@ def run_vision(args):
                     continue
                 last_sequence = frame.sequence
                 frame_index += 1
+                frame = vision_pipeline.process(frame)
 
                 now = frame.timestamp
                 dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
@@ -227,7 +235,8 @@ def run_vision(args):
                     tracks = tracker.predict(frame.timestamp)
                 track = tracks[0] if tracks else None
 
-                status_text = "未检测到冰壶"
+                correction_status = "ON" if vision_pipeline.camera_matrix is not None else "OFF"
+                status_text = f"FPS {display_fps:.1f} | 校正 {correction_status} | 未检测到冰壶"
                 ai_target_pixel = None
                 if track is not None:
                     stone = track_to_rink_state(track, roi)
@@ -252,8 +261,10 @@ def run_vision(args):
                     tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
                     ai_target_pixel = (round(tx), round(ty))
                     status_text = (
-                        f"追踪 {track.state.value} | 场地坐标 ({stone.x:.0f}, {stone.y:.0f}) "
-                        f"v=({stone.vx:.0f}, {stone.vy:.0f}) | AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
+                        f"FPS {display_fps:.1f} | 校正 {correction_status} | "
+                        f"追踪 {track.state.value} | 位置 ({stone.x:.0f}, {stone.y:.0f}) "
+                        f"| 速度 ({stone.vx:.0f}, {stone.vy:.0f}) | "
+                        f"AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
                     )
 
                 marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps)
@@ -312,6 +323,8 @@ def main():
     parser = argparse.ArgumentParser(description="空气冰壶项目入口")
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
+    parser.add_argument("--calibration", default="camera_calibration.npz", help="相机标定文件")
+    parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正")
     parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
