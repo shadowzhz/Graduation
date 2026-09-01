@@ -1,6 +1,6 @@
-"""摄像头采集管理：自动选后端，后台线程只保留最新一帧。"""
+"""摄像头采集管理：自动选后端，后台线程只保留最新一帧并提供给视觉算法，管理摄像头线程"""
 
-import glob
+import glob     # 寻找设备
 import threading
 import time
 
@@ -16,14 +16,14 @@ from .v4l2_backend import V4L2Backend
 class CameraManager:
     def __init__(self, config=None, preview_window_handle=None) -> None:
         self.config = config if config is not None else CameraConfig()
-        self.frame_buffer = FrameBuffer()
-        self._stats = FPSStats(self.config.requested_fps)
-        self._backend = None
-        self._info = None
+        self.frame_buffer = FrameBuffer()       # 创建缓存
+        self._stats = FPSStats(self.config.requested_fps)       # FPS 统计
+        self._backend = None                # 后端，GStreamerBackend 或者 V4L2Backend
+        self._info = None                   # 保存摄像头信息
         self._preview_window_handle = preview_window_handle
         self._thread = None
         self._stop = threading.Event()
-        self._ready = threading.Event()
+        self._ready = threading.Event()     # 等待首帧信号
         self._lock = threading.RLock()
         self._running = False
 
@@ -39,19 +39,27 @@ class CameraManager:
         with self._lock:
             return self._running
 
+    # 寻找摄像头
     def _devices(self):
+        # 如果指定则返回指定设备
         if self.config.device:
             return [self.config.device]
+        # 否则对所有设备扫描
         return sorted(glob.glob("/dev/video*"), key=lambda p: int(p.rsplit("video", 1)[-1]))
 
+    # 打开摄像头
     def _open(self) -> None:
         errors = []
+        # 选择后端
         backend_name = self.config.backend.strip().lower()
+
+        # 后端列表
         backend_types = {
             "gstreamer": (GStreamerBackend,),
             "v4l2": (V4L2Backend,),
             "auto": (GStreamerBackend, V4L2Backend),
         }.get(backend_name)
+
         if backend_types is None:
             raise ValueError("backend must be 'auto', 'gstreamer', or 'v4l2'")
         for device in self._devices():
@@ -61,7 +69,9 @@ class CameraManager:
                 else:
                     backend = backend_type(self.config)
                 try:
+                    # 打开摄像头
                     self._info = backend.open(device)
+                    # 成功打开则保存
                     self._backend = backend
                     print(
                         f"摄像头：{device}，后端：{self._info.backend}，"
@@ -83,6 +93,7 @@ class CameraManager:
             + "; ".join(errors[-4:])
         )
 
+    # 启动摄像头
     def start(self, timeout: float = 2.0) -> None:
         with self._lock:
             if self._running:
@@ -93,6 +104,8 @@ class CameraManager:
             self._ready.clear()
             self._open()
             self._running = True
+
+            # 创建后台进程
             self._thread = threading.Thread(
                 target=self.capture_loop, name="camera-capture", daemon=True
             )
@@ -126,6 +139,7 @@ class CameraManager:
                 if not self._stop.is_set():
                     self._running = False
 
+    # 外部调用接口
     def get_latest_frame(self):
         return self.frame_buffer.get_latest_frame()
 
@@ -135,6 +149,7 @@ class CameraManager:
     def wait_for_frame(self, timeout=None):
         return self.frame_buffer.wait_for_frame(timeout)
 
+    # 关闭摄像头
     def stop(self) -> None:
         with self._lock:
             backend, thread = self._backend, self._thread
@@ -143,7 +158,10 @@ class CameraManager:
             self._backend = None
             self._thread = None
         if backend is not None:
-            backend.release()
+            backend.release()   # 释放摄像头
+
+        # 等待线程结束
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(1.0)
-        self.frame_buffer.clear()
+
+        self.frame_buffer.clear()   # 清空缓存

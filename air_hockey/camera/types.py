@@ -1,4 +1,4 @@
-"""摄像头层数据结构。"""
+"""摄像头层数据结构，定义数据格式"""
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -11,7 +11,7 @@ class Frame:
 
     image: Any
     timestamp: float = field(default_factory=time.perf_counter)
-    sequence: int = 0
+    sequence: int = 0       # 帧编号
 
 
 @dataclass
@@ -19,10 +19,17 @@ class CameraConfig:
     """摄像头的请求参数，实际开成什么模式要看 CameraInfo。"""
 
     device: Optional[str] = None
+
+    # 请求分辨率
     width: int = 1280
     height: int = 720
+
+    # 请求帧率
     requested_fps: float = 200.0
+
+    # 请求摄像头输出格式
     pixel_format: str = "MJPG"
+
     # Jetson 视觉主链路固定使用硬件 GStreamer，避免 auto 静默回退到低性能 V4L2。
     backend: str = "gstreamer"
 

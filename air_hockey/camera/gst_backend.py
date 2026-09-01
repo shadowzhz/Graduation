@@ -5,7 +5,7 @@ import time
 import cv2
 import numpy as np
 
-
+# 定义一个摄像头后端
 class GStreamerBackend:
     def __init__(self, config, preview_window_handle=None):
         self.config = config
@@ -51,10 +51,12 @@ class GStreamerBackend:
         print("GStreamer 原生 appsink 已启动：Jetson 硬件 MJPEG 解码")
         return self._info
 
+    # 检测后端有无硬件显示
     @property
     def hardware_preview(self):
         return False
 
+    # 读取图片
     def _read_native(self):
         # PyGObject on the Jetson image does not expose GstAppSink.try_pull_sample()
         # as a Python method; use the standard appsink signal API instead.
