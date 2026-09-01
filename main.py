@@ -10,18 +10,18 @@
     编码线程  最新标注帧 -> 缩放 -> PNG（按预览帧率限速）
 """
 
-import argparse
-import base64
-import subprocess
+import argparse     # 命令行参数解析模块
+import base64       # 图片编码模块
+import subprocess   # 启动其他程序
 import sys
-import threading
+import threading    # 多线程
 import time
 from dataclasses import replace
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-VISION_ROOT = PROJECT_ROOT / "air_hockey"
-SIM_ROOT = PROJECT_ROOT / "冰壶仿真"
+PROJECT_ROOT = Path(__file__).resolve().parent  # 找到 main.py 所在文件夹
+VISION_ROOT = PROJECT_ROOT / "air_hockey"       # 视觉代码
+SIM_ROOT = PROJECT_ROOT / "冰壶仿真"             # 仿真代码
 sys.path.insert(0, str(SIM_ROOT))
 sys.path.insert(0, str(VISION_ROOT))
 
@@ -36,10 +36,11 @@ from vision import StoneDetector, VisionPipeline
 from vision.predictor import predict_position, predict_trajectory
 from vision.tracker import StoneTracker
 
-DISPLAY_WIDTH = 640
-STATS_INTERVAL = 5.0
-DETECTION_INTERVAL = 3
-AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
+DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
+STATS_INTERVAL = 5.0        # 统计间隔
+DETECTION_INTERVAL = 3      # 检测间隔
+
+AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28   # AI 初始位置
 
 
 def run_game():
@@ -163,7 +164,7 @@ class VisionWindow:
 
 
 def run_vision(args):
-    roi = tuple(args.roi)
+    roi = tuple(args.roi)   # 初始化 ROI 区域
     headless = args.headless
     window = None
     if not headless:
@@ -172,6 +173,9 @@ def run_vision(args):
         except tk.TclError as exc:
             raise SystemExit(f"无法打开窗口：{exc}")
 
+    # 创建视觉模块
+
+    # 找冰壶
     detector = StoneDetector(
         roi=roi,
         lower=tuple(args.lower),
@@ -180,12 +184,20 @@ def run_vision(args):
         min_radius=25.0,
         min_circularity=0.65,
     )
-    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)
+
+    # 补充检测
+    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)    # 每 3 帧检测一次，中间是 tracker 预测，用于提高速度
+
+    # AI 策略部分，根据冰壶状态决定击打目标的位置
     ai = AirHockeyAI()
+
+    # 相机畸变校正
     vision_pipeline = VisionPipeline(
         calibration_file=args.calibration,
         enabled=not args.disable_undistort,
     )
+
+    # 打开摄像头
     camera = CameraManager(CameraConfig())
     try:
         camera.start()
@@ -206,6 +218,7 @@ def run_vision(args):
               "status": "等待画面", "fatal": None}
     stop = threading.Event()
 
+    # 视觉主循环，核心部分
     def processing_loop():
         """只取最新帧；检测按固定间隔运行，中间帧由 tracker 预测。"""
         last_sequence = -1
@@ -221,12 +234,15 @@ def run_vision(args):
         window_closed = lambda: window.closed if window is not None else False
         try:
             while not stop.is_set() and not window_closed():
+                # 拿最新图片
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
                     time.sleep(0.001)
                     continue
                 last_sequence = frame.sequence
                 frame_index += 1
+
+                # 畸变校正
                 frame = vision_pipeline.process(frame)
 
                 now = frame.timestamp
@@ -238,12 +254,17 @@ def run_vision(args):
 
                 t0 = time.perf_counter()
                 detection = None
+
+                # 第 1 帧以及后面每 3 帧检测一次
                 if frame_index == 1 or frame_index % DETECTION_INTERVAL == 0:
                     detection = detector.detect(frame)
                     detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
                     tracks = tracker.update(detection)
+                # 否则预测
                 else:
                     tracks = tracker.predict(frame.timestamp)
+
+                # 拿到第 1 个目标
                 track = tracks[0] if tracks else None
 
                 correction_status = "ON" if vision_pipeline.camera_matrix is not None else "OFF"
@@ -251,8 +272,13 @@ def run_vision(args):
                 ai_target_pixel = None
                 trajectory = None
                 if track is not None:
+                    # 坐标转换
                     stone = track_to_rink_state(track, roi)
+
+                    # 预测冰壶 0.5s 后的位置
                     pred_x, pred_y = predict_position(stone.x, stone.y, stone.vx, stone.vy, 0.5)
+
+                    # 生成未来轨迹线
                     trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.15)
                     state = GameState(
                         ai_x=layout.RINK_CENTER_X,
@@ -268,11 +294,15 @@ def run_vision(args):
                         reaction_timer=reaction_timer,
                         difficulty=layout.DIFFICULTIES["普通"],
                     )
+
+                    # 输入当前冰壶状态，得到 ai 目标位置
                     decision = ai.update(state, dt)
                     target[0], target[1] = decision.target_x, decision.target_y
                     reaction_timer = decision.reaction_timer
                     stalled_phase = decision.stalled_stone_phase
                     tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
+
+                    # 转换回来
                     ai_target_pixel = (round(tx), round(ty))
                     status_text = (
                         f"FPS {display_fps:.1f} | 校正 {correction_status} | "
@@ -281,6 +311,7 @@ def run_vision(args):
                         f"AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
                     )
 
+                # 把信息画到图片上
                 marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps, trajectory)
                 with preview_lock:
                     shared["img"] = marked
@@ -348,7 +379,8 @@ def run_vision(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="空气冰壶项目入口")
+    parser = argparse.ArgumentParser(description="空气冰壶项目入口")    # 创建命令参数
+
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式（需配合 --vision）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
@@ -357,6 +389,7 @@ def main():
     parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
+
     args = parser.parse_args()
     if args.vision:
         run_vision(args)
