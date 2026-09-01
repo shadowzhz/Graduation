@@ -33,6 +33,7 @@ from air_hockey_ai import AirHockeyAI
 from camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
 from vision import StoneDetector, VisionPipeline
+from vision.predictor import predict_position, predict_trajectory
 from vision.tracker import StoneTracker
 
 DISPLAY_WIDTH = 640
@@ -78,7 +79,7 @@ def track_to_rink_state(track, roi):
     return replace(stone, x=x, y=y, vx=stone.vx * scale_x, vy=stone.vy * scale_y)
 
 
-def annotate(image, roi, detection, track, ai_target_pixel, display_fps):
+def annotate(image, roi, detection, track, ai_target_pixel, display_fps, trajectory=None):
     output = image.copy()
     x, y, w, h = roi
     cv2.rectangle(output, (x, y), (x + w, y + h), (0, 255, 255), 2)
@@ -90,6 +91,10 @@ def annotate(image, roi, detection, track, ai_target_pixel, display_fps):
         center = (round(track.center_x), round(track.center_y))
         end = (round(track.center_x + track.vx * 0.1), round(track.center_y + track.vy * 0.1))
         cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
+    if trajectory:
+        for i, (px, py) in enumerate(trajectory):
+            alpha = max(40, 255 - i * 12)
+            cv2.circle(output, (round(px), round(py)), 2, (alpha, 160, 90), -1)
     if ai_target_pixel is not None:
         cv2.drawMarker(output, ai_target_pixel, (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
     cv2.putText(output, f"FPS {display_fps:.1f}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -159,10 +164,13 @@ class VisionWindow:
 
 def run_vision(args):
     roi = tuple(args.roi)
-    try:
-        window = VisionWindow()
-    except tk.TclError as exc:
-        raise SystemExit(f"无法打开窗口：{exc}")
+    headless = args.headless
+    window = None
+    if not headless:
+        try:
+            window = VisionWindow()
+        except tk.TclError as exc:
+            raise SystemExit(f"无法打开窗口：{exc}")
 
     detector = StoneDetector(
         roi=roi,
@@ -182,10 +190,12 @@ def run_vision(args):
     try:
         camera.start()
     except Exception as exc:
-        window.close()
+        if window is not None:
+            window.close()
         raise SystemExit(f"摄像头启动失败：{exc}")
 
-    print("实时视觉演示开始，Q / ESC 或关闭窗口退出")
+    mode_label = "headless 性能测试" if headless else "实时视觉演示"
+    print(f"{mode_label}开始{'，Ctrl+C 退出' if headless else '，Q / ESC 或关闭窗口退出'}")
     print(f"视觉管线：最新帧 + 每 {DETECTION_INTERVAL} 帧检测，其余帧使用 tracker 预测")
     print("视觉校正:")
     print(f"  calibration: {args.calibration}")
@@ -208,8 +218,9 @@ def run_vision(args):
         target = [layout.RINK_CENTER_X, AI_HOME_Y]
         reaction_timer = 0.0
         stalled_phase = "idle"
+        window_closed = lambda: window.closed if window is not None else False
         try:
-            while not stop.is_set() and not window.closed:
+            while not stop.is_set() and not window_closed():
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
                     time.sleep(0.001)
@@ -238,8 +249,11 @@ def run_vision(args):
                 correction_status = "ON" if vision_pipeline.camera_matrix is not None else "OFF"
                 status_text = f"FPS {display_fps:.1f} | 校正 {correction_status} | 未检测到冰壶"
                 ai_target_pixel = None
+                trajectory = None
                 if track is not None:
                     stone = track_to_rink_state(track, roi)
+                    pred_x, pred_y = predict_position(stone.x, stone.y, stone.vx, stone.vy, 0.5)
+                    trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.15)
                     state = GameState(
                         ai_x=layout.RINK_CENTER_X,
                         ai_y=AI_HOME_Y,
@@ -267,20 +281,29 @@ def run_vision(args):
                         f"AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
                     )
 
-                marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps)
+                marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps, trajectory)
                 with preview_lock:
                     shared["img"] = marked
                     shared["img_seq"] = frame.sequence
                     shared["status"] = status_text + "    Q / ESC 退出"
 
                 frame_ms = frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
-                if time.perf_counter() - stats_timer >= STATS_INTERVAL:
+                stats_interval = 1.0 if headless else STATS_INTERVAL
+                if time.perf_counter() - stats_timer >= stats_interval:
                     stats_timer = time.perf_counter()
                     capture = camera.get_stats()
-                    print(
-                        f"[stats] 处理 {display_fps:.1f} FPS | 单帧 {frame_ms:.1f} ms "
-                        f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
-                    )
+                    track_state = track.state.value if track else "none"
+                    if headless:
+                        print(
+                            f"[perf] FPS {display_fps:.1f} | 处理 {frame_ms:.1f} ms "
+                            f"| 检测 {detect_ms:.1f} ms | 采集 {capture.current_fps:.1f} FPS "
+                            f"| Tracker {track_state}"
+                        )
+                    else:
+                        print(
+                            f"[stats] 处理 {display_fps:.1f} FPS | 单帧 {frame_ms:.1f} ms "
+                            f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
+                        )
         except Exception as exc:
             with preview_lock:
                 shared["fatal"] = f"处理线程异常退出：{exc!r}"
@@ -306,22 +329,28 @@ def run_vision(args):
                     shared["png_seq"] += 1
 
     threading.Thread(target=processing_loop, name="processing", daemon=True).start()
-    threading.Thread(target=encoding_loop, name="encoder", daemon=True).start()
-    window.start(preview_lock, shared)
+    if not headless:
+        threading.Thread(target=encoding_loop, name="encoder", daemon=True).start()
+        window.start(preview_lock, shared)
 
     try:
-        window.root.mainloop()
+        if headless:
+            stop.wait()
+        else:
+            window.root.mainloop()
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
         camera.stop()
-        window.close()
+        if window is not None:
+            window.close()
 
 
 def main():
     parser = argparse.ArgumentParser(description="空气冰壶项目入口")
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
+    parser.add_argument("--headless", action="store_true", help="无显示性能测试模式（需配合 --vision）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正")
