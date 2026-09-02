@@ -164,18 +164,17 @@ class VisionWindow:
 
 
 def run_vision(args):
-    roi = tuple(args.roi)   # 初始化 ROI 区域
+    # 初始化 ROI 区域
+    roi = tuple(args.roi)   # tuple() 是一个转换工具，可以把一些数据转换成“元组”
+
+    # 读取是否有性能测试模式
     headless = args.headless
-    window = None
+    
+    # 如果没有加 -- headless 启动性能测试模式
     if not headless:
-        try:
-            window = VisionWindow()
-        except tk.TclError as exc:
-            raise SystemExit(f"无法打开窗口：{exc}")
+        window = VisionWindow()     # 打开窗口
 
-    # 创建视觉模块
-
-    # 找冰壶
+    # 创建 detector 对象
     detector = StoneDetector(
         roi=roi,
         lower=tuple(args.lower),
@@ -185,20 +184,20 @@ def run_vision(args):
         min_circularity=0.65,
     )
 
-    # 补充检测
+    # 创建 tracker 对象
     tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)    # 每 3 帧检测一次，中间是 tracker 预测，用于提高速度
 
-    # AI 策略部分，根据冰壶状态决定击打目标的位置
+    # 创建 ai 对象，目前用的仿真参数，后续真机修改
     ai = AirHockeyAI()
 
-    # 相机畸变校正
+    # 创建 vision_pipeline 对象，相机畸变校正
     vision_pipeline = VisionPipeline(
         calibration_file=args.calibration,
-        enabled=not args.disable_undistort,
+        enabled=not args.disable_undistort,     # 不加参数默认启动校正
     )
 
-    # 打开摄像头
-    camera = CameraManager(CameraConfig())
+    # 创建 camera 对象
+    camera = CameraManager()
     try:
         camera.start()
     except Exception as exc:
@@ -206,21 +205,31 @@ def run_vision(args):
             window.close()
         raise SystemExit(f"摄像头启动失败：{exc}")
 
+    # 终端打印信息
     mode_label = "headless 性能测试" if headless else "实时视觉演示"
     print(f"{mode_label}开始{'，Ctrl+C 退出' if headless else '，Q / ESC 或关闭窗口退出'}")
     print(f"视觉管线：最新帧 + 每 {DETECTION_INTERVAL} 帧检测，其余帧使用 tracker 预测")
     print("视觉校正:")
     print(f"  calibration: {args.calibration}")
-    print(f"  undistort: {'enabled' if not args.disable_undistort else 'disabled'}")
+    print(f"  undistort: {'校正开启' if not args.disable_undistort else '校正关闭'}")
 
-    preview_lock = threading.Lock()
-    shared = {"img": None, "img_seq": -1, "png": None, "png_seq": 0,
-              "status": "等待画面", "fatal": None}
+    preview_lock = threading.Lock()     # 创建一个互斥锁，防止线程冲突
+
+    # 创建一个字典作为线程间传递数据的公共缓冲区
+    shared = {"img": None,              # 最新图片数据（Numpy 数组）
+              "img_seq": -1,            # 图片帧号
+              "png": None,              # 存储压缩后的图片数据
+              "png_seq": 0,
+              "status": "等待画面", 
+              "fatal": None}            # 错误信息缓冲区
+
+    # 创建一个事件对象，用于停止线程
     stop = threading.Event()
 
     # 视觉主循环，核心部分
     def processing_loop():
-        """只取最新帧；检测按固定间隔运行，中间帧由 tracker 预测。"""
+        """启动处理线程，只取最新帧；检测按固定间隔运行，中间帧由 tracker 预测。"""
+        # 初始化与变量准备
         last_sequence = -1
         last_timestamp = None
         frame_index = 0
@@ -232,18 +241,18 @@ def run_vision(args):
         reaction_timer = 0.0
         stalled_phase = "idle"
         window_closed = lambda: window.closed if window is not None else False
+
         try:
             while not stop.is_set() and not window_closed():
-                # 拿最新图片
+                # 只处理最新的一帧
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
-                    time.sleep(0.001)
+                    time.sleep(0.001)       # 稍微休眠，防止 CPU 空转满载
                     continue
                 last_sequence = frame.sequence
                 frame_index += 1
 
-                # 畸变校正
-                frame = vision_pipeline.process(frame)
+                frame = vision_pipeline.process(frame)      # 畸变校正
 
                 now = frame.timestamp
                 dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
@@ -255,7 +264,7 @@ def run_vision(args):
                 t0 = time.perf_counter()
                 detection = None
 
-                # 第 1 帧以及后面每 3 帧检测一次
+                # 第 1 帧以及后面每 3 帧检测一次，降低 CPU 负担
                 if frame_index == 1 or frame_index % DETECTION_INTERVAL == 0:
                     detection = detector.detect(frame)
                     detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
@@ -280,6 +289,8 @@ def run_vision(args):
 
                     # 生成未来轨迹线
                     trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.15)
+
+                    # 如果检测到冰壶，就创建一个 state 对象
                     state = GameState(
                         ai_x=layout.RINK_CENTER_X,
                         ai_y=AI_HOME_Y,
@@ -313,11 +324,14 @@ def run_vision(args):
 
                 # 把信息画到图片上
                 marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps, trajectory)
+
+                # 加锁
                 with preview_lock:
                     shared["img"] = marked
                     shared["img_seq"] = frame.sequence
                     shared["status"] = status_text + "    Q / ESC 退出"
 
+                # 性能统计打印
                 frame_ms = frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
                 stats_interval = 1.0 if headless else STATS_INTERVAL
                 if time.perf_counter() - stats_timer >= stats_interval:
@@ -342,28 +356,36 @@ def run_vision(args):
             stop.set()
 
     def encoding_loop():
-        """最新标注帧 -> 缩放 -> PNG，按预览帧率限速。"""
-        seen = -1
+        """启动编码线程，最新标注帧 -> 缩放 -> PNG，按预览帧率限速。"""
+        seen = -1       # 记录最后处理过的序列号，防止重复编码
+
         while not stop.wait(1.0 / args.preview_fps):
+            # 加锁读取
             with preview_lock:
                 img = shared["img"]
                 seq = shared["img_seq"]
+            # 去重检查
             if img is None or seq == seen:
                 continue
             seen = seq
             scale = DISPLAY_WIDTH / img.shape[1]
+
+            # 缩放
             small = cv2.resize(img, (DISPLAY_WIDTH, round(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+            # 编码
             ok, encoded = cv2.imencode(".png", small, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             if ok:
                 with preview_lock:
                     shared["png"] = base64.b64encode(encoded.tobytes())
                     shared["png_seq"] += 1
 
+    # 启动子线程
     threading.Thread(target=processing_loop, name="processing", daemon=True).start()
     if not headless:
         threading.Thread(target=encoding_loop, name="encoder", daemon=True).start()
         window.start(preview_lock, shared)
 
+    # 主线程
     try:
         if headless:
             stop.wait()
@@ -379,8 +401,9 @@ def run_vision(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="空气冰壶项目入口")    # 创建命令参数
+    parser = argparse.ArgumentParser(description="空气冰壶项目入口")    # 创建 parser 对象
 
+    # 添加参数，均是 bool 值
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式（需配合 --vision）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
@@ -390,7 +413,8 @@ def main():
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
 
-    args = parser.parse_args()
+    args = parser.parse_args()  # 执行解析，将上面的字符串转换成 Python 对象
+
     if args.vision:
         run_vision(args)
     else:
