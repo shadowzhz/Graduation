@@ -95,15 +95,21 @@ class CameraManager:
 
     # 启动摄像头
     def start(self, timeout: float = 2.0) -> None:
+        # 线程安全锁
         with self._lock:
+            # 如果摄像头已经在运行就直接返回，避免重复启动
             if self._running:
                 return
+
+            # 清空之前的数据
             self.frame_buffer.clear()
             self._stats.reset()
             self._stop.clear()
-            self._ready.clear()
-            self._open()
-            self._running = True
+
+            self._ready.clear()     # 准备接收第一个信号
+
+            self._open()            # 打开硬件设备
+            self._running = True    # 标记为运行状态
 
             # 创建后台进程
             self._thread = threading.Thread(

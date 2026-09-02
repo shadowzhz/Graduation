@@ -12,7 +12,7 @@ class VisionPipeline:
     """对相机帧执行可选的畸变校正。"""
 
     def __init__(self, calibration_file=None, enabled=True):
-        self.enabled = bool(enabled)
+        self.enabled = bool(enabled)        # 强制将输入参数转换为布尔值
         self.calibration_file = calibration_file
         self.camera_matrix = None
         self.dist_coeffs = None

@@ -9,7 +9,10 @@ from .types import Detection, Track, TrackState
 class StoneTracker:
     """常速模型预测 + 速度指数平滑的单目标跟踪器。"""
 
-    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) -> None:     # max_distance 新检测到的冰壶，如果和预测位置/旧位置差得太远，就认为它可能不是原来的冰壶
+    # max_distance 最大允许移动距离
+    # max_missed_frames 最大允许漏检帧数
+    # velocity_alpha 平滑系数
+    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) -> None:
         if max_distance <= 0.0:
             raise ValueError("max_distance must be positive")
         if max_missed_frames < 0:
