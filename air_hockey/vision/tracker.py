@@ -9,7 +9,7 @@ from .types import Detection, Track, TrackState
 class StoneTracker:
     """常速模型预测 + 速度指数平滑的单目标跟踪器。"""
 
-    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) -> None:
+    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) -> None:     # max_distance 新检测到的冰壶，如果和预测位置/旧位置差得太远，就认为它可能不是原来的冰壶
         if max_distance <= 0.0:
             raise ValueError("max_distance must be positive")
         if max_missed_frames < 0:
@@ -22,10 +22,12 @@ class StoneTracker:
         self._track = None
         self._next_track_id = 1
 
+    # 外部调用函数，外部可以直接查看当前轨迹
     @property
     def track(self):
         return self._track
 
+    # Detector 提供一个新的检测结果，用来更新 Tracker
     def update(self, detection):
         """用新的检测结果校正轨迹。"""
         if detection is None:
@@ -47,14 +49,17 @@ class StoneTracker:
         if self._track is None:
             return []
         timestamp = float(timestamp)
-        dt = max(0.0, timestamp - self._track.last_timestamp)
+        dt = max(0.0, timestamp - self._track.last_timestamp)       # 预测时间差
         missed = self._track.missed_frames + 1
         if missed > self.max_missed_frames:
             return []
         return [replace(
             self._track,
+
+            # 匀速运动模型
             center_x=self._track.center_x + self._track.vx * dt,
             center_y=self._track.center_y + self._track.vy * dt,
+
             last_timestamp=timestamp,
             age=self._track.age + 1,
             missed_frames=missed,
@@ -83,7 +88,7 @@ class StoneTracker:
 
     def _update_track(self, detection) -> None:
         track = self._track
-        dt = detection.timestamp - track.last_timestamp
+        dt = detection.timestamp - track.last_timestamp     # 计算两次检测之间经过了多长时间
         if dt > 0.0:
             measured_vx = (detection.center_x - track.center_x) / dt
             measured_vy = (detection.center_y - track.center_y) / dt
