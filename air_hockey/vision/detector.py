@@ -1,7 +1,7 @@
-"""颜色阈值 + 轮廓几何约束的冰壶检测。"""
+"""颜色阈值 + 轮廓几何约束的冰壶检测，检测这一帧里冰壶在哪里"""
 
 from dataclasses import replace
-from math import inf, pi
+from math import inf, pi        # inf 代表无穷大
 
 import cv2
 
@@ -10,18 +10,18 @@ from camera.types import Frame
 from .preprocess import crop_roi, external_contours, morphology, threshold, validate_bgr
 from .types import Detection, ROI
 
-
+# 定义冰壶检测器类，输出冰壶的位置、大小、圆形度、时间戳和分数
 class StoneDetector:
     def __init__(self, roi=None, color_space="hsv", lower=(0, 40, 30), upper=(180, 255, 255),
                  morphology_kernel=5, morphology_iterations=1, min_area=100.0, max_area=inf,
-                 min_radius=3.0, max_radius=inf, min_circularity=0.55) -> None:
-        if isinstance(roi, tuple):
+                 min_radius=3.0, max_radius=inf, min_circularity=0.55) -> None:     # None 代表这一帧没有找到符合要求的冰壶
+        if isinstance(roi, tuple):      # 在什么区域找
             roi = ROI(*roi)
-        if min_area < 0 or max_area < min_area:
+        if min_area < 0 or max_area < min_area:     # 多大
             raise ValueError("invalid area limits")
-        if min_radius < 0 or max_radius < min_radius:
+        if min_radius < 0 or max_radius < min_radius:       # 多大半径
             raise ValueError("invalid radius limits")
-        if not 0.0 <= min_circularity <= 1.0:
+        if not 0.0 <= min_circularity <= 1.0:       # 有多圆
             raise ValueError("min_circularity must be between 0 and 1")
         self.roi = roi
         self.color_space = color_space
@@ -35,46 +35,50 @@ class StoneDetector:
         self.max_radius = float(max_radius)
         self.min_circularity = float(min_circularity)
 
+    # 拿一帧图像尝试找冰壶
     def detect(self, frame):
         """跑一遍检测管线，返回得分最高的候选，找不到返回 None。"""
-        if not isinstance(frame, Frame):
+        if not isinstance(frame, Frame):    # 检查输入
             raise TypeError("detect expects a camera.types.Frame")
-        validate_bgr(frame.image)
+        validate_bgr(frame.image)       # 检查图像格式
         # 在 ROI 里检测，返回坐标时把偏移加回去
         cropped, offset_x, offset_y = crop_roi(frame.image, self.roi)
         if cropped.size == 0:
             return None
-        mask = threshold(cropped, self.lower, self.upper, self.color_space)
-        mask = morphology(mask, self.morphology_kernel, self.morphology_iterations)
+        mask = threshold(cropped, self.lower, self.upper, self.color_space)     # 颜色筛选
+        mask = morphology(mask, self.morphology_kernel, self.morphology_iterations)     # 形态学处理
         candidates = []
         for contour in external_contours(mask):
-            area = float(cv2.contourArea(contour))
+            area = float(cv2.contourArea(contour))      # 计算这个轮廓有多大
             if area < self.min_area or area > self.max_area:
                 continue
-            perimeter = float(cv2.arcLength(contour, True))
+            perimeter = float(cv2.arcLength(contour, True))     # 计算轮廓周长
             if perimeter <= 0.0:
                 continue
-            circularity = 4.0 * pi * area / (perimeter * perimeter)
+            circularity = 4.0 * pi * area / (perimeter * perimeter)     # 计算圆形度
             if circularity < self.min_circularity:
                 continue
-            (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
+            (center_x, center_y), radius = cv2.minEnclosingCircle(contour)      # 最小外接圆
             if radius < self.min_radius or radius > self.max_radius:
                 continue
+
+            # 开始生成真正的检测结果
             detection = Detection(
                 center_x=float(center_x + offset_x),
                 center_y=float(center_y + offset_y),
                 radius=float(radius),
                 area=area,
-                timestamp=frame.timestamp,
+                timestamp=frame.timestamp,      # 时间戳，用于计算轨迹预测
                 circularity=float(circularity),
             )
-            score = self._score_candidate(detection)
-            candidates.append((score, replace(detection, score=score)))
+            score = self._score_candidate(detection)    # 计算检测分数
+            candidates.append((score, replace(detection, score=score)))     # 保存候选
         if not candidates:
             return None
         # 分数相同取面积大的
         return max(candidates, key=lambda item: (item[0], item[1].area))[1]
 
+    # 给候选冰壶评分
     def _score_candidate(self, detection):
         # 圆形度为主，面积项防止刚好过线的小噪点拿最高分
         area_score = min(1.0, detection.area / max(self.min_area * 4.0, 1.0))
