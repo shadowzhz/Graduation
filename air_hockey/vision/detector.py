@@ -17,11 +17,11 @@ class StoneDetector:
                  min_radius=3.0, max_radius=inf, min_circularity=0.55) -> None:     # None 代表这一帧没有找到符合要求的冰壶
         if isinstance(roi, tuple):      # 在什么区域找
             roi = ROI(*roi)
-        if min_area < 0 or max_area < min_area:     # 多大
+        if min_area < 0 or max_area < min_area:             # 面积过滤
             raise ValueError("invalid area limits")
-        if min_radius < 0 or max_radius < min_radius:       # 多大半径
+        if min_radius < 0 or max_radius < min_radius:       # 半径限定
             raise ValueError("invalid radius limits")
-        if not 0.0 <= min_circularity <= 1.0:       # 有多圆
+        if not 0.0 <= min_circularity <= 1.0:               # 圆形度过滤
             raise ValueError("min_circularity must be between 0 and 1")
         self.roi = roi
         self.color_space = color_space
@@ -38,41 +38,45 @@ class StoneDetector:
     # 拿一帧图像尝试找冰壶
     def detect(self, frame):
         """跑一遍检测管线，返回得分最高的候选，找不到返回 None。"""
-        if not isinstance(frame, Frame):    # 检查输入
-            raise TypeError("detect expects a camera.types.Frame")
-        validate_bgr(frame.image)       # 检查图像格式
-        # 在 ROI 里检测，返回坐标时把偏移加回去
-        cropped, offset_x, offset_y = crop_roi(frame.image, self.roi)
+        cropped, offset_x, offset_y = crop_roi(frame.image, self.roi)       # 将大图像 ROI 处理
+        # 裁剪完没有数据则返回
         if cropped.size == 0:
             return None
-        mask = threshold(cropped, self.lower, self.upper, self.color_space)     # 颜色筛选
+        
+        mask = threshold(cropped, self.lower, self.upper, self.color_space)             # 颜色筛选
         mask = morphology(mask, self.morphology_kernel, self.morphology_iterations)     # 形态学处理
+
         candidates = []
+
+        # 轮廓提取
         for contour in external_contours(mask):
-            area = float(cv2.contourArea(contour))      # 计算这个轮廓有多大
-            if area < self.min_area or area > self.max_area:
+            area = float(cv2.contourArea(contour))                              # 计算这个轮廓有多大
+            if area < self.min_area or area > self.max_area:                    # 面积过滤
                 continue
-            perimeter = float(cv2.arcLength(contour, True))     # 计算轮廓周长
-            if perimeter <= 0.0:
+            perimeter = float(cv2.arcLength(contour, True))                     # 计算轮廓周长
+            if perimeter <= 0.0:                                                # 周长检查
                 continue
-            circularity = 4.0 * pi * area / (perimeter * perimeter)     # 计算圆形度
-            if circularity < self.min_circularity:
+            circularity = 4.0 * pi * area / (perimeter * perimeter)             # 计算圆形度
+            if circularity < self.min_circularity:                              # 圆形度过滤
                 continue
             (center_x, center_y), radius = cv2.minEnclosingCircle(contour)      # 最小外接圆
-            if radius < self.min_radius or radius > self.max_radius:
+            if radius < self.min_radius or radius > self.max_radius:            # 外接圆半径过滤
                 continue
 
             # 开始生成真正的检测结果
             detection = Detection(
+                # 坐标偏移
                 center_x=float(center_x + offset_x),
                 center_y=float(center_y + offset_y),
+
                 radius=float(radius),
                 area=area,
-                timestamp=frame.timestamp,      # 时间戳，用于计算轨迹预测
+                timestamp=frame.timestamp,              # 时间戳，用于计算轨迹预测
                 circularity=float(circularity),
             )
             score = self._score_candidate(detection)    # 计算检测分数
-            candidates.append((score, replace(detection, score=score)))     # 保存候选
+            candidates.append((score, replace(detection, score=score)))         # 保存候选
+        # 没有分数直接返回
         if not candidates:
             return None
         # 分数相同取面积大的

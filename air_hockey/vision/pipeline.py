@@ -14,7 +14,7 @@ class VisionPipeline:
     def __init__(self, calibration_file=None, enabled=True):
         self.enabled = bool(enabled)        # 强制将输入参数转换为布尔值
         self.calibration_file = calibration_file
-        self.camera_matrix = None
+        self.camera_matrix = None       # 相机矩阵
         self.dist_coeffs = None
         self.new_camera_matrix = None
         self.map1 = None
@@ -22,6 +22,7 @@ class VisionPipeline:
         self.roi = None
         self._map_size = None
 
+        # 如果没有启动或者没有修正文件就返回
         if not self.enabled or calibration_file is None:
             return
 
@@ -59,14 +60,18 @@ class VisionPipeline:
 
     def process(self, frame):
         """校正一帧图像，并保留原帧的时间戳和序号。"""
+        # 如果没有启动或者相机矩阵为空就直接返回当前帧
         if not self.enabled or self.camera_matrix is None:
             return frame
 
         height, width = frame.image.shape[:2]
+        # 如果尺寸不一致就重新初始化
         if self._map_size != (width, height):
             self._init_maps((width, height))
 
-        image = cv2.remap(frame.image, self.map1, self.map2, cv2.INTER_LINEAR)
+        # 使用生成的的映射表对图像进行畸变
+        image = cv2.remap(frame.image, self.map1, self.map2, cv2.INTER_LINEAR)      # 图像校正
+        # 区域剪裁
         x, y, roi_width, roi_height = self.roi
         if roi_width > 0 and roi_height > 0:
             image = image[y:y + roi_height, x:x + roi_width]
