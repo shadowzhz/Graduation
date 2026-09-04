@@ -35,10 +35,13 @@ class StoneDetector:
         self.max_radius = float(max_radius)
         self.min_circularity = float(min_circularity)
 
-    # 拿一帧图像尝试找冰壶
-    def detect(self, frame):
+    # 拿一帧图像尝试找冰壶，新增 dynamic_roi 参数
+    def detect(self, frame, dynamic_roi=None):
         """跑一遍检测管线，返回得分最高的候选，找不到返回 None。"""
-        cropped, offset_x, offset_y = crop_roi(frame.image, self.roi)       # 将大图像 ROI 处理
+        # 优先使用动态 ROI，如果没有传动态 ROI（比如刚启动或跟丢了），则使用全局自定的 self.roi
+        current_roi = dynamic_roi if dynamic_roi is not None else self.roi
+        
+        cropped, offset_x, offset_y = crop_roi(frame.image, current_roi)       # 将图像按 current_roi 处理
         # 裁剪完没有数据则返回
         if cropped.size == 0:
             return None
@@ -63,7 +66,7 @@ class StoneDetector:
             if radius < self.min_radius or radius > self.max_radius:            # 外接圆半径过滤
                 continue
 
-            # 开始生成真正的检测结果
+            # 开始生成真正的检测结果 (此时的 x,y 是相对于原畸变图像的)
             detection = Detection(
                 # 坐标偏移
                 center_x=float(center_x + offset_x),
