@@ -10,11 +10,11 @@
     编码线程  最新标注帧 -> 缩放 -> PNG（按预览帧率限速）
 """
 
-import argparse     # 命令行参数解析模块
-import base64       # 图片编码模块
-import subprocess   # 启动其他程序
+import argparse
+import base64
+import subprocess
 import sys
-import threading    # 多线程
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -34,7 +34,8 @@ from camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
 from vision import StoneDetector, VisionPipeline
 from vision.predictor import predict_position, predict_trajectory
-from vision.tracker import StoneTracker
+from vision.tracker import StoneTracker, TrackState
+from vision.types import ROI
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
 STATS_INTERVAL = 5.0        # 统计间隔
@@ -80,24 +81,40 @@ def track_to_rink_state(track, roi):
     return replace(stone, x=x, y=y, vx=stone.vx * scale_x, vy=stone.vy * scale_y)
 
 
-def annotate(image, roi, detection, track, ai_target_pixel, display_fps, trajectory=None):
+def annotate(image, roi, detection, track, ai_target_pixel, display_fps, trajectory=None, pipeline_roi=None):
+    """
+    因为优化后取消了全图裁剪校正，画面的物理坐标跟像素原图会有偏移。
+    绘图时自动加上相机内部的偏移量 (cx, cy)，确保 UI 可视化依然精准。
+    """
     output = image.copy()
+    
+    ox, oy = 0, 0
+    if pipeline_roi is not None:
+        cx, cy, rw, rh = pipeline_roi
+        if rw > 0 and rh > 0:
+            ox, oy = int(cx), int(cy)
+
     x, y, w, h = roi
-    cv2.rectangle(output, (x, y), (x + w, y + h), (0, 255, 255), 2)
+    cv2.rectangle(output, (x + ox, y + oy), (x + w + ox, y + h + oy), (0, 255, 255), 2)
+    
     if detection is not None:
-        center = (round(detection.center_x), round(detection.center_y))
+        center = (round(detection.center_x) + ox, round(detection.center_y) + oy)
         cv2.circle(output, center, max(1, round(detection.radius)), (0, 255, 0), 2)
         cv2.circle(output, center, 3, (0, 255, 0), -1)
+        
     if track is not None:
-        center = (round(track.center_x), round(track.center_y))
-        end = (round(track.center_x + track.vx * 0.1), round(track.center_y + track.vy * 0.1))
+        center = (round(track.center_x) + ox, round(track.center_y) + oy)
+        end = (round(track.center_x + track.vx * 0.1) + ox, round(track.center_y + track.vy * 0.1) + oy)
         cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
+        
     if trajectory:
         for i, (px, py) in enumerate(trajectory):
             alpha = max(40, 255 - i * 12)
-            cv2.circle(output, (round(px), round(py)), 2, (alpha, 160, 90), -1)
+            cv2.circle(output, (round(px) + ox, round(py) + oy), 2, (alpha, 160, 90), -1)
+            
     if ai_target_pixel is not None:
-        cv2.drawMarker(output, ai_target_pixel, (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
+        cv2.drawMarker(output, (ai_target_pixel[0] + ox, ai_target_pixel[1] + oy), (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
+        
     cv2.putText(output, f"FPS {display_fps:.1f}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     return output
 
@@ -165,14 +182,14 @@ class VisionWindow:
 
 def run_vision(args):
     # 初始化 ROI 区域
-    roi = tuple(args.roi)   # tuple() 是一个转换工具，可以把一些数据转换成“元组”
+    roi = tuple(args.roi)   
 
     # 读取是否有性能测试模式
     headless = args.headless
     
     # 如果没有加 -- headless 启动性能测试模式
     if not headless:
-        window = VisionWindow()     # 打开窗口
+        window = VisionWindow()     
 
     # 创建 detector 对象
     detector = StoneDetector(
@@ -185,7 +202,7 @@ def run_vision(args):
     )
 
     # 创建 tracker 对象
-    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)    # 每 3 帧检测一次，中间是 tracker 预测，用于提高速度
+    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)    
 
     # 创建 ai 对象，目前用的仿真参数，后续真机修改
     ai = AirHockeyAI()
@@ -193,7 +210,7 @@ def run_vision(args):
     # 创建 vision_pipeline 对象，相机畸变校正
     vision_pipeline = VisionPipeline(
         calibration_file=args.calibration,
-        enabled=not args.disable_undistort,     # 不加参数默认启动校正
+        enabled=not args.disable_undistort,     
     )
 
     # 创建 camera 对象
@@ -213,15 +230,15 @@ def run_vision(args):
     print(f"  calibration: {args.calibration}")
     print(f"  undistort: {'校正开启' if not args.disable_undistort else '校正关闭'}")
 
-    preview_lock = threading.Lock()     # 创建一个互斥锁，防止线程冲突
+    preview_lock = threading.Lock()     
 
     # 创建一个字典作为线程间传递数据的公共缓冲区
-    shared = {"img": None,              # 最新图片数据（Numpy 数组）
-              "img_seq": -1,            # 图片帧号
-              "png": None,              # 存储压缩后的图片数据
+    shared = {"img": None,              
+              "img_seq": -1,            
+              "png": None,              
               "png_seq": 0,
               "status": "等待画面", 
-              "fatal": None}            # 错误信息缓冲区
+              "fatal": None}            
 
     # 创建一个事件对象，用于停止线程
     stop = threading.Event()
@@ -247,12 +264,13 @@ def run_vision(args):
                 # 只处理最新的一帧
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
-                    time.sleep(0.001)       # 稍微休眠，防止 CPU 空转满载
+                    time.sleep(0.001)       
                     continue
                 last_sequence = frame.sequence
                 frame_index += 1
 
-                frame = vision_pipeline.process(frame)      # 畸变校正
+                # 这里不再做耗时的全图 Remap，几乎是瞬间返回
+                frame = vision_pipeline.process(frame)
 
                 now = frame.timestamp
                 dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
@@ -266,7 +284,48 @@ def run_vision(args):
 
                 # 第 1 帧以及后面每 3 帧检测一次，降低 CPU 负担
                 if frame_index == 1 or frame_index % DETECTION_INTERVAL == 0:
-                    detection = detector.detect(frame)
+                    
+                    # --------------------------------------------------
+                    # 💡 核心优化：动态 ROI 预测反哺检测
+                    # --------------------------------------------------
+                    dynamic_roi = None
+                    box_size = 140  # 根据冰壶大小适当冗余，包容变形
+                    
+                    if tracker.track is not None and tracker.track.state == TrackState.ACTIVE:
+                        # 拿到物理预测坐标 (去畸变空间)
+                        pred_x, pred_y = tracker._predict_position(frame.timestamp)
+                        
+                        # 转换回原图的近似坐标，用于裁剪 ROI
+                        approx_x, approx_y = pred_x, pred_y
+                        if vision_pipeline.roi is not None:
+                            cx, cy, rw, rh = vision_pipeline.roi
+                            if rw > 0 and rh > 0:
+                                approx_x += cx
+                                approx_y += cy
+                                
+                        img_h, img_w = frame.image.shape[:2]
+                        rx = max(0, int(approx_x - box_size / 2))
+                        ry = max(0, int(approx_y - box_size / 2))
+                        rw = min(box_size, img_w - rx)
+                        rh = min(box_size, img_h - ry)
+                        
+                        dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
+
+                    # 传入动态 ROI 进行检测，计算量减少 90% 以上
+                    detection = detector.detect(frame, dynamic_roi=dynamic_roi)
+                    
+                    # --------------------------------------------------
+                    # 💡 核心优化：点级别去畸变
+                    # --------------------------------------------------
+                    if detection is not None:
+                        # 只对 (center_x, center_y) 做点级去畸变，耗时 0 毫秒
+                        real_x, real_y = vision_pipeline.undistort_point(
+                            detection.center_x, detection.center_y
+                        )
+                        # 将真实的几何坐标覆盖回 detection
+                        detection.center_x = real_x
+                        detection.center_y = real_y
+
                     detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
                     tracks = tracker.update(detection)
                 # 否则预测
@@ -322,8 +381,17 @@ def run_vision(args):
                         f"AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
                     )
 
-                # 把信息画到图片上
-                marked = annotate(frame.image, roi, detection, track, ai_target_pixel, display_fps, trajectory)
+                # 把信息画到图片上 (传入 pipeline_roi 以自动偏移纠正显示错位)
+                marked = annotate(
+                    frame.image, 
+                    roi, 
+                    detection, 
+                    track, 
+                    ai_target_pixel, 
+                    display_fps, 
+                    trajectory,
+                    pipeline_roi=vision_pipeline.roi
+                )
 
                 # 加锁
                 with preview_lock:
@@ -401,7 +469,7 @@ def run_vision(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="空气冰壶项目入口")    # 创建 parser 对象
+    parser = argparse.ArgumentParser(description="空气冰壶项目入口")
 
     # 添加参数，均是 bool 值
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
@@ -413,7 +481,7 @@ def main():
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
 
-    args = parser.parse_args()  # 执行解析，将上面的字符串转换成 Python 对象
+    args = parser.parse_args()  
 
     if args.vision:
         run_vision(args)
