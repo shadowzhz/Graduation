@@ -3,6 +3,7 @@
 用法：
     python main.py               # 启动冰壶仿真游戏
     python main.py --vision      # 实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI
+    python main.py --vision --headless  # 无显示性能基准测试
 
 线程分工：
     主线程    Tk mainloop + 显示定时器
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -39,20 +41,24 @@ from vision.types import ROI
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
 STATS_INTERVAL = 5.0        # 统计间隔
-DETECTION_INTERVAL = 3      # 检测间隔
+DETECTION_INTERVAL = 3      # 检测抽帧间隔（每 3 帧做一次硬检测）
 
 AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28   # AI 初始位置
 
 
 def run_game():
-    subprocess.run([sys.executable, str(SIM_ROOT / "air_hockey.py")])
+    """启动仿真子进程，显式设置 cwd 避免相对路径资源加载报错。"""
+    subprocess.run([sys.executable, str(SIM_ROOT / "air_hockey.py")], cwd=str(SIM_ROOT))
 
 
 def _rink_scales(roi):
     _x, _y, w, h = roi
+    # 避免潜在除以零风险
+    safe_w = max(1.0, float(w))
+    safe_h = max(1.0, float(h))
     return (
-        (layout.RINK_RIGHT - layout.RINK_LEFT) / w,
-        (layout.RINK_BOTTOM - layout.RINK_TOP) / h,
+        (layout.RINK_RIGHT - layout.RINK_LEFT) / safe_w,
+        (layout.RINK_BOTTOM - layout.RINK_TOP) / safe_h,
     )
 
 
@@ -83,6 +89,7 @@ def track_to_rink_state(track, roi):
 
 def annotate(image, roi, detection, track, ai_target_pixel, display_fps, trajectory=None, pipeline_roi=None):
     """
+    可视化绘制函数。
     因为优化后取消了全图裁剪校正，画面的物理坐标跟像素原图会有偏移。
     绘图时自动加上相机内部的偏移量 (cx, cy)，确保 UI 可视化依然精准。
     """
@@ -107,6 +114,7 @@ def annotate(image, roi, detection, track, ai_target_pixel, display_fps, traject
         end = (round(track.center_x + track.vx * 0.1) + ox, round(track.center_y + track.vy * 0.1) + oy)
         cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
         
+    # 注意：这里的 trajectory 已经转换为了像素坐标列表
     if trajectory:
         for i, (px, py) in enumerate(trajectory):
             alpha = max(40, 255 - i * 12)
@@ -181,13 +189,11 @@ class VisionWindow:
 
 
 def run_vision(args):
-    # 初始化 ROI 区域
     roi = tuple(args.roi)   
-
-    # 读取是否有性能测试模式
     headless = args.headless
     
-    # 如果没有加 -- headless 启动性能测试模式
+    # 修复 1：显式初始化 window，避免 headless 模式下抛出 NameError
+    window = None
     if not headless:
         window = VisionWindow()     
 
@@ -201,19 +207,19 @@ def run_vision(args):
         min_circularity=0.65,
     )
 
-    # 创建 tracker 对象
-    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL + 1)    
+    # 修复 2：将 max_missed_frames 拓宽到允许连续 3~4 次检测失败（9~12 帧），大幅增强抗遮挡与抗反光闪烁能力
+    tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL * 4)    
 
-    # 创建 ai 对象，目前用的仿真参数，后续真机修改
+    # 创建 AI 控制器
     ai = AirHockeyAI()
 
-    # 创建 vision_pipeline 对象，相机畸变校正
+    # 创建视觉校正管线
     vision_pipeline = VisionPipeline(
         calibration_file=args.calibration,
         enabled=not args.disable_undistort,     
     )
 
-    # 创建 camera 对象
+    # 创建相机管理器
     camera = CameraManager()
     try:
         camera.start()
@@ -222,7 +228,6 @@ def run_vision(args):
             window.close()
         raise SystemExit(f"摄像头启动失败：{exc}")
 
-    # 终端打印信息
     mode_label = "headless 性能测试" if headless else "实时视觉演示"
     print(f"{mode_label}开始{'，Ctrl+C 退出' if headless else '，Q / ESC 或关闭窗口退出'}")
     print(f"视觉管线：最新帧 + 每 {DETECTION_INTERVAL} 帧检测，其余帧使用 tracker 预测")
@@ -231,22 +236,19 @@ def run_vision(args):
     print(f"  undistort: {'校正开启' if not args.disable_undistort else '校正关闭'}")
 
     preview_lock = threading.Lock()     
+    shared = {
+        "img": None,              
+        "img_seq": -1,            
+        "png": None,              
+        "png_seq": 0,
+        "status": "等待画面", 
+        "fatal": None
+    }            
 
-    # 创建一个字典作为线程间传递数据的公共缓冲区
-    shared = {"img": None,              
-              "img_seq": -1,            
-              "png": None,              
-              "png_seq": 0,
-              "status": "等待画面", 
-              "fatal": None}            
-
-    # 创建一个事件对象，用于停止线程
     stop = threading.Event()
 
-    # 视觉主循环，核心部分
     def processing_loop():
-        """启动处理线程，只取最新帧；检测按固定间隔运行，中间帧由 tracker 预测。"""
-        # 初始化与变量准备
+        """处理线程：取最新帧 -> 抽帧检测/追踪预测 -> AI 控制 -> 标注。"""
         last_sequence = -1
         last_timestamp = None
         frame_index = 0
@@ -257,11 +259,14 @@ def run_vision(args):
         target = [layout.RINK_CENTER_X, AI_HOME_Y]
         reaction_timer = 0.0
         stalled_phase = "idle"
+
+        # 修复 3：维护 AI 击球手的当前物理坐标（闭环模拟），避免每帧将位置重置为静态原点
+        ai_current_pos = [layout.RINK_CENTER_X, AI_HOME_Y]
+
         window_closed = lambda: window.closed if window is not None else False
 
         try:
             while not stop.is_set() and not window_closed():
-                # 只处理最新的一帧
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
                     time.sleep(0.001)       
@@ -269,33 +274,30 @@ def run_vision(args):
                 last_sequence = frame.sequence
                 frame_index += 1
 
-                # 这里不再做耗时的全图 Remap，几乎是瞬间返回
+                # 快速管线处理（无耗时全图 Remap）
                 frame = vision_pipeline.process(frame)
 
                 now = frame.timestamp
-                dt = 0.0 if last_timestamp is None else max(0.0, now - last_timestamp)
+                raw_dt = 0.0 if last_timestamp is None else (now - last_timestamp)
                 last_timestamp = now
-                if dt > 0:
-                    instant = 1.0 / dt
+                
+                # 修复 4：限制 dt 在合理数值区间（0.001s ~ 0.1s），防止系统卡顿引发的加速度/预测爆炸
+                dt = min(max(raw_dt, 0.001), 0.1)
+
+                if raw_dt > 0:
+                    instant = 1.0 / raw_dt
                     display_fps = instant if display_fps == 0.0 else display_fps * 0.9 + instant * 0.1
 
                 t0 = time.perf_counter()
                 detection = None
 
-                # 第 1 帧以及后面每 3 帧检测一次，降低 CPU 负担
+                # 抽帧硬检测
                 if frame_index == 1 or frame_index % DETECTION_INTERVAL == 0:
-                    
-                    # --------------------------------------------------
-                    # 💡 核心优化：动态 ROI 预测反哺检测
-                    # --------------------------------------------------
                     dynamic_roi = None
-                    box_size = 140  # 根据冰壶大小适当冗余，包容变形
+                    box_size = 140  # 冗余裁剪尺寸
                     
                     if tracker.track is not None and tracker.track.state == TrackState.ACTIVE:
-                        # 拿到物理预测坐标 (去畸变空间)
                         pred_x, pred_y = tracker._predict_position(frame.timestamp)
-                        
-                        # 转换回原图的近似坐标，用于裁剪 ROI
                         approx_x, approx_y = pred_x, pred_y
                         if vision_pipeline.roi is not None:
                             cx, cy, rw, rh = vision_pipeline.roi
@@ -304,55 +306,49 @@ def run_vision(args):
                                 approx_y += cy
                                 
                         img_h, img_w = frame.image.shape[:2]
-                        rx = max(0, int(approx_x - box_size / 2))
-                        ry = max(0, int(approx_y - box_size / 2))
-                        rw = min(box_size, img_w - rx)
-                        rh = min(box_size, img_h - ry)
+
+                        # 修复 5：动态 ROI 严格边界保护，防止目标越界产生负宽高导致崩溃
+                        rx = max(0, min(int(approx_x - box_size / 2), img_w - 1))
+                        ry = max(0, min(int(approx_y - box_size / 2), img_h - 1))
+                        rw = max(1, min(box_size, img_w - rx))
+                        rh = max(1, min(box_size, img_h - ry))
                         
                         dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
 
-                    # 传入动态 ROI 进行检测，计算量减少 90% 以上
                     detection = detector.detect(frame, dynamic_roi=dynamic_roi)
                     
-                    # --------------------------------------------------
-                    # 💡 核心优化：点级别去畸变
-                    # --------------------------------------------------
                     if detection is not None:
-                        # 只对 (center_x, center_y) 做点级去畸变，耗时 0 毫秒
+                        # 点级去畸变（耗时 ~0 ms）
                         real_x, real_y = vision_pipeline.undistort_point(
                             detection.center_x, detection.center_y
                         )
-                        # 将真实的几何坐标覆盖回 detection
                         detection.center_x = real_x
                         detection.center_y = real_y
 
                     detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
                     tracks = tracker.update(detection)
-                # 否则预测
                 else:
                     tracks = tracker.predict(frame.timestamp)
 
-                # 拿到第 1 个目标
                 track = tracks[0] if tracks else None
 
                 correction_status = "ON" if vision_pipeline.camera_matrix is not None else "OFF"
                 status_text = f"FPS {display_fps:.1f} | 校正 {correction_status} | 未检测到冰壶"
                 ai_target_pixel = None
-                trajectory = None
+                pixel_trajectory = None
+
                 if track is not None:
-                    # 坐标转换
                     stone = track_to_rink_state(track, roi)
 
-                    # 预测冰壶 0.5s 后的位置
-                    pred_x, pred_y = predict_position(stone.x, stone.y, stone.vx, stone.vy, 0.5)
+                    # 修复 6：在球台坐标系预测轨迹，并转换回像素坐标供前端标注
+                    raw_trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.15)
+                    if raw_trajectory:
+                        pixel_trajectory = [rink_to_pixel(px, py, roi) for px, py in raw_trajectory]
 
-                    # 生成未来轨迹线
-                    trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.15)
-
-                    # 如果检测到冰壶，就创建一个 state 对象
+                    # 修复 7：传入真实演化的击球手坐标 ai_current_pos
                     state = GameState(
-                        ai_x=layout.RINK_CENTER_X,
-                        ai_y=AI_HOME_Y,
+                        ai_x=ai_current_pos[0],
+                        ai_y=ai_current_pos[1],
                         ai_home_y=AI_HOME_Y,
                         target_x=target[0],
                         target_y=target[1],
@@ -365,15 +361,19 @@ def run_vision(args):
                         difficulty=layout.DIFFICULTIES["普通"],
                     )
 
-                    # 输入当前冰壶状态，得到 ai 目标位置
                     decision = ai.update(state, dt)
                     target[0], target[1] = decision.target_x, decision.target_y
                     reaction_timer = decision.reaction_timer
                     stalled_phase = decision.stalled_stone_phase
-                    tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
 
-                    # 转换回来
+                    # 击球手物理运动平滑模拟（向目标插值平移）
+                    smooth_alpha = min(1.0, dt * 12.0)
+                    ai_current_pos[0] += (target[0] - ai_current_pos[0]) * smooth_alpha
+                    ai_current_pos[1] += (target[1] - ai_current_pos[1]) * smooth_alpha
+
+                    tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
                     ai_target_pixel = (round(tx), round(ty))
+
                     status_text = (
                         f"FPS {display_fps:.1f} | 校正 {correction_status} | "
                         f"追踪 {track.state.value} | 位置 ({stone.x:.0f}, {stone.y:.0f}) "
@@ -381,7 +381,7 @@ def run_vision(args):
                         f"AI 目标 ({target[0]:.0f}, {target[1]:.0f})"
                     )
 
-                # 把信息画到图片上 (传入 pipeline_roi 以自动偏移纠正显示错位)
+                # 将轨迹与目标点画上图像
                 marked = annotate(
                     frame.image, 
                     roi, 
@@ -389,17 +389,15 @@ def run_vision(args):
                     track, 
                     ai_target_pixel, 
                     display_fps, 
-                    trajectory,
+                    pixel_trajectory,
                     pipeline_roi=vision_pipeline.roi
                 )
 
-                # 加锁
                 with preview_lock:
                     shared["img"] = marked
                     shared["img_seq"] = frame.sequence
                     shared["status"] = status_text + "    Q / ESC 退出"
 
-                # 性能统计打印
                 frame_ms = frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
                 stats_interval = 1.0 if headless else STATS_INTERVAL
                 if time.perf_counter() - stats_timer >= stats_interval:
@@ -418,42 +416,40 @@ def run_vision(args):
                             f"(检测 {detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
                         )
         except Exception as exc:
+            # 修复 8：打印完整异常回溯，防止后台静默报错导致难以排查
+            traceback.print_exc()
             with preview_lock:
                 shared["fatal"] = f"处理线程异常退出：{exc!r}"
         finally:
             stop.set()
 
     def encoding_loop():
-        """启动编码线程，最新标注帧 -> 缩放 -> PNG，按预览帧率限速。"""
-        seen = -1       # 记录最后处理过的序列号，防止重复编码
-
+        """编码线程：将图片编码压缩为 PNG 供 Tkinter 显示。"""
+        seen = -1
         while not stop.wait(1.0 / args.preview_fps):
-            # 加锁读取
             with preview_lock:
                 img = shared["img"]
                 seq = shared["img_seq"]
-            # 去重检查
             if img is None or seq == seen:
                 continue
             seen = seq
             scale = DISPLAY_WIDTH / img.shape[1]
 
-            # 缩放
             small = cv2.resize(img, (DISPLAY_WIDTH, round(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
-            # 编码
             ok, encoded = cv2.imencode(".png", small, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             if ok:
                 with preview_lock:
                     shared["png"] = base64.b64encode(encoded.tobytes())
                     shared["png_seq"] += 1
 
-    # 启动子线程
-    threading.Thread(target=processing_loop, name="processing", daemon=True).start()
+    # 启动工作线程
+    processing_thread = threading.Thread(target=processing_loop, name="processing", daemon=True)
+    processing_thread.start()
+
     if not headless:
         threading.Thread(target=encoding_loop, name="encoder", daemon=True).start()
         window.start(preview_lock, shared)
 
-    # 主线程
     try:
         if headless:
             stop.wait()
@@ -462,7 +458,10 @@ def run_vision(args):
     except KeyboardInterrupt:
         pass
     finally:
+        # 修复 9：先发终止信号并等待处理线程平稳退出，再销毁底层相机资源，消除段错误崩溃竞态
         stop.set()
+        if processing_thread.is_alive():
+            processing_thread.join(timeout=0.6)
         camera.stop()
         if window is not None:
             window.close()
@@ -471,7 +470,6 @@ def run_vision(args):
 def main():
     parser = argparse.ArgumentParser(description="空气冰壶项目入口")
 
-    # 添加参数，均是 bool 值
     parser.add_argument("--vision", action="store_true", help="实时视觉演示：摄像头 -> 检测 -> 追踪 -> AI")
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式（需配合 --vision）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
