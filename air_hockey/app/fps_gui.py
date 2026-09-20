@@ -1,6 +1,5 @@
 """Jetson 摄像头 FPS 测试工具的 Tk GUI。"""
 
-import base64
 import os
 import sys
 import threading
@@ -47,10 +46,11 @@ def preview_loop():
             continue
         seen_sequence = frame.sequence
         preview = cv2.resize(frame.image, (VIDEO_CAPTURE_WIDTH, VIDEO_CAPTURE_HEIGHT), interpolation=cv2.INTER_AREA)
-        ok, encoded = cv2.imencode(".png", preview, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-        if ok:
-            with preview_lock:
-                latest_preview_data = base64.b64encode(encoded.tobytes())
+        rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        ppm_data = f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
+        with preview_lock:
+            latest_preview_data = ppm_data
 
 
 def start_camera():
@@ -107,7 +107,7 @@ def update_video():
         with preview_lock:
             preview_data = latest_preview_data
         if preview_data is not None:
-            display_image = tk.PhotoImage(data=preview_data)
+            display_image = tk.PhotoImage(data=preview_data, format="PPM")
             video_label.config(image=display_image)
     root.after(VIDEO_UPDATE_MS, update_video)
 
