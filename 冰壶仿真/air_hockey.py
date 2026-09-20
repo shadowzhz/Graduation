@@ -4,6 +4,7 @@
 玩家按住左键控制下方蓝色球槌，电脑控制上方红色球槌。
 """
 
+import argparse
 import math
 import os
 import sys
@@ -25,10 +26,11 @@ from air_hockey_physics import (
     stone_inside_goal_mouth,
 )
 from game_state import GameState, StoneState, TrackingState
+from plc_interface import PLCInterface
 
 
 class AirHockeyGame:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, plc_ip: str = None) -> None:
         self.root = root
         self.ai_controller = AirHockeyAI()
         self.closed = False
@@ -61,6 +63,13 @@ class AirHockeyGame:
         self._reset_round(initial_message, "player")
         self._render()
         self.last_frame_time = time.perf_counter()
+
+        # PLC 连接
+        self.plc = None
+        if plc_ip:
+            self.plc = PLCInterface(plc_ip)
+            self.plc.connect()
+
         self._schedule_game_loop()
 
     def _schedule_game_loop(self) -> None:
@@ -297,6 +306,7 @@ class AirHockeyGame:
                     break
         if self.closed:
             return
+        self._write_plc_data()
         self._render()
         self._schedule_game_loop()
 
@@ -358,6 +368,24 @@ class AirHockeyGame:
         self.ai_target_y = decision.target_y
         self.ai_stalled_stone_phase = decision.stalled_stone_phase
         self.ai_reaction_timer = decision.reaction_timer
+
+    def _write_plc_data(self) -> None:
+        """把当前帧的 AI 数据写入 PLC。"""
+        if not self.plc or not self.plc.connected:
+            return
+        stone_vx, stone_vy = self.stone.collision_velocity()
+        self.plc.write_game_state(
+            ai_target_x=self.ai_target_x,
+            ai_target_y=self.ai_target_y,
+            ai_x=self.ai_x,
+            ai_y=self.ai_y,
+            stone_x=self.stone.x,
+            stone_y=self.stone.y,
+            stone_vx=stone_vx,
+            stone_vy=stone_vy,
+            player_score=self.player_score,
+            ai_score=self.ai_score,
+        )
 
     @staticmethod
     def _resolve_mallet_goal_posts(mallet_x, mallet_y, mallet_vx, mallet_vy):
@@ -679,6 +707,8 @@ class AirHockeyGame:
                 pass
             finally:
                 self.game_loop_id = None
+        if self.plc:
+            self.plc.disconnect()
         try:
             self.root.destroy()
         except tk.TclError:
@@ -686,6 +716,10 @@ class AirHockeyGame:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--plc", metavar="IP", help="连接 S7-1500 PLC，例如 192.168.0.1")
+    args = parser.parse_args()
+
     if not os.environ.get("DISPLAY") and os.path.exists("/tmp/.X11-unix/X0"):
         os.environ["DISPLAY"] = ":0"
         xauthority = "/run/user/1000/gdm/Xauthority"
@@ -694,7 +728,7 @@ def main():
     root = tk.Tk()
     configure_responsive_layout(root)
     sync_layout_globals(globals())
-    AirHockeyGame(root)
+    AirHockeyGame(root, plc_ip=args.plc)
     center_window(root)
     root.mainloop()
 

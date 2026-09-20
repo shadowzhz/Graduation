@@ -5,7 +5,6 @@
 
 
 import argparse
-import base64
 import os
 from pathlib import Path
 import sys
@@ -145,11 +144,12 @@ def preview_loop():
             (VIDEO_CAPTURE_WIDTH, VIDEO_CAPTURE_HEIGHT),
             interpolation=cv2.INTER_AREA,
         )
-        ok, encoded = cv2.imencode(".png", preview, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-        if ok:
-            with preview_lock:
-                latest_preview_data = base64.b64encode(encoded.tobytes())
-                latest_preview_sequence += 1
+        rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        ppm_data = f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
+        with preview_lock:
+            latest_preview_data = ppm_data
+            latest_preview_sequence += 1
 
 
 def start_camera():
@@ -219,7 +219,7 @@ def update_video():
             preview_data = latest_preview_data
             preview_sequence = latest_preview_sequence
         if preview_data is not None and preview_sequence != displayed_preview_sequence:
-            display_image = tk.PhotoImage(data=preview_data)
+            display_image = tk.PhotoImage(data=preview_data, format="PPM")
             video_label.config(image=display_image)
             displayed_preview_sequence = preview_sequence
     root.after(VIDEO_UPDATE_MS, update_video)

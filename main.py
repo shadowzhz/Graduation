@@ -8,11 +8,10 @@
 线程分工：
     主线程    Tk mainloop + 显示定时器
     处理线程  取最新帧 -> 间隔检测/追踪 -> AI -> 标注
-    编码线程  最新标注帧 -> 缩放 -> PNG（按预览帧率限速）
+    编码线程  最新标注帧 -> 缩放 -> PPM（按预览帧率限速）
 """
 
 import argparse
-import base64
 import subprocess
 import sys
 import threading
@@ -125,7 +124,7 @@ def annotate(image, roi, detection, track, ai_target_pixel, display_fps, traject
 
 
 class VisionWindow:
-    """Tk 窗口，只在主线程使用；定时器从共享区取编码好的 PNG 显示。"""
+    """Tk 窗口，只在主线程使用；定时器从共享区取 PPM 原始像素显示。"""
 
     def __init__(self):
         self.closed = False
@@ -153,12 +152,12 @@ class VisionWindow:
             return
         try:
             with self._lock:
-                png = self._shared["png"]
-                seq = self._shared["png_seq"]
+                ppm = self._shared["ppm"]
+                seq = self._shared["ppm_seq"]
                 status = self._shared["status"]
                 fatal = self._shared["fatal"]
-            if png is not None and seq != self._seen_seq:
-                self._photo = tk.PhotoImage(data=png)
+            if ppm is not None and seq != self._seen_seq:
+                self._photo = tk.PhotoImage(data=ppm, format="PPM")
                 self.label.configure(image=self._photo)
                 self._seen_seq = seq
             self.status.set(fatal or status)
@@ -229,10 +228,10 @@ def run_vision(args):
     shared = {
         "img": None,              
         "img_seq": -1,            
-        "png": None,              
-        "png_seq": 0,
+        "ppm": None,              
+        "ppm_seq": 0,
         "status": "等待画面", 
-        "fatal": None
+        "fatal": None,
     }            
 
     stop = threading.Event()
@@ -400,7 +399,7 @@ def run_vision(args):
             stop.set()
 
     def encoding_loop():
-        """编码线程：将图片编码压缩为 PNG 供 Tkinter 显示。"""
+        """预览转换线程：将图片转换为 PPM 原始像素格式供 Tkinter 显示（零压缩、微秒级）。"""
         seen = -1
         while not stop.wait(1.0 / args.preview_fps):
             with preview_lock:
@@ -412,11 +411,12 @@ def run_vision(args):
             scale = DISPLAY_WIDTH / img.shape[1]
 
             small = cv2.resize(img, (DISPLAY_WIDTH, round(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
-            ok, encoded = cv2.imencode(".png", small, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-            if ok:
-                with preview_lock:
-                    shared["png"] = base64.b64encode(encoded.tobytes())
-                    shared["png_seq"] += 1
+            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            ppm_data = f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
+            with preview_lock:
+                shared["ppm"] = ppm_data
+                shared["ppm_seq"] += 1
 
     processing_thread = threading.Thread(target=processing_loop, name="processing", daemon=True)
     processing_thread.start()
