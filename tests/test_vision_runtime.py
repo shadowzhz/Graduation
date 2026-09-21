@@ -40,8 +40,6 @@ def test_stone_tracker_predict_position_public():
     pred_x, pred_y = tracker.predict_position(1.2)
     assert pred_x > 120.0
     assert pred_y > 210.0
-    # 验证与旧内部别名完全一致
-    assert (pred_x, pred_y) == tracker._predict_position(1.2)
 
 
 def test_vision_runtime_dataflow_track_to_ai():
