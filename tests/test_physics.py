@@ -47,3 +47,24 @@ def test_goal_detection():
     assert goal_scorer(side_stone) is None
     assert stone_inside_goal_mouth(layout.RINK_CENTER_X)
     assert not stone_inside_goal_mouth(layout.RINK_LEFT + 10.0)
+
+
+def test_predict_trajectory_bounces_off_wall():
+    from vision.predictor import predict_trajectory
+
+    bounds = (0.0, 100.0, 0.0, 100.0)
+    traj = predict_trajectory(80.0, 50.0, 200.0, 0.0, duration=1.0, step=0.05, bounds=bounds, radius=5.0)
+    assert len(traj) > 2
+    for px, _ in traj:
+        assert px <= 95.0 + 1e-6
+    xs = [pt[0] for pt in traj]
+    assert xs[-1] < max(xs)
+
+
+def test_predict_trajectory_zero_velocity():
+    from vision.predictor import predict_trajectory
+
+    traj = predict_trajectory(50.0, 50.0, 0.0, 0.0, duration=1.0)
+    assert len(traj) == 1
+    assert traj[0] == (50.0, 50.0)
+
