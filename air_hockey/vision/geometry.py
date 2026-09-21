@@ -20,20 +20,26 @@ class CameraGeometry:
 
     def __init__(
         self,
+        rink_bounds: Tuple[float, float, float, float],
         camera_matrix: Optional[np.ndarray] = None,
         dist_coeffs: Optional[np.ndarray] = None,
         image_size: Optional[Tuple[int, int]] = None,
         table_roi: Optional[Tuple[float, float, float, float]] = None,
-        rink_bounds: Optional[Tuple[float, float, float, float]] = None,
         enabled: bool = True,
     ) -> None:
+        if rink_bounds is None:
+            raise ValueError("rink_bounds must be provided")
+        rink_bounds_tuple = tuple(float(v) for v in rink_bounds)
+        if len(rink_bounds_tuple) != 4:
+            raise ValueError(f"rink_bounds must contain exactly 4 values (min_x, max_x, min_y, max_y), got {rink_bounds}")
+        self.rink_bounds = rink_bounds_tuple
+
         self.enabled = bool(enabled)
         self.camera_matrix = np.asarray(camera_matrix, dtype=np.float64) if camera_matrix is not None else None
         self.dist_coeffs = np.asarray(dist_coeffs, dtype=np.float64) if dist_coeffs is not None else None
         self.image_size = None
         self.new_camera_matrix = None
         self.table_roi = None
-        self.rink_bounds = tuple(float(v) for v in rink_bounds) if rink_bounds is not None else None
 
         if image_size is not None:
             self.set_image_size(image_size)
@@ -45,17 +51,27 @@ class CameraGeometry:
     def from_calibration_file(
         cls,
         calibration_file: Optional[str or Path],
+        rink_bounds: Tuple[float, float, float, float],
         table_roi: Optional[Tuple[float, float, float, float]] = None,
-        rink_bounds: Optional[Tuple[float, float, float, float]] = None,
         enabled: bool = True,
     ) -> "CameraGeometry":
         """从标定 .npz 文件构建 CameraGeometry。"""
-        if not enabled or calibration_file is None:
-            return cls(table_roi=table_roi, rink_bounds=rink_bounds, enabled=enabled)
+        if rink_bounds is None:
+            raise ValueError("rink_bounds must be provided")
+
+        if not enabled:
+            return cls(
+                rink_bounds=rink_bounds,
+                table_roi=table_roi,
+                enabled=False,
+            )
+
+        if calibration_file is None:
+            raise FileNotFoundError("calibration_file must be provided when distortion correction is enabled")
 
         path = Path(calibration_file)
         if not path.is_file():
-            return cls(table_roi=table_roi, rink_bounds=rink_bounds, enabled=enabled)
+            raise FileNotFoundError(f"calibration file not found: {calibration_file}")
 
         with np.load(path) as data:
             camera_matrix = data["camera_matrix"]
@@ -64,12 +80,12 @@ class CameraGeometry:
             image_size = tuple(int(v) for v in raw_size) if raw_size is not None else None
 
         return cls(
+            rink_bounds=rink_bounds,
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs,
             image_size=image_size,
             table_roi=table_roi,
-            rink_bounds=rink_bounds,
-            enabled=enabled,
+            enabled=True,
         )
 
     def set_image_size(self, image_size: Tuple[int, int]) -> None:
@@ -95,15 +111,6 @@ class CameraGeometry:
             raise ValueError(f"table_roi width and height must be positive: {table_roi}")
         self.table_roi = (x, y, w, h)
 
-    def _get_rink_bounds(self) -> Tuple[float, float, float, float]:
-        if self.rink_bounds is not None:
-            return self.rink_bounds
-        try:
-            import air_hockey_config as layout
-            return (layout.RINK_LEFT, layout.RINK_RIGHT, layout.RINK_TOP, layout.RINK_BOTTOM)
-        except Exception:
-            return (36.0, 564.0, 46.0, 714.0)
-
     def _get_undistorted_table_bounds(self) -> Tuple[float, float, float, float]:
         """获取去畸变坐标系下球台矩形的 (ux0, uy0, ux1, uy1)。"""
         if self.table_roi is None:
@@ -118,7 +125,7 @@ class CameraGeometry:
         ux0, uy0, ux1, uy1 = self._get_undistorted_table_bounds()
         span_w = max(1.0, ux1 - ux0)
         span_h = max(1.0, uy1 - uy0)
-        rink_left, rink_right, rink_top, rink_bottom = self._get_rink_bounds()
+        rink_left, rink_right, rink_top, rink_bottom = self.rink_bounds
         return (
             (rink_right - rink_left) / span_w,
             (rink_bottom - rink_top) / span_h,
@@ -168,7 +175,7 @@ class CameraGeometry:
         """去畸变相机像素坐标 -> 球台/场地坐标。"""
         ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
         scale_x, scale_y = self._get_rink_scales()
-        rink_left, _rink_right, rink_top, _rink_bottom = self._get_rink_bounds()
+        rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
         table_x = rink_left + (float(undist_x) - ux0) * scale_x
         table_y = rink_top + (float(undist_y) - uy0) * scale_y
         return table_x, table_y
@@ -177,7 +184,7 @@ class CameraGeometry:
         """球台/场地坐标 -> 去畸变相机像素坐标。"""
         ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
         scale_x, scale_y = self._get_rink_scales()
-        rink_left, _rink_right, rink_top, _rink_bottom = self._get_rink_bounds()
+        rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
         undist_x = ux0 + (float(table_x) - rink_left) / scale_x
         undist_y = uy0 + (float(table_y) - rink_top) / scale_y
         return undist_x, undist_y
@@ -204,7 +211,11 @@ class CameraGeometry:
         raw_y: float,
         raw_vx: float,
         raw_vy: float,
+        dt: float = 0.01,
     ) -> Tuple[float, float]:
-        """将原始像素速度 (px/s) 转换为球台坐标速度 (单位/s)。"""
-        scale_x, scale_y = self._get_rink_scales()
-        return float(raw_vx) * scale_x, float(raw_vy) * scale_y
+        """通过位置微小位移差分计算球台坐标系速度，保证与位置使用同一套坐标转换逻辑。"""
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        tx0, ty0 = self.raw_to_table(raw_x, raw_y)
+        tx1, ty1 = self.raw_to_table(raw_x + raw_vx * dt, raw_y + raw_vy * dt)
+        return (tx1 - tx0) / dt, (ty1 - ty0) / dt
