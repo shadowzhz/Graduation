@@ -24,8 +24,6 @@ DB 结构（共 36 字节）：
     plc.disconnect()
 """
 
-import struct
-
 try:
     import snap7
     from snap7.util import set_real, set_int
@@ -116,13 +114,3 @@ class PLCInterface:
             print(f"[PLC] 写入失败: {e}")
             self._connected = False
             return False
-
-
-def _set_real_manual(data: bytearray, offset: int, value: float) -> None:
-    """手动打包 REAL（备用，snap7 不可用时）。"""
-    struct.pack_into(">f", data, offset, value)
-
-
-def _set_int_manual(data: bytearray, offset: int, value: int) -> None:
-    """手动打包 INT（备用）。"""
-    struct.pack_into(">h", data, offset, value)

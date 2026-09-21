@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from math import hypot
 
-from .types import Detection, Track, TrackState
+from .types import Track, TrackState
 
 
 def _detection_confidence(detection) -> float:

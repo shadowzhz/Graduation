@@ -2,7 +2,7 @@
 
 所有记录统一为一个版本化 JSON 文档，帧级字段一致：
     format / version / source / meta / frames
-每帧记录 timestamp、fps、curling_state、prediction。
+每帧记录 timestamp、fps、curling_state、prediction、ai_decision、plc_request。
 因此真实摄像头运行与仿真的数据可以直接对比、复用同一套分析工具。
 """
 
@@ -15,7 +15,7 @@ from game_state import CurlingState
 from ..prediction import PredictionState
 
 RECORDING_FORMAT = "curling_recording"
-RECORDING_VERSION = 1
+RECORDING_VERSION = 2
 
 
 def curling_state_to_dict(state: CurlingState) -> dict:
@@ -42,12 +42,33 @@ def prediction_to_dict(pred: PredictionState) -> dict:
     }
 
 
+def ai_decision_to_dict(decision) -> Optional[dict]:
+    """AIDecision -> 帧级字典；None 时返回 None。"""
+    if decision is None:
+        return None
+    return {
+        "target_x": float(decision.target_x),
+        "target_y": float(decision.target_y),
+        "stalled_stone_phase": str(getattr(decision, "stalled_stone_phase", "")),
+        "reaction_timer": float(getattr(decision, "reaction_timer", 0.0)),
+    }
+
+
+def plc_request_to_dict(request) -> Optional[dict]:
+    """PlcWriteRequest -> 帧级字典（含 timestamp）；None 时返回 None。"""
+    if request is None:
+        return None
+    return request.to_dict()
+
+
 def build_frame(
     index: int,
     timestamp: float,
     fps: float,
     curling_state: Optional[CurlingState] = None,
     prediction: Optional[PredictionState] = None,
+    ai_decision=None,
+    plc_request=None,
 ) -> dict:
     """构建单帧记录。"""
     return {
@@ -56,6 +77,8 @@ def build_frame(
         "fps": float(fps),
         "curling_state": None if curling_state is None else curling_state_to_dict(curling_state),
         "prediction": None if prediction is None else prediction_to_dict(prediction),
+        "ai_decision": ai_decision_to_dict(ai_decision),
+        "plc_request": plc_request_to_dict(plc_request),
     }
 
 

@@ -1,6 +1,6 @@
 # 毕业设计：基于计算机视觉与 PLC 的空气冰壶实时检测与智能对弈系统
 
-> **Air Hockey: Real-Time Vision Tracking, Trajectory Prediction and Intelligent System**  
+> **Air Hockey: Real-Time Vision Tracking, Trajectory Prediction and Intelligent Control**
 > 毕业设计项目 (Graduation Project) | 嵌入式视觉与工业控制应用
 
 ---
@@ -9,107 +9,137 @@
 
 空气冰壶（Air Hockey）是一项典型的高速桌面竞技运动。冰壶滑行速度快、碰撞反弹频繁，对视觉感知系统的采集帧率、图像处理时效性、弹墙轨迹预判精度以及下位机控制响应均有较高要求。
 
-本毕业设计结合嵌入式边缘计算与工业自动化控制技术，开发了一套完整的空气冰壶目标检测、运动追踪与智能对弈系统。系统依托 NVIDIA Jetson 边缘计算平台实现高帧率视觉捕获与弹墙物理预测，驱动 AI 算法进行防守反击决策，并预留西门子 PLC 工业通信接口，具备良好的软硬件工程实用性。
+本毕业设计结合嵌入式边缘计算与工业自动化控制技术，开发了一套完整的空气冰壶目标检测、运动追踪、状态估计、轨迹预测、控制规划与智能对弈系统。系统依托 NVIDIA Jetson 边缘计算平台实现高帧率视觉捕获与弹墙物理预测，驱动 AI 算法进行防守反击决策，并通过西门子 PLC 工业通信接口输出控制指令，具备良好的软硬件工程实用性。
 
 ---
 
-## 🏗️ 系统硬件与软件架构
+## 🏗️ 系统软件架构
 
-### 1. 硬件平台组成
-* **边缘主控单元**：NVIDIA Jetson Xavier NX（运行 Ubuntu 20.04 LTS）
-* **视觉采集设备**：USB 高速工业相机（支持 1280x720 @ 200 FPS，MJPG 硬件输出）
-* **下位机控制器**：西门子 S7-1500 / S7-1200 PLC（工业以太网通信）
-* **竞技台面环境**：气浮冰壶球台、专用红色目标冰壶与击球球槌
+### 1. 端到端数据链路
 
-### 2. 软件技术栈
-* **开发语言**：Python 3.8+
-* **核心算法库**：OpenCV、NumPy
-* **图像流媒体与底层加速**：GStreamer (PyGObject `gi.repository.Gst`)、Jetson 硬件解码插件
-* **工业通信协议**：基于 `python-snap7` 的西门子 S7 通信协议
-* **界面显示**：Tkinter（采用微秒级 PPM 异步渲染架构）
-
-### 3. 模块依赖方向
-
-视觉运行链自相机到 AI 决策单向依赖，共享物理与 AI 核心均归位于 `air_hockey/` 包内，**视觉核心不依赖 `冰壶仿真/` 目录**：
+全链路采用统一状态模型（`CurlingState` / `PredictionState` / `ControlCommand`）单向贯通，视觉、仿真与预测共用同一套物理核心：
 
 ```text
-Camera
-  -> VisionRuntime
-       -> Detector
-       -> Tracker
-       -> CameraGeometry
-       -> TrajectoryPredictor
-       -> AirHockeyAI
+Camera (GStreamer / V4L2, 无锁最新帧缓存)
+  │  Frame(raw BGR)
+  ▼
+StoneDetector            HSV/Lab 阈值 + 轮廓几何 + 动态 ROI
+  │  CurlingState(raw 像素, confidence)
+  ▼
+StoneTracker             常速关联 + 漏检维持（仅服务关联与 ROI）
+  │  Track(raw)
+  ▼
+CameraGeometry           raw → undistorted → table（支持四点 Homography）
+  │  table 坐标
+  ▼
+KalmanFilter             常量速度模型状态估计，抑制视觉抖动
+  │  CurlingState / StoneState(table)
+  ▼
+TrajectoryPredictor      微步物理：摩擦减速 + 弹墙 + 门柱 + 进球
+  │  PredictionState(trajectory / endpoint / duration / source_state)
+  ▼
+AirHockeyAI              守门 / 前压 / 回防决策
+  │  AIDecision(target_x, target_y, ...)
+  ▼
+TrajectoryPlanner        预测驱动的目标规划
+  │  ControlCommand(target_position / direction / speed)
+  ▼
+PlcControlAdapter        坐标范围检查 + 输出限幅 + 时间戳
+  │  PlcWriteRequest
+  ▼
+PlcOutputWorker(非阻塞)   覆盖式最新请求 → 后台线程写入
+  │
+  ▼
+PLCInterface             S7-1500 DB1 写入（可选，--plc）
 ```
+
+### 2. 模块依赖方向
+
+视觉运行链单向依赖，共享物理/AI/状态核心均归位于 `air_hockey/` 包内，**视觉核心不依赖 `冰壶仿真/` 目录**：
+
+```text
+Camera -> VisionRuntime
+            -> Detector
+            -> Tracker
+            -> KalmanFilter
+            -> CameraGeometry
+            -> TrajectoryPredictor
+            -> AirHockeyAI
+            -> PlcControlAdapter (可选)
+```
+
+> 仿真端（`冰壶仿真/`）复用同一 `physics` / `ai` / `prediction` / `game_state`，仅保留仿真 GUI、GUI 配置与 PLC 通信模块。
+
+### 3. 统一数据契约（`game_state.py`）
+
+| 类型 | 职责 |
+|---|---|
+| `CurlingState` | 统一冰壶状态：`x/y`(position)、`vx/vy`(velocity)、`timestamp`、`confidence`、`radius` |
+| `StoneState` | `CurlingState` + `tracking_state`（视觉追踪路径） |
+| `GameState` | AI 决策快照：球槌位置 + 冰壶状态 + 开球/难度等 |
+| `PredictionState` | 预测结果：`trajectory` / `endpoint` / `duration` / `source_state` |
+| `ControlCommand` | 控制指令：`target_position` / `direction` / `speed` |
 
 ---
 
 ## 💡 核心技术与系统实现
 
-1. **高帧率低延迟图像采集**：
-   * 采用 GStreamer 原生 appsink 硬件解码与无锁单帧覆盖队列，突破传统图像读取的性能瓶颈，在 1280x720 分辨率下实测采集帧率达 **140+ FPS**。
-2. **目标检测与动态局部 ROI 优化**：
-   * 结合 HSV 颜色空间阈值分割与轮廓几何特征（面积、半径、圆形度）进行单目标提取；
-   * 引入基于上一帧预测位置的动态局部感兴趣区域（Dynamic ROI），有效降低计算负荷，缩短单帧检测耗时。
-3. **目标追踪与速度平滑滤波**：
-   * 追踪器全程运行于原始相机像素坐标系，采用常速推演模型结合一阶指数滑动平均（EMA），有效滤除速度噪声并处理短时漏检。
-4. **单目去畸变与坐标系几何映射**：
-   * 基于黑白棋盘格标定相机内参及畸变参数；
-   * 建立 `raw`（原始像素） $\rightarrow$ `undistorted`（点级去畸变） $\rightarrow$ `table`（球台物理坐标）三层解耦坐标系，采用空间微元有限差分法精确换算台面速度，避免全图重采样的巨大计算开销；
-   * 当前 `undistorted` $\rightarrow$ `table` 仍为基于球台 ROI 的轴对齐线性映射，下一阶段将替换为台面四点透视单应性（Homography）变换。
-5. **统一微步物理轨迹预测核心**：
-   * 建立涵盖摩擦阻尼减速、边墙弹性碰撞、球门柱圆弧反弹与进球穿透判定的微步欧拉仿真核心（`TrajectoryPredictor`）；
-   * 仿真游戏、视觉端轨迹虚线绘制与 AI 防守决策**共用同一套物理预测核心**。
-6. **AI 智能防守与对战决策**：
-   * AI 算法根据未来轨迹截距提前锁定拦截防守点，具备门线防守、前压击球、死球处理与自动回中等完整状态机逻辑。
-7. **桌面虚拟仿真与对战测试环境**：
-   * 内置基于 Tkinter 开发的虚拟对战仿真平台，支持玩家使用鼠标与 AI 实时切磋，方便脱离硬件环境时验证物理与决策算法。
-8. **西门子 PLC 工业通信接口**：
-   * 编写 PLCInterface 模块，实现将目标打击坐标、实时冰壶位置及计分数据打包写入西门子 S7 PLC 的 DB 块。
-
----
-
-## 📊 实验测试与运行性能
-
-在测试基准（Jetson Xavier NX，L4T R35.6.5，20W_6CORE 模式锁频）下的实测指标如下：
-
-| 测试指标 | 实测数值 | 测试条件与说明 |
-|---|---|---|
-| 相机原生采集帧率 | **144.2 FPS** | 1280x720, MJPG 格式, GStreamer appsink |
-| 视觉检测单帧耗时 | **1.8 ~ 2.5 ms** | 启用动态局部 ROI (140x140 窗口) |
-| 整体算法处理帧率 | **85 ~ 110 FPS** | 包含抓帧、去畸变、轨迹预测与 AI 决策 |
-| 自动化单元测试通过率 | **40 / 40 PASS (100%)** | 覆盖物理碰撞、坐标差分、AI 逻辑与追踪器 |
+1. **高帧率低延迟图像采集**：GStreamer 原生 appsink 硬件解码 + 无锁单帧覆盖队列，1280x720 实测采集 140+ FPS。
+2. **目标检测与动态局部 ROI**：HSV 颜色阈值 + 面积/半径/圆形度几何筛选，基于上一帧预测位置的动态 ROI 降低计算量，输出统一 `CurlingState`。
+3. **单目标追踪**：原始像素坐标下的常速关联与漏检维持，负责目标关联与动态 ROI 预测。
+4. **卡尔曼状态估计**：常量速度模型（`[px, py, vx, vy]`）融合观测序列，输出平滑的 `CurlingState`，显著降低检测抖动（观测误差 ≈3.8 → 滤波误差 ≈1.7）。
+5. **单目去畸变与坐标系几何映射**：`raw → undistorted → table` 三层解耦；`undistorted → table` 支持**球台四点 Homography**（透视校正），也保留 ROI 线性映射回退；速度用空间微元有限差分换算。
+6. **统一微步物理轨迹预测核心**：`TrajectoryPredictor` 涵盖摩擦阻尼、边墙弹性碰撞、门柱圆弧反弹与进球穿透判定；视觉、仿真、AI **共用同一物理核心**。
+7. **AI 智能防守与对战决策**：基于预测轨迹截距的门线防守、前压击球、死球处理与自动回中状态机。
+8. **轨迹规划与控制适配层**：`TrajectoryPlanner` 把预测结果转为 `ControlCommand`；`PlcControlAdapter` 做坐标范围检查、输出限幅与时间戳封装，`PlcOutputWorker` 非阻塞写入 PLC。
+9. **仿真 / 评估 / 记录工具链**：无摄像头运动仿真（真实轨迹→观测→Kalman→预测）、多组实验误差评估（JSON + 控制台报告）、真实/仿真统一格式运行日志（含 CurlingState / PredictionState / AIDecision / PLC request）。
+10. **西门子 PLC 工业通信**：`PLCInterface` 通过 snap7 将 AI 目标、球槌位置、冰壶状态与比分写入 S7 DB 块。
 
 ---
 
 ## 🚀 系统运行与复现操作
 
-项目统一通过根目录的 [main.py](file:///run/media/shadowemperor/游戏/Ubuntu/Project/Python/Graduation/main.py) 启动：
+统一通过根目录 [main.py](file:///run/media/shadowemperor/游戏/Ubuntu/Project/Python/Graduation/main.py) 启动：
 
-### 1. 实时视觉演示模式（系统主程序）
-连接相机后启动完整视觉感知、轨迹预测与 AI 决策可视化系统：
 ```bash
-python3 main.py
+python3 main.py                       # 实时视觉演示（Camera -> ... -> AI）
+python3 main.py --headless            # 无显示性能基准测试
+python3 main.py --sim                 # 虚拟仿真对战（也可写作 --game）
+python3 main.py --record run.json     # 记录运行数据（统一 JSON 日志）
+python3 main.py --plc 192.168.0.1 --plc-rate 30   # 启用 AI->PLC 非阻塞输出
 ```
-*界面将实时显示检测外接圆、速度矢量箭头、预测物理反弹虚线以及 AI 拦截十字准星。*
 
-### 2. 虚拟仿真对战模式（脱机验证）
-在未连接相机或球台的情况下，用于验证物理手感与 AI 对弈算法：
+常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
+
+辅助工具：
+
 ```bash
-python3 main.py --sim
+python3 air_hockey/simulation/run_simulation.py     # 无摄像头轨迹仿真
+python3 air_hockey/evaluation/run_evaluation.py     # 算法评估报告（JSON + 控制台）
+python3 air_hockey/tools/calibrate_table.py         # 球台四点 Homography 标定
+python3 tests/run_tests.py                          # 全量自动化测试
 ```
-*启动单机桌面游戏，玩家使用鼠标操作蓝色球槌与电脑 AI 对决。*
 
-### 3. 无图形界面性能基准测试
-```bash
-python3 main.py --headless
-```
-*关闭 GUI 渲染，终端实时打印算法纯处理 FPS、耗时与追踪状态。*
+---
 
-### 4. 自动化测试套件
-项目内置独立测试运行器，无需额外安装 pytest：
-```bash
-python3 tests/run_tests.py
+## 📊 运行日志与实验数据
+
+`--record <path>` 输出统一格式的版本化 JSON 运行日志，真实运行与仿真格式一致，每帧包含：
+
+```json
+{
+  "format": "curling_recording", "version": 2, "source": "runtime", "meta": {...},
+  "frames": [
+    {
+      "index": 0, "timestamp": 1.0, "fps": 59.8,
+      "curling_state": {"x":0,"y":0,"vx":0,"vy":0,"timestamp":0,"confidence":0,"radius":0},
+      "prediction": {"trajectory":[[x,y],...],"endpoint":[x,y],"duration":0,"source_state":{...}},
+      "ai_decision": {"target_x":0,"target_y":0,"stalled_stone_phase":"idle","reaction_timer":0},
+      "plc_request": {"ai_target_x":0,"ai_target_y":0,"ai_x":0,"ai_y":0,"stone_x":0,"stone_y":0,
+                       "stone_vx":0,"stone_vy":0,"player_score":0,"ai_score":0,"timestamp":0}
+    }
+  ]
+}
 ```
 
 ---
@@ -118,24 +148,30 @@ python3 tests/run_tests.py
 
 ```text
 Graduation/
-├── main.py                     # 项目主入口程序（支持视觉演示、性能测试与仿真模式）
-├── game_state.py               # 视觉、仿真与 AI 间解耦的数据状态契约
-├── Jetson系统.md               # Jetson Xavier NX 硬件平台环境调研报告
-├── README.md                   # 毕业设计说明文档（本文档）
-├── air_hockey/                 # 系统核心算法代码包（标准 Python package）
-│   ├── core_config.py          # 共享物理场地几何、动力学参数与难度等级配置
-│   ├── physics.py              # 共享物理实体（StoneMotion、边界反弹、门柱碰撞）
+├── main.py                     # 统一入口（视觉 / headless / 仿真 / 记录 / PLC 输出）
+├── game_state.py               # 共享数据契约（CurlingState / StoneState / GameState）
+├── README.md                   # 本文档
+├── Jetson系统.md               # Jetson Xavier NX 硬件平台调研报告
+├── air_hockey/                 # 核心算法包
+│   ├── core_config.py          # 场地几何、动力学参数、难度等级
+│   ├── physics.py              # StoneMotion 物理实体与碰撞规则
 │   ├── ai.py                   # AI 决策器（依赖注入 TrajectoryPredictor）
-│   ├── app/                    # 实时应用层（VisionRuntime 运行核心与渲染）
-│   ├── camera/                 # 图像采集层（GStreamer / V4L2 驱动与无锁最新帧缓存）
-│   ├── vision/                 # 视觉算法层（Detector 检测、Tracker 追踪、Geometry 坐标变换）
-│   ├── prediction/             # 统一物理轨迹预测核心（TrajectoryPredictor）
-│   ├── calibration/            # 棋盘格相机内参标定与畸变校正工具
-│   ├── tools/                  # 辅助工具（性能基准测试、图像离线调参脚本等）
+│   ├── camera/                 # 采集层（GStreamer / V4L2 / 无锁最新帧缓存 / FPS 统计）
+│   ├── vision/                 # 检测 + 追踪 + 坐标几何 + 预处理
+│   ├── estimation/             # KalmanFilter 状态估计层
+│   ├── prediction/             # PredictionState + TrajectoryPredictor（统一物理核心）
+│   ├── planning/               # ControlCommand + TrajectoryPlanner
+│   ├── control/                # PlcControlAdapter + PlcOutputWorker（AI->PLC 适配）
+│   ├── recording/              # 统一运行日志（JSON schema + RuntimeRecorder）
+│   ├── simulation/             # 无摄像头运动仿真测试环境
+│   ├── evaluation/             # 多组实验误差评估与报告
+│   ├── calibration/            # 相机内参标定与去畸变工具
+│   ├── app/                    # VisionRuntime 运行核心 + 渲染 + FPS GUI
+│   ├── tools/                  # 标定 / 检测 / 追踪 / 预测 等诊断脚本
 │   └── 交接文档.md             # 面向开发者的详细技术与工程交接文档
-├── calibration/                # 标定数据产物目录（camera_calibration.npz）
-├── 冰壶仿真/                   # 桌面仿真 GUI、GUI 配置与西门子 PLC 通信模块
-└── tests/                      # 自动化测试套件（40 项单元测试）
+├── calibration/                # 标定产物（camera_calibration.npz / table_homography.npz）
+├── 冰壶仿真/                   # 桌面仿真 GUI、GUI 配置与 PLC 通信模块
+└── tests/                      # 自动化测试套件（143 项，无需 pytest）
 ```
 
 ---
@@ -144,23 +180,25 @@ Graduation/
 
 ### 已完成工作
 * [x] 高帧率多后端相机采集框架与 Jetson 硬件解码调优
-* [x] 基于颜色特征与几何约束的目标检测算法及局部动态 ROI 加速
-* [x] 原始像素下的单目标常速追踪推演与指数速度平滑滤波
-* [x] 单目内参标定与点级数学去畸变坐标变换
-* [x] 视觉、仿真、AI 三端统一的微步物理轨迹预测核心
-* [x] 启发式 AI 防守拦截决策逻辑与虚拟对战仿真平台
-* [x] 基于 S7 协议的西门子 PLC 状态写入底层模块封装
-* [x] 40 项自动化功能回归测试套件
+* [x] 颜色 + 几何约束检测算法与动态局部 ROI 加速
+* [x] 原始像素单目标常速追踪与漏检维持
+* [x] **卡尔曼滤波状态估计层**（常量速度模型，抑制视觉抖动）
+* [x] 单目内参标定与点级去畸变；**球台四点 Homography 透视校正**
+* [x] 视觉、仿真、AI 三端统一的微步物理轨迹预测核心（`PredictionState`）
+* [x] **轨迹规划与控制适配层**（`ControlCommand` + PLC 非阻塞输出闭环）
+* [x] 仿真测试环境、多组实验评估与统一格式运行日志
+* [x] 西门子 S7 PLC 通信底层封装
+* [x] 143 项自动化功能回归测试套件
 
 ### 后续展望与改进方向
-* [ ] **透视单应性（Homography）标定**：实现球台四角点透视变换矩阵标定，校正相机俯视安装倾角带来的透视畸变。
-* [ ] **实台物理参数辨识**：在真实气浮球台上采集滑行与碰撞数据，回归标定更贴近现实的台面摩擦力与弹性恢复系数。
-* [ ] **卡尔曼滤波（Kalman Filter）**：将追踪器一阶滑动平均升级为状态空间卡尔曼滤波，增强抗反光跳动与遮挡预测能力。
-* [ ] **实机 AI $\rightarrow$ PLC 运动闭环**：将 AI 决策坐标与 PLC 实机电机/机械臂联调，实现实物击球控制与动作时延补偿。
+* [ ] **实台物理参数辨识**：在真实气浮台采集滑行/碰撞数据，回归摩擦与恢复系数。
+* [ ] **实机 AI → PLC 联调**：接入真实击球机构，补充端到端时延测量与前瞻补偿。
+* [ ] **多目标跟踪**：扩展为多冰壶/球槌协同跟踪与状态机。
+* [ ] **自动化 CI**：配置 GitHub Actions 执行 `compileall` 与全部单元测试。
 
 ---
 
 ## 📑 技术交接与开发文档
 
-关于更底层的模块接口调用、坐标系数学定义、Jetson 手动锁频脚本与技术债务分析，请参考：  
+关于更底层的模块接口、坐标系数学定义、Jetson 手动锁频脚本与技术债务分析，请参考：
 👉 [Air Hockey 项目交接文档 (air_hockey/交接文档.md)](air_hockey/交接文档.md)

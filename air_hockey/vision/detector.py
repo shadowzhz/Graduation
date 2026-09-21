@@ -7,12 +7,10 @@ import cv2
 
 from game_state import CurlingState
 
-from ..camera.types import Frame
-
-from .preprocess import crop_roi, external_contours, morphology, threshold, validate_bgr
+from .preprocess import crop_roi, external_contours, morphology, threshold
 from .types import Detection, ROI
 
-# 定义冰壶检测器类，输出冰壶的位置、大小、圆形度、时间戳和分数
+# 冰壶检测器：对外返回统一 CurlingState（raw 像素坐标 + 置信度），找不到返回 None
 class StoneDetector:
     def __init__(self, roi=None, color_space="hsv", lower=(0, 40, 30), upper=(180, 255, 255),
                  morphology_kernel=5, morphology_iterations=1, min_area=100.0, max_area=inf,

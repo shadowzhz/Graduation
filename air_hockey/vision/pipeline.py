@@ -44,11 +44,3 @@ class VisionPipeline:
             if self.geometry.image_size != (width, height):
                 self.geometry.set_image_size((width, height))
         return frame
-
-    def raw_to_undistorted(self, raw_x: float, raw_y: float) -> Tuple[float, float]:
-        """原始相机像素 -> 去畸变相机像素。"""
-        return self.geometry.raw_to_undistorted(raw_x, raw_y)
-
-    def raw_to_table(self, raw_x: float, raw_y: float) -> Tuple[float, float]:
-        """原始相机像素 -> 球台坐标。"""
-        return self.geometry.raw_to_table(raw_x, raw_y)

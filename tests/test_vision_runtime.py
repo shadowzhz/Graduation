@@ -7,7 +7,7 @@ frame -> detection -> track -> table StoneState -> predictor -> AI
 from pathlib import Path
 import numpy as np
 
-from air_hockey.app.vision_runtime import VisionResult, VisionRuntime, track_to_rink_state
+from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
 from game_state import StoneState
 from air_hockey.vision.tracker import StoneTracker

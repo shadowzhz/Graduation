@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 from enum import Enum
 
-from ..camera.types import Frame
-
 
 @dataclass
 class ROI:
