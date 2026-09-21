@@ -7,8 +7,8 @@
 
 线程分工：
     主线程    Tk mainloop + 显示定时器（GUI 模式）/ 等待退出（headless 模式）
-    处理线程  取最新帧 -> VisionRuntime 处理 -> （GUI 模式：render 标注与共享）
-    编码线程  最新标注帧 -> 缩放 -> PPM（按预览帧率限速，仅 GUI 模式）
+    处理线程  取最新帧 -> VisionRuntime 处理 -> 保存最新 VisionResult 与状态（不限速）
+    编码线程  最新 VisionResult -> render 标注 -> 缩放 -> PPM（按预览帧率限速，仅 GUI 模式）
 """
 
 import argparse
@@ -38,6 +38,14 @@ def run_game():
     subprocess.run([sys.executable, str(SIM_ROOT / "air_hockey.py")], cwd=str(SIM_ROOT))
 
 
+def encode_preview_ppm(result, table_roi, camera_geometry):
+    """将最新 VisionResult 渲染并编码为 Tk 可显示的 PPM 原始像素。"""
+    marked = render(result, table_roi, camera_geometry)
+    scale = DISPLAY_WIDTH / marked.shape[1]
+    small = cv2.resize(marked, (DISPLAY_WIDTH, round(marked.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    h, w = rgb.shape[:2]
+    return f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
 
 
 class VisionWindow:
@@ -112,8 +120,8 @@ def run_vision(args):
         window = VisionWindow()
         preview_lock = threading.Lock()
         shared = {
-            "img": None,
-            "img_seq": -1,
+            "result": None,
+            "result_seq": -1,
             "ppm": None,
             "ppm_seq": 0,
             "status": "等待画面",
@@ -150,7 +158,7 @@ def run_vision(args):
     stop = threading.Event()
 
     def processing_loop():
-        """处理线程：取最新帧 -> VisionRuntime 处理 -> （GUI 模式：render 标注与共享）。"""
+        """处理线程：取最新帧 -> VisionRuntime 处理 -> 保存最新 VisionResult 与状态。"""
         last_sequence = -1
         stats_timer = time.perf_counter()
 
@@ -167,14 +175,13 @@ def run_vision(args):
                 result = runtime.process_frame(frame)
 
                 if not headless:
-                    marked = render(result, runtime.table_roi, runtime.camera_geometry)
                     status_text = format_status(
                         result,
                         runtime.camera_geometry.enabled and runtime.camera_geometry.camera_matrix is not None,
                     )
                     with preview_lock:
-                        shared["img"] = marked
-                        shared["img_seq"] = result.frame.sequence
+                        shared["result"] = result
+                        shared["result_seq"] = result.frame.sequence
                         shared["status"] = status_text + "    Q / ESC 退出"
 
                 stats_interval = 1.0 if headless else STATS_INTERVAL
@@ -202,21 +209,17 @@ def run_vision(args):
             stop.set()
 
     def encoding_loop():
-        """预览转换线程：将图片转换为 PPM 原始像素格式供 Tkinter 显示（零压缩、微秒级）。"""
+        """预览转换线程：最新 VisionResult -> render 标注 -> 缩放 -> PPM（按预览帧率限速）。"""
         seen = -1
         while not stop.wait(1.0 / args.preview_fps):
             with preview_lock:
-                img = shared["img"]
-                seq = shared["img_seq"]
-            if img is None or seq == seen:
+                result = shared["result"]
+                seq = shared["result_seq"]
+            if result is None or seq == seen:
                 continue
             seen = seq
-            scale = DISPLAY_WIDTH / img.shape[1]
 
-            small = cv2.resize(img, (DISPLAY_WIDTH, round(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
-            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            h, w = rgb.shape[:2]
-            ppm_data = f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
+            ppm_data = encode_preview_ppm(result, runtime.table_roi, runtime.camera_geometry)
             with preview_lock:
                 shared["ppm"] = ppm_data
                 shared["ppm_seq"] += 1
