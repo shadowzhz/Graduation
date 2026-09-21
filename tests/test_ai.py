@@ -39,12 +39,14 @@ def test_stone_behind_ai_does_not_chase():
     assert decision.target_y == home
 
 
-def test_defense_uses_injected_friction():
-    # 同一状态，冰面摩擦不同，防守预测的横坐标必须不同
+def test_defense_uses_injected_predictor():
+    # 注入不同参数的预测器，防守预测的目标横坐标必须不同
+    from prediction import TrajectoryPredictor
+
     state = make_state(300.0, 500.0, vx=60.0, vy=-80.0)
-    loose = AirHockeyAI().choose_target(state)
-    stiff = AirHockeyAI(friction_deceleration=10000.0).choose_target(state)
-    assert loose.target_x != stiff.target_x
+    normal = AirHockeyAI().choose_target(state)
+    short_stop = AirHockeyAI(predictor=TrajectoryPredictor(stop_speed=90.0)).choose_target(state)
+    assert normal.target_x != short_stop.target_x
 
 
 def test_reaction_timer_holds_previous_target():

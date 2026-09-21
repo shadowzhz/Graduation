@@ -8,7 +8,7 @@ from air_hockey_physics import (
     goal_scorer,
     stone_inside_goal_mouth,
 )
-from game_state import StoneState
+from game_state import GameState, StoneState
 from prediction import TrajectoryPredictor, predict_trajectory
 
 
@@ -204,3 +204,94 @@ def test_no_old_predictor_references():
         content = py_file.read_text(encoding="utf-8")
         assert "vision.predictor" not in content, f"{py_file} 仍包含 vision.predictor 引用"
         assert "prediction.trajectory" not in content, f"{py_file} 仍包含 prediction.trajectory 引用"
+
+
+def test_responsive_scaling_updates_predictor_parameters():
+    """验证响应式缩放后，Predictor 在运行时读取当前配置，无需重新初始化。"""
+    predictor = TrajectoryPredictor()
+    orig_stop = layout.STONE_STOP_SPEED
+    orig_mallet = layout.MALLET_RADIUS
+    try:
+        # 1. 验证 stop_speed 动态生效
+        stone = StoneState(x=layout.RINK_CENTER_X, y=layout.RINK_CENTER_Y, vx=50.0, vy=0.0)
+        layout.STONE_STOP_SPEED = 8.0
+        traj1 = predictor.predict(stone)
+        assert len(traj1) > 1, "速度 50 > 8 时应产生移动轨迹"
+
+        layout.STONE_STOP_SPEED = 60.0
+        traj2 = predictor.predict(stone)
+        assert len(traj2) == 1, "速度 50 <= 60 时应立即判定停止并返回单点"
+        layout.STONE_STOP_SPEED = orig_stop
+
+        # 2. 验证 obstacle_radius 动态生效
+        moving_stone = StoneState(x=layout.RINK_CENTER_X, y=layout.RINK_CENTER_Y, vx=100.0, vy=0.0)
+        # 放置障碍物在侧前方 (纵向偏移 28px，横向偏移 30px)
+        obs_x = moving_stone.x + 30.0
+        obs_y = moving_stone.y + 28.0
+        # 冰壶半径 14，若球槌半径为 10，总半径 24 < 28，不碰
+        layout.MALLET_RADIUS = 10.0
+        traj_no_hit = predictor.predict(moving_stone, obstacles=((obs_x, obs_y),))
+        # 若球槌半径增至 20，总半径 34 >= 28，必撞
+        layout.MALLET_RADIUS = 20.0
+        traj_hit = predictor.predict(moving_stone, obstacles=((obs_x, obs_y),))
+        # 撞击会截断轨迹
+        assert len(traj_hit) < len(traj_no_hit)
+    finally:
+        layout.STONE_STOP_SPEED = orig_stop
+        layout.MALLET_RADIUS = orig_mallet
+
+
+def test_ai_uses_shared_predictor_without_independent_physics():
+    """验证 AI 不再保留任何独立物理公式（无 _reflect_coordinate），统一使用 TrajectoryPredictor。"""
+    import air_hockey_ai
+
+    # 模块和类中绝无 _reflect_coordinate
+    assert not hasattr(air_hockey_ai, "_reflect_coordinate")
+    assert not hasattr(air_hockey_ai.AirHockeyAI, "_reflect_coordinate")
+
+    ai = air_hockey_ai.AirHockeyAI()
+    assert hasattr(ai, "predictor")
+    assert isinstance(ai.predictor, TrajectoryPredictor)
+
+    # 验证 AI 的预测直接由其共享的 predictor 提供
+    state = StoneState(x=300.0, y=500.0, vx=80.0, vy=-120.0)
+    game_state = GameState.from_vision(state)
+    target_y = 420.0
+    predicted_x = ai._predict_stone_x(game_state, target_y=target_y)
+
+    # 手动用同个 predictor 算一遍截距，应完全一致
+    traj = ai.predictor.predict(state)
+    expected_x = None
+    for (x0, y0), (x1, y1) in zip(traj[:-1], traj[1:]):
+        if (y0 <= target_y <= y1) or (y1 <= target_y <= y0):
+            t = (target_y - y0) / (y1 - y0)
+            expected_x = x0 + t * (x1 - x0)
+            break
+    assert expected_x is not None
+    assert abs(predicted_x - expected_x) < 1e-9
+
+
+def test_vision_sim_ai_share_same_prediction_core():
+    """验证视觉、仿真、AI 对相同状态使用同一预测核心，轨迹 100% 一致。"""
+    import air_hockey_ai
+
+    vision_predictor = TrajectoryPredictor()
+    sim_predictor = TrajectoryPredictor()
+    ai = air_hockey_ai.AirHockeyAI(predictor=sim_predictor)
+
+    x, y, vx, vy = 280.0, 480.0, 150.0, -220.0
+
+    # 1. 视觉输入 (StoneState)
+    vision_stone = StoneState(x=x, y=y, vx=vx, vy=vy)
+    vision_traj = vision_predictor.predict(vision_stone)
+
+    # 2. 仿真输入 (StoneMotion)
+    sim_stone = StoneMotion(x=x, y=y, vx=vx, vy=vy)
+    sim_traj = sim_predictor.predict(sim_stone)
+
+    # 3. AI 输入 (GameState.stone)
+    game_state = GameState.from_vision(vision_stone)
+    ai_traj = ai.predictor.predict(game_state.stone)
+
+    assert vision_traj == sim_traj
+    assert vision_traj == ai_traj
