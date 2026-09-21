@@ -1,33 +1,54 @@
-单行修改完成，未提交 git。
+目标：解除 GUI 渲染对实时视觉处理线程的限速。
 
-  修改内容（air_hockey/camera/gst_backend.py，唯一改动）：
+当前已确认：
+- Camera ≈198 FPS
+- headless 检测到冰壶后仍 >100 FPS
+- GUI 检测到冰壶后只有约50~90 FPS
+- preview_fps 默认只有20 FPS
+- 当前 processing_loop 每处理一帧都会调用 render()，
+  但大量渲染帧最终不会被 GUI 显示。
 
-  -            return True, frame[:, :, :3].copy()
-    +            return True, cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+任务：
 
-  现有测试：python3 tests/run_tests.py → passed=53, failed=0
+1. processing_loop 只执行：
+   camera latest frame
+   -> runtime.process_frame()
+   -> 保存最新 VisionResult 和状态信息。
 
-  基准测试（--backend gstreamer --duration 10，连续 3 次）
+2. 不再在 processing_loop 中调用 render()。
 
-  ┌──────┬─────────┬─────────┬───────┬────────┐
-  │ 运行 │ current │ average │ max   │ frames │
-  ├──────┼─────────┼─────────┼───────┼────────┤
-  │ 1    │ 197.8   │ 197.8   │ 197.8 │ 1988   │
-  ├──────┼─────────┼─────────┼───────┼────────┤
-  │ 2    │ 197.7   │ 197.7   │ 197.7 │ 1986   │
-  ├──────┼─────────┼─────────┼───────┼────────┤
-  │ 3    │ 198.1   │ 198.1   │ 198.1 │ 1988   │
-  └──────┴─────────┴─────────┴───────┴────────┘
+3. 将 render() 移到现有 preview/encoding 线程。
 
-  对比修改前：56 ~ 80.6 FPS（波动）→ 现在稳定 197.7~198.1 FPS，已到
-  200fps 模式的实际上限。
+4. preview/encoding 线程继续严格按 args.preview_fps 运行：
+   最新 VisionResult
+   -> render()
+   -> resize
+   -> BGR->RGB
+   -> PPM
+   -> shared["ppm"]
 
-  验证：
+5. 只保留最新结果，不建立队列，不积压旧帧。
 
-  - 帧仍为正确 BGR 语义（cv2.COLOR_BGRA2BGR 丢弃 alpha、保留 BG
-  R），shape=(720,1280,3) dtype=uint8 C-contiguous 
-  writable=True，下游无需改动。
-  - 未触碰
-  pipeline、CameraManager、nvpmodel/系统配置，无新增防御性代码。
-  - 未执行 git commit，改动仅停留工作区（git diff 只有这一行）。
+6. VisionRuntime、Detector、Tracker、Predictor、AI、
+   CameraManager 均不修改。
 
+7. 保持 GUI 显示内容和视觉效果不变。
+
+8. 不新增复杂防御性代码。
+
+9. 更新或补充必要测试。
+
+10. 完成后运行：
+    python3 tests/run_tests.py
+
+11. 再分别测试：
+    python3 main.py --headless --disable-homography
+    python3 main.py --disable-homography
+
+记录：
+- 无冰壶处理 FPS
+- 有冰壶处理 FPS
+- 采集 FPS
+- preview FPS
+
+先汇报结果，不提交 git。
