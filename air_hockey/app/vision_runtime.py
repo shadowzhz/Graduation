@@ -7,14 +7,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import time
 from typing import Optional
 
 from .. import core_config as core
 from ..ai import AirHockeyAI
 from ..camera.types import Frame
-from game_state import CurlingState, GameState, StoneState
+from game_state import CurlingState, GameState, TrackingState
 from ..estimation import KalmanFilter
 from ..prediction import PredictionState, TrajectoryPredictor
 from ..vision import StoneDetector, VisionPipeline
@@ -36,12 +36,15 @@ class TrajectoryDebug:
 
 @dataclass
 class VisionResult:
-    """单帧视觉与 AI 处理的完整结果快照。"""
+    """单帧视觉与 AI 处理的完整结果快照。
+
+    curling_state 是唯一权威状态（Kalman 输出升级为带 tracking_state 的 StoneState）；
+    stone_state 作为只读别名保留，不再单独保存第二份等价状态。
+    """
 
     frame: Frame
     detection: Optional[Detection] = None
     track: Optional[Track] = None
-    stone_state: Optional[StoneState] = None
     curling_state: Optional[CurlingState] = None
     prediction: Optional[PredictionState] = None
     trajectory: Optional[list[tuple[float, float]]] = None
@@ -49,13 +52,10 @@ class VisionResult:
     ai_target: Optional[tuple[float, float]] = None
     fps: float = 0.0
 
-
-def track_to_rink_state(track: Track, rink_x: float, rink_y: float, rink_vx: float, rink_vy: float) -> StoneState:
-    """将 Tracker(raw) 输出与已明确转换的桌面/球台坐标合并为 StoneState。
-    不使用任何 calibration ROI，只接收已明确转换后的 rink 坐标。
-    """
-    stone = StoneState.from_tracker(track)
-    return replace(stone, x=float(rink_x), y=float(rink_y), vx=float(rink_vx), vy=float(rink_vy))
+    @property
+    def stone_state(self) -> Optional[CurlingState]:
+        """兼容别名：与 curling_state 指向同一对象。"""
+        return self.curling_state
 
 
 class VisionRuntime:
@@ -123,7 +123,7 @@ class VisionRuntime:
         self.ai_current_pos = [core.RINK_CENTER_X, self.ai_home_y]
 
     def process_frame(self, frame: Frame) -> VisionResult:
-        """处理单帧：检测/追踪预测 -> 坐标转换 -> 轨迹预测 -> AI 决策。"""
+        """处理单帧：检测/追踪预测 -> 坐标转换 -> 状态估计 -> 轨迹预测 -> AI 决策。"""
         t0 = time.perf_counter()
         self.frame_index += 1
 
@@ -174,10 +174,10 @@ class VisionRuntime:
             undist_x, undist_y = self.camera_geometry.raw_to_undistorted(track.center_x, track.center_y)
             table_x, table_y = self.camera_geometry.undistorted_to_table(undist_x, undist_y)
 
-            # 状态估计层：KalmanFilter 平滑位置/速度，输出统一 CurlingState
+            # 状态估计层：KalmanFilter 平滑位置/速度，输出统一的 CurlingState
             # 有检测则用观测校正，检测间隔帧则按模型外推
             if detection is not None:
-                curling = self.kalman.update(
+                estimated = self.kalman.update(
                     table_x,
                     table_y,
                     track.last_timestamp,
@@ -185,12 +185,17 @@ class VisionRuntime:
                     radius=track.radius,
                 )
             else:
-                curling = self.kalman.predict(
+                estimated = self.kalman.predict(
                     track.last_timestamp,
                     confidence=track.confidence,
                     radius=track.radius,
                 )
-            stone = track_to_rink_state(track, curling.x, curling.y, curling.vx, curling.vy)
+
+            # 唯一权威状态：StoneState 只是给 CurlingState 补上追踪状态，
+            # 预测与 AI 共用同一个对象，避免同帧重复构造两份等价状态。
+            tracking_state = TrackingState.LOST if track.state == TrackState.LOST else TrackingState.ACTIVE
+            curling = estimated.to_stone_state(tracking_state)
+            stone = curling
 
             # 预测数据层：业务层只与 PredictionState 交互，不再直接传递裸点列表
             prediction_state = self.predictor.predict(curling)
@@ -236,7 +241,6 @@ class VisionRuntime:
             frame=processed_frame,
             detection=detection,
             track=track,
-            stone_state=stone,
             curling_state=curling,
             prediction=prediction_state,
             trajectory=table_trajectory,

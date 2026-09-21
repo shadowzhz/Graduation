@@ -1,7 +1,7 @@
 """真实运行数据记录测试。
 
 覆盖：
-- 统一格式的字段序列化（CurlingState / PredictionState）
+- 统一格式的字段序列化（CurlingState / PredictionState / AIDecision / PLC request）
 - RuntimeRecorder 记录 VisionResult 并写出 JSON
 - 仿真数据写入同一格式（真实/仿真格式统一）
 """
@@ -12,15 +12,19 @@ from pathlib import Path
 
 import numpy as np
 
+from air_hockey.ai import AIDecision
 from air_hockey.camera.types import Frame
 from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
+from air_hockey.control import PlcWriteRequest
 from air_hockey.prediction import PredictionState
 from air_hockey.recording import (
     RECORDING_FORMAT,
     RECORDING_VERSION,
     RuntimeRecorder,
+    ai_decision_to_dict,
     build_frame,
     curling_state_to_dict,
+    plc_request_to_dict,
     prediction_to_dict,
     record_simulation_result,
 )
@@ -31,9 +35,10 @@ from game_state import CurlingState
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 
 DOCUMENT_KEYS = {"format", "version", "source", "meta", "frames"}
-FRAME_KEYS = {"index", "timestamp", "fps", "curling_state", "prediction"}
+FRAME_KEYS = {"index", "timestamp", "fps", "curling_state", "prediction", "ai_decision", "plc_request"}
 STATE_KEYS = {"x", "y", "vx", "vy", "timestamp", "confidence", "radius"}
 PREDICTION_KEYS = {"trajectory", "endpoint", "duration", "source_state"}
+DECISION_KEYS = {"target_x", "target_y", "stalled_stone_phase", "reaction_timer"}
 
 
 def _curling_state():
@@ -63,6 +68,69 @@ def test_prediction_to_dict_fields():
     assert payload["endpoint"] == [110.0, 180.0]
     assert payload["duration"] == 0.5
     assert payload["source_state"]["x"] == 100.0
+
+
+def _decision():
+    return AIDecision(target_x=120.0, target_y=340.0, stalled_stone_phase="idle", reaction_timer=0.02)
+
+
+def _plc_request():
+    return PlcWriteRequest(
+        ai_target_x=120.0, ai_target_y=340.0, ai_x=300.0, ai_y=600.0,
+        stone_x=100.0, stone_y=200.0, stone_vx=10.0, stone_vy=-20.0,
+        player_score=1, ai_score=2, timestamp=3.5,
+    )
+
+
+def test_ai_decision_to_dict_fields():
+    payload = ai_decision_to_dict(_decision())
+    assert set(payload.keys()) == DECISION_KEYS
+    assert payload["target_x"] == 120.0 and payload["target_y"] == 340.0
+    assert payload["stalled_stone_phase"] == "idle"
+    assert payload["reaction_timer"] == 0.02
+    assert ai_decision_to_dict(None) is None
+
+
+def test_plc_request_to_dict_includes_timestamp():
+    payload = plc_request_to_dict(_plc_request())
+    assert payload["ai_target_x"] == 120.0
+    assert payload["ai_target_y"] == 340.0
+    assert payload["timestamp"] == 3.5
+    assert plc_request_to_dict(None) is None
+
+
+def test_build_frame_includes_control_outputs():
+    frame = build_frame(0, 1.0, 60.0, _curling_state(), _prediction(), _decision(), _plc_request())
+    assert set(frame.keys()) == FRAME_KEYS
+    assert frame["ai_decision"]["target_x"] == 120.0
+    assert frame["plc_request"]["timestamp"] == 3.5
+
+
+def test_recorder_records_control_outputs_and_defaults_to_none():
+    recorder = RuntimeRecorder(None)
+    recorder.record_frame(0.0, 30.0, _curling_state(), _prediction(), _decision(), _plc_request())
+    recorder.record_frame(0.1, 30.0, _curling_state())
+
+    frames = recorder.to_dict()["frames"]
+    assert set(frames[0].keys()) == FRAME_KEYS
+    assert frames[0]["ai_decision"]["stalled_stone_phase"] == "idle"
+    assert frames[0]["plc_request"]["ai_target_y"] == 340.0
+    assert frames[1]["ai_decision"] is None
+    assert frames[1]["plc_request"] is None
+
+
+def test_recorder_record_accepts_control_outputs():
+    result = VisionResult(
+        frame=Frame(image=None, timestamp=2.5, sequence=7),
+        curling_state=_curling_state(),
+        prediction=_prediction(),
+        fps=58.0,
+    )
+    recorder = RuntimeRecorder(None)
+    recorder.record(result, ai_decision=_decision(), plc_request=_plc_request())
+    frame = recorder.to_dict()["frames"][0]
+    assert frame["ai_decision"]["target_y"] == 340.0
+    assert frame["plc_request"]["ai_x"] == 300.0
 
 
 def test_build_frame_shape_with_empty_values():

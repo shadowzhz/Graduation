@@ -39,13 +39,15 @@ class RuntimeRecorder:
     def closed(self) -> bool:
         return self._closed
 
-    def record(self, result) -> None:
-        """记录一帧 VisionResult（取 curling_state / prediction / timestamp / fps）。"""
+    def record(self, result, *, ai_decision=None, plc_request=None) -> None:
+        """记录一帧 VisionResult（取 curling_state / prediction / timestamp / fps 及控制输出）。"""
         self.record_frame(
             timestamp=result.frame.timestamp,
             fps=result.fps,
             curling_state=result.curling_state,
             prediction=result.prediction,
+            ai_decision=ai_decision,
+            plc_request=plc_request,
         )
 
     def record_frame(
@@ -54,12 +56,22 @@ class RuntimeRecorder:
         fps: float,
         curling_state: Optional[CurlingState] = None,
         prediction=None,
+        ai_decision=None,
+        plc_request=None,
     ) -> None:
         """记录一帧原始字段。"""
         if self._closed:
             raise RuntimeError("recorder already closed")
         self._frames.append(
-            build_frame(len(self._frames), timestamp, fps, curling_state, prediction)
+            build_frame(
+                len(self._frames),
+                timestamp,
+                fps,
+                curling_state,
+                prediction,
+                ai_decision,
+                plc_request,
+            )
         )
 
     def to_dict(self) -> dict:
