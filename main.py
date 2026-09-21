@@ -111,10 +111,16 @@ def annotate(image, roi, detection, track, ai_target_pixel, display_fps, traject
         end = (round(track.center_x + track.vx * 0.1) + ox, round(track.center_y + track.vy * 0.1) + oy)
         cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
         
-    if trajectory:
+    if trajectory and len(trajectory) > 1:
+        for i in range(len(trajectory) - 1):
+            pt1 = (round(trajectory[i][0]) + ox, round(trajectory[i][1]) + oy)
+            pt2 = (round(trajectory[i + 1][0]) + ox, round(trajectory[i + 1][1]) + oy)
+            fade = max(50, 255 - i * 6)
+            line_color = (fade, int(fade * 0.75), 50)
+            cv2.line(output, pt1, pt2, line_color, 2, cv2.LINE_AA)
         for i, (px, py) in enumerate(trajectory):
-            alpha = max(40, 255 - i * 12)
-            cv2.circle(output, (round(px) + ox, round(py) + oy), 2, (alpha, 160, 90), -1)
+            alpha = max(60, 255 - i * 6)
+            cv2.circle(output, (round(px) + ox, round(py) + oy), 2, (alpha, 170, 70), -1)
             
     if ai_target_pixel is not None:
         cv2.drawMarker(output, (ai_target_pixel[0] + ox, ai_target_pixel[1] + oy), (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
@@ -320,7 +326,7 @@ def run_vision(args):
                 if track is not None:
                     stone = track_to_rink_state(track, roi)
 
-                    raw_trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.15)
+                    raw_trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.06)
                     if raw_trajectory:
                         pixel_trajectory = [rink_to_pixel(px, py, roi) for px, py in raw_trajectory]
 
