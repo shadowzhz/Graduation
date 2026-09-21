@@ -197,7 +197,7 @@ def test_dynamic_roi_centers_on_tracker_raw():
     tracker.update(Detection(center_x=420.0, center_y=310.0, radius=25.0, area=1960.0, timestamp=1.1))
 
     next_time = 1.2
-    pred_raw_x, pred_raw_y = tracker._predict_position(next_time)
+    pred_raw_x, pred_raw_y = tracker.predict_position(next_time)
 
     # 按照 main.py 中的动态 ROI 生成逻辑（全在 raw pixel 上操作）
     box_size = 140

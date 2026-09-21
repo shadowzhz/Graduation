@@ -39,7 +39,7 @@ class StoneTracker:
             self._track = self._create_track(detection) # 创建对象
             return [self._track]
 
-        predicted_x, predicted_y = self._predict_position(detection.timestamp)
+        predicted_x, predicted_y = self.predict_position(detection.timestamp)
 
         predicted_distance = hypot(detection.center_x - predicted_x, detection.center_y - predicted_y)                  # 新检测点与预测位置的距离
         actual_distance = hypot(detection.center_x - self._track.center_x, detection.center_y - self._track.center_y)   # 新检测点与实际位置的距离
@@ -76,9 +76,12 @@ class StoneTracker:
     def reset(self) -> None:
         self._track = None
 
-    def _predict_position(self, timestamp):
-        dt = max(0.0, timestamp - self._track.last_timestamp)
+    def predict_position(self, timestamp: float) -> tuple[float, float]:
+        """根据最后已知速度外推指定时间戳的位置。"""
+        dt = max(0.0, float(timestamp) - self._track.last_timestamp)
         return (self._track.center_x + self._track.vx * dt, self._track.center_y + self._track.vy * dt)
+
+    _predict_position = predict_position
 
     def _create_track(self, detection) -> Track:
         track = Track(
