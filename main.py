@@ -28,6 +28,7 @@ import tkinter as tk
 from air_hockey.app.renderer import format_status, render
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera import CameraManager
+from air_hockey.recording import RuntimeRecorder
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
 STATS_INTERVAL = 5.0        # 统计间隔
@@ -116,6 +117,14 @@ def run_vision(args):
     preview_lock = None
     shared = None
 
+    recorder = None
+    if args.record:
+        recorder = RuntimeRecorder(
+            args.record,
+            source="runtime",
+            meta={"mode": "headless" if headless else "display"},
+        )
+
     if not headless:
         window = VisionWindow()
         preview_lock = threading.Lock()
@@ -154,6 +163,8 @@ def run_vision(args):
     print(f"  undistort: {'OFF' if args.disable_undistort else 'ON'}")
     print(f"  table mapping: {'linear ROI' if args.disable_homography else 'Homography'}")
     print(f"  table calibration: {table_calibration_file if table_calibration_file is not None else 'None (linear ROI)'}")
+    if recorder is not None:
+        print(f"运行数据记录: {args.record}")
 
     stop = threading.Event()
 
@@ -173,6 +184,9 @@ def run_vision(args):
                 last_sequence = frame.sequence
 
                 result = runtime.process_frame(frame)
+
+                if recorder is not None:
+                    recorder.record(result)
 
                 if not headless:
                     status_text = format_status(
@@ -242,6 +256,10 @@ def run_vision(args):
         stop.set()
         if processing_thread.is_alive():
             processing_thread.join(timeout=0.6)
+        if recorder is not None:
+            recorded_path = recorder.close()
+            if recorded_path is not None:
+                print(f"运行数据已记录 {recorder.frame_count} 帧 -> {recorded_path}")
         camera.stop()
         if window is not None:
             window.close()
@@ -256,6 +274,7 @@ def main():
 
     # 视觉模式相关参数
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式")
+    parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
