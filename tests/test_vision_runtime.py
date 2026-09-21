@@ -125,4 +125,3 @@ def test_vision_runtime_without_detection():
     assert result.stone_state is None
     assert result.trajectory is None
     assert result.ai_target is None
-    assert "未检测到冰壶" in result.status_text

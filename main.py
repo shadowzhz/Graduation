@@ -28,7 +28,7 @@ sys.path.insert(0, str(VISION_ROOT))
 import cv2
 import tkinter as tk
 
-from app.renderer import render
+from app.renderer import format_status, render
 from app.vision_runtime import VisionRuntime
 from camera import CameraManager
 
@@ -166,11 +166,15 @@ def run_vision(args):
                 result = runtime.process_frame(frame)
 
                 if not headless:
-                    marked = render(result, runtime.table_roi)
+                    marked = render(result, runtime.table_roi, runtime.camera_geometry)
+                    status_text = format_status(
+                        result,
+                        runtime.camera_geometry.enabled and runtime.camera_geometry.camera_matrix is not None,
+                    )
                     with preview_lock:
                         shared["img"] = marked
                         shared["img_seq"] = result.frame.sequence
-                        shared["status"] = result.status_text + "    Q / ESC 退出"
+                        shared["status"] = status_text + "    Q / ESC 退出"
 
                 stats_interval = 1.0 if headless else STATS_INTERVAL
                 if time.perf_counter() - stats_timer >= stats_interval:
