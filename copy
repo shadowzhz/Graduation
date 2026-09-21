@@ -1,36 +1,33 @@
-已完成性能根因定位。
+单行修改完成，未提交 git。
 
-现在只做一个最小修改，不要重构其他代码。
+  修改内容（air_hockey/camera/gst_backend.py，唯一改动）：
 
-修改：
-air_hockey/camera/gst_backend.py
+  -            return True, frame[:, :, :3].copy()
+    +            return True, cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-当前：
+  现有测试：python3 tests/run_tests.py → passed=53, failed=0
 
-frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 4))
-return True, frame[:, :, :3].copy()
+  基准测试（--backend gstreamer --duration 10，连续 3 次）
 
-改为：
+  ┌──────┬─────────┬─────────┬───────┬────────┐
+  │ 运行 │ current │ average │ max   │ frames │
+  ├──────┼─────────┼─────────┼───────┼────────┤
+  │ 1    │ 197.8   │ 197.8   │ 197.8 │ 1988   │
+  ├──────┼─────────┼─────────┼───────┼────────┤
+  │ 2    │ 197.7   │ 197.7   │ 197.7 │ 1986   │
+  ├──────┼─────────┼─────────┼───────┼────────┤
+  │ 3    │ 198.1   │ 198.1   │ 198.1 │ 1988   │
+  └──────┴─────────┴─────────┴───────┴────────┘
 
-frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 4))
-return True, cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+  对比修改前：56 ~ 80.6 FPS（波动）→ 现在稳定 197.7~198.1 FPS，已到
+  200fps 模式的实际上限。
 
-原因：
-GStreamer 输出 BGRx。
-实测同一 live buffer：
-map ≈ 198 FPS
-bgrx-copy ≈ 197 FPS
-[:, :, :3].copy() ≈ 67~83 FPS
-cv2.cvtColor(BGRA2BGR) ≈ 198 FPS
+  验证：
 
-要求：
-1. 只修改这一处性能路径。
-2. 不修改 GStreamer pipeline。
-3. 不修改 CameraManager。
-4. 不修改 nvpmodel 或系统配置。
-5. 不做额外防御性编程。
-6. 修改后运行现有测试。
-7. 运行：
-   python3 air_hockey/tools/test_camera.py --benchmark --backend gstreamer --duration 10
-8. 连续测试 3 次，记录 current / average / max FPS。
-9. 不自动提交 git，测试结果先汇报。
+  - 帧仍为正确 BGR 语义（cv2.COLOR_BGRA2BGR 丢弃 alpha、保留 BG
+  R），shape=(720,1280,3) dtype=uint8 C-contiguous 
+  writable=True，下游无需改动。
+  - 未触碰
+  pipeline、CameraManager、nvpmodel/系统配置，无新增防御性代码。
+  - 未执行 git commit，改动仅停留工作区（git diff 只有这一行）。
+
