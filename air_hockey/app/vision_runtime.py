@@ -15,7 +15,7 @@ from .. import core_config as core
 from ..ai import AirHockeyAI
 from ..camera.types import Frame
 from game_state import CurlingState, GameState, StoneState
-from ..prediction import TrajectoryPredictor
+from ..prediction import PredictionState, TrajectoryPredictor
 from ..vision import StoneDetector, VisionPipeline
 from ..vision.tracker import StoneTracker, TrackState
 from ..vision.types import Detection, ROI, Track
@@ -42,6 +42,7 @@ class VisionResult:
     track: Optional[Track] = None
     stone_state: Optional[StoneState] = None
     curling_state: Optional[CurlingState] = None
+    prediction: Optional[PredictionState] = None
     trajectory: Optional[list[tuple[float, float]]] = None
     trajectory_debug: Optional[TrajectoryDebug] = None
     ai_target: Optional[tuple[float, float]] = None
@@ -160,6 +161,7 @@ class VisionRuntime:
 
         stone = None
         curling = None
+        prediction_state = None
         table_trajectory = None
         trajectory_debug = None
         ai_target = None
@@ -184,12 +186,13 @@ class VisionRuntime:
             )
             stone = track_to_rink_state(track, table_x, table_y, table_vx, table_vy)
 
-            table_trajectory = self.predictor.predict(curling)
-            endpoint = self.predictor.predict_endpoint(curling)
+            # 预测数据层：业务层只与 PredictionState 交互，不再直接传递裸点列表
+            prediction_state = self.predictor.predict(curling)
+            table_trajectory = prediction_state.trajectory
             trajectory_debug = TrajectoryDebug(
                 position=curling.position,
                 direction=curling.direction,
-                predicted_endpoint=endpoint,
+                predicted_endpoint=prediction_state.endpoint,
             )
 
             state = GameState(
@@ -226,6 +229,7 @@ class VisionRuntime:
             track=track,
             stone_state=stone,
             curling_state=curling,
+            prediction=prediction_state,
             trajectory=table_trajectory,
             trajectory_debug=trajectory_debug,
             ai_target=ai_target,

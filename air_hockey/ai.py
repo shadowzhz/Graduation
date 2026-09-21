@@ -139,14 +139,14 @@ class AirHockeyAI:
         )
 
     def _predict_stone_x(self, state: GameState, target_y: float) -> float:
-        """从共享 TrajectoryPredictor 的轨迹中获取冰壶到达 target_y 横线附近时的横坐标。"""
-        traj = self.predictor.predict(state.stone)
-        if not traj:
+        """从共享 TrajectoryPredictor 的 PredictionState 中获取冰壶到达 target_y 横线附近时的横坐标。"""
+        trajectory = self.predictor.predict(state.stone).trajectory
+        if not trajectory:
             return state.stone.x
-        if len(traj) == 1:
-            return traj[0][0]
+        if len(trajectory) == 1:
+            return trajectory[0][0]
 
-        for (x0, y0), (x1, y1) in zip(traj[:-1], traj[1:]):
+        for (x0, y0), (x1, y1) in zip(trajectory[:-1], trajectory[1:]):
             if (y0 <= target_y <= y1) or (y1 <= target_y <= y0):
                 dy = y1 - y0
                 if abs(dy) > 1e-9:
@@ -154,5 +154,5 @@ class AirHockeyAI:
                     return x0 + t * (x1 - x0)
                 return (x0 + x1) * 0.5
 
-        closest_point = min(traj, key=lambda pt: abs(pt[1] - target_y))
+        closest_point = min(trajectory, key=lambda pt: abs(pt[1] - target_y))
         return closest_point[0]

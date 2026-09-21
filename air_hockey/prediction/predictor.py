@@ -15,6 +15,7 @@ from typing import Any, Sequence
 from .. import core_config as core
 from ..physics import StoneMotion, goal_scorer
 from game_state import CurlingState
+from .state import PredictionState
 
 
 class TrajectoryPredictor:
@@ -45,8 +46,8 @@ class TrajectoryPredictor:
         *,
         obstacles: Sequence[tuple[float, float]] = (),
         obstacle_radius: float | None = None,
-    ) -> list[tuple[float, float]]:
-        """输入统一冰壶状态，返回按 PREDICTION_POINT_INTERVAL 采样的预测轨迹点。
+    ) -> PredictionState:
+        """输入统一冰壶状态，返回 PredictionState（采样轨迹 + 终点 + 时长 + 初始状态）。
 
         stone_or_x 可以是 CurlingState（视觉/控制侧）、StoneMotion（仿真侧）或裸坐标。
         """
@@ -59,21 +60,24 @@ class TrajectoryPredictor:
         actual_obstacle_radius = obstacle_radius if obstacle_radius is not None else core.MALLET_RADIUS
 
         motion = self._normalize_stone(stone_or_x, y, vx, vy)
+        source_state = stone_or_x if isinstance(stone_or_x, CurlingState) else CurlingState(x=motion.x, y=motion.y, vx=motion.vx, vy=motion.vy)
         origin = (motion.x, motion.y)
 
         current_speed = math.hypot(motion.vx, motion.vy)
         target_speed = math.hypot(motion.target_vx, motion.target_vy)
         if current_speed <= stop_speed and (not motion.response_active or target_speed <= stop_speed):
-            return [origin]
+            return PredictionState([origin], origin, 0.0, source_state)
 
         trajectory: list[tuple[float, float]] = [origin]
         sample_elapsed = 0.0
+        duration = 0.0
         bend_count = 0
         simulation_steps = 0
         collision_distance_sq = (core.STONE_RADIUS + actual_obstacle_radius) ** 2
 
         while len(trajectory) < max_points and simulation_steps < max_simulation_steps:
             simulation_steps += 1
+            duration += substep
             motion.x += motion.vx * substep
             motion.y += motion.vy * substep
 
@@ -110,7 +114,7 @@ class TrajectoryPredictor:
                 if math.hypot(motion.x - trajectory[-1][0], motion.y - trajectory[-1][1]) > 1.0:
                     trajectory.append((motion.x, motion.y))
 
-        return trajectory
+        return PredictionState(trajectory, trajectory[-1], duration, source_state)
 
     def predict_endpoint(
         self,
@@ -122,16 +126,15 @@ class TrajectoryPredictor:
         obstacles: Sequence[tuple[float, float]] = (),
         obstacle_radius: float | None = None,
     ) -> tuple[float, float]:
-        """输入统一冰壶状态，返回预测轨迹的终点（冰壶最终停在/离场的位置）。"""
-        trajectory = self.predict(
+        """输入统一冰壶状态，返回预测终点（冰壶最终停在/离场的位置）。"""
+        return self.predict(
             stone_or_x,
             y,
             vx,
             vy,
             obstacles=obstacles,
             obstacle_radius=obstacle_radius,
-        )
-        return trajectory[-1]
+        ).endpoint
 
     @staticmethod
     def _normalize_stone(stone_or_x: Any, y: float | None = None, vx: float | None = None, vy: float | None = None) -> StoneMotion:
@@ -162,8 +165,8 @@ def predict_trajectory(
     *,
     obstacles: Sequence[tuple[float, float]] = (),
     obstacle_radius: float | None = None,
-) -> list[tuple[float, float]]:
-    """生成包含摩擦减速与碰撞反弹的预测轨迹。"""
+) -> PredictionState:
+    """生成包含摩擦减速与碰撞反弹的预测结果。"""
     return _default_predictor.predict(
         stone_or_x,
         y,
