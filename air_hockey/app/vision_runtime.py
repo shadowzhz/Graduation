@@ -5,6 +5,8 @@
 每处理一帧返回明确的 VisionResult，完全与 GUI 和显示层解耦。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, replace
 import time
 from typing import Any, Optional
@@ -14,7 +16,7 @@ from air_hockey_ai import AirHockeyAI
 from camera.types import Frame
 from game_state import GameState, StoneState
 from prediction import TrajectoryPredictor
-from vision import CameraGeometry, StoneDetector, VisionPipeline
+from vision import StoneDetector, VisionPipeline
 from vision.tracker import StoneTracker, TrackState
 from vision.types import Detection, ROI, Track
 
@@ -94,7 +96,6 @@ class VisionRuntime:
             )
             self.camera_geometry = self.vision_pipeline.geometry
 
-        self.last_sequence = -1
         self.last_timestamp = None
         self.frame_index = 0
         self.display_fps = 0.0
@@ -111,7 +112,6 @@ class VisionRuntime:
         """处理单帧：检测/追踪预测 -> 坐标转换 -> 轨迹预测 -> AI 决策。"""
         t0 = time.perf_counter()
         self.frame_index += 1
-        self.last_sequence = frame.sequence
 
         processed_frame = self.vision_pipeline.process(frame)
 
@@ -223,5 +223,3 @@ class VisionRuntime:
             ai_target_pixel=ai_target_pixel,
             status_text=status_text,
         )
-
-    process = process_frame

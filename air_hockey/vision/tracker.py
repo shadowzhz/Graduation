@@ -1,5 +1,7 @@
 """单目标轨迹跟踪。"""
 
+from __future__ import annotations
+
 from dataclasses import replace
 from math import hypot
 
@@ -80,8 +82,6 @@ class StoneTracker:
         """根据最后已知速度外推指定时间戳的位置。"""
         dt = max(0.0, float(timestamp) - self._track.last_timestamp)
         return (self._track.center_x + self._track.vx * dt, self._track.center_y + self._track.vy * dt)
-
-    _predict_position = predict_position
 
     def _create_track(self, detection) -> Track:
         track = Track(
