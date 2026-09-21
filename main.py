@@ -33,8 +33,8 @@ import air_hockey_config as layout
 from air_hockey_ai import AirHockeyAI
 from camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
+from prediction import TrajectoryPredictor
 from vision import CameraGeometry, StoneDetector, VisionPipeline
-from vision.predictor import predict_position, predict_trajectory
 from vision.tracker import StoneTracker, TrackState
 from vision.types import ROI
 
@@ -225,6 +225,7 @@ def run_vision(args):
         reaction_timer = 0.0
         stalled_phase = "idle"
         ai_current_pos = [layout.RINK_CENTER_X, AI_HOME_Y]
+        predictor = TrajectoryPredictor()
 
         window_closed = lambda: window.closed if window is not None else False
 
@@ -287,8 +288,8 @@ def run_vision(args):
 
                     stone = track_to_rink_state(track, table_x, table_y, table_vx, table_vy)
 
-                    table_trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.06)
-                    if table_trajectory:
+                    table_trajectory = predictor.predict(stone)
+                    if table_trajectory and len(table_trajectory) > 1:
                         pixel_trajectory = [camera_geometry.table_to_raw(px, py) for px, py in table_trajectory]
 
                     state = GameState(

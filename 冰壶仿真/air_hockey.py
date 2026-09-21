@@ -14,7 +14,9 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import ttk
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "air_hockey"))
 
 from air_hockey_config import *
 from air_hockey_ai import AIDecision, AirHockeyAI
@@ -27,12 +29,14 @@ from air_hockey_physics import (
 )
 from game_state import GameState, StoneState, TrackingState
 from plc_interface import PLCInterface
+from prediction import TrajectoryPredictor
 
 
 class AirHockeyGame:
     def __init__(self, root: tk.Tk, plc_ip: str = None) -> None:
         self.root = root
         self.ai_controller = AirHockeyAI()
+        self.predictor = TrajectoryPredictor()
         self.closed = False
         self.game_loop_id = None
         self.player_score = self.ai_score = 0
@@ -639,59 +643,13 @@ class AirHockeyGame:
             self.prediction_line_visible = True
 
     def _calculate_predicted_trajectory(self):
-        motion = replace(self.stone)
-        current_speed = math.hypot(motion.vx, motion.vy)
-        target_speed = math.hypot(motion.target_vx, motion.target_vy)
-        if self.awaiting_serve or (current_speed <= STONE_STOP_SPEED and (not motion.response_active or target_speed <= STONE_STOP_SPEED)):
+        if self.awaiting_serve:
             return []
-        sample_elapsed = 0.0
-        bend_count = 0
-        first_bend_index = None
-        predicted_points: list[tuple[float, float]] = []
-        simulation_steps = 0
-        while len(predicted_points) < PREDICTION_POINT_COUNT and simulation_steps < PREDICTION_MAX_SIMULATION_STEPS:
-            simulation_steps += 1
-            motion.x += motion.vx * PREDICTION_SUBSTEP
-            motion.y += motion.vy * PREDICTION_SUBSTEP
-            if goal_scorer(motion):
-                break
-            bounced_this_step = motion.resolve_walls()
-            bounced_this_step = motion.resolve_goal_posts() or bounced_this_step
-            if bounced_this_step:
-                bend_count += 1
-                if not predicted_points or math.hypot(motion.x - predicted_points[-1][0], motion.y - predicted_points[-1][1]) > 1.0:
-                    predicted_points.append((motion.x, motion.y))
-                if bend_count == 1:
-                    first_bend_index = len(predicted_points) - 1
-                sample_elapsed = 0.0
-                if bend_count > PREDICTION_MAX_BENDS or len(predicted_points) >= PREDICTION_POINT_COUNT:
-                    break
-            collision_distance = STONE_RADIUS + MALLET_RADIUS
-            if any((motion.x - mallet_x) ** 2 + (motion.y - mallet_y) ** 2 <= collision_distance ** 2 for mallet_x, mallet_y in ((self.player_x, self.player_y), (self.ai_x, self.ai_y))):
-                break
-            motion.advance_velocity(PREDICTION_SUBSTEP)
-            if motion.vx == 0.0 and motion.vy == 0.0 and not motion.response_active:
-                break
-            sample_elapsed += PREDICTION_SUBSTEP
-            if sample_elapsed + 1e-9 >= PREDICTION_POINT_INTERVAL:
-                sample_elapsed -= PREDICTION_POINT_INTERVAL
-                predicted_points.append((motion.x, motion.y))
-        if first_bend_index is not None and len(predicted_points) > first_bend_index + 1:
-            bend_x, bend_y = predicted_points[first_bend_index]
-            end_x, end_y = predicted_points[-1]
-            target_x = bend_x + (end_x - bend_x) * PREDICTION_SECOND_SEGMENT_SCALE
-            target_y = bend_y + (end_y - bend_y) * PREDICTION_SECOND_SEGMENT_SCALE
-            target_length = math.hypot(target_x - bend_x, target_y - bend_y)
-            shortened_points = predicted_points[: first_bend_index + 1]
-            for point_x, point_y in predicted_points[first_bend_index + 1 :]:
-                if math.hypot(point_x - bend_x, point_y - bend_y) >= target_length:
-                    break
-                shortened_points.append((point_x, point_y))
-            shortened_points.append((target_x, target_y))
-            predicted_points = shortened_points
-        if predicted_points:
-            predicted_points.extend([predicted_points[-1]] * (PREDICTION_POINT_COUNT - len(predicted_points)))
-        return predicted_points
+        obstacles = ((self.player_x, self.player_y), (self.ai_x, self.ai_y))
+        traj = self.predictor.predict(self.stone, obstacles=obstacles)
+        if len(traj) <= 1:
+            return []
+        return traj
 
     def _position_circle(self, item, x, y, radius) -> None:
         self.canvas.coords(item, x - radius, y - radius, x + radius, y + radius)
