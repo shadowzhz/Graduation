@@ -10,7 +10,7 @@ import math
 from dataclasses import replace
 from typing import Any, Sequence
 
-import air_hockey_config as layout
+import core_config as core
 from air_hockey_physics import StoneMotion, goal_scorer
 
 
@@ -43,13 +43,13 @@ class TrajectoryPredictor:
         obstacles: Sequence[tuple[float, float]] = (),
         obstacle_radius: float | None = None,
     ) -> list[tuple[float, float]]:
-        substep = self._substep if self._substep is not None else layout.PREDICTION_SUBSTEP
-        point_interval = self._point_interval if self._point_interval is not None else layout.PREDICTION_POINT_INTERVAL
-        max_points = self._max_points if self._max_points is not None else layout.PREDICTION_POINT_COUNT
-        max_bends = self._max_bends if self._max_bends is not None else layout.PREDICTION_MAX_BENDS
-        max_simulation_steps = self._max_simulation_steps if self._max_simulation_steps is not None else layout.PREDICTION_MAX_SIMULATION_STEPS
-        stop_speed = self._stop_speed if self._stop_speed is not None else layout.STONE_STOP_SPEED
-        actual_obstacle_radius = obstacle_radius if obstacle_radius is not None else layout.MALLET_RADIUS
+        substep = self._substep if self._substep is not None else core.PREDICTION_SUBSTEP
+        point_interval = self._point_interval if self._point_interval is not None else core.PREDICTION_POINT_INTERVAL
+        max_points = self._max_points if self._max_points is not None else core.PREDICTION_POINT_COUNT
+        max_bends = self._max_bends if self._max_bends is not None else core.PREDICTION_MAX_BENDS
+        max_simulation_steps = self._max_simulation_steps if self._max_simulation_steps is not None else core.PREDICTION_MAX_SIMULATION_STEPS
+        stop_speed = self._stop_speed if self._stop_speed is not None else core.STONE_STOP_SPEED
+        actual_obstacle_radius = obstacle_radius if obstacle_radius is not None else core.MALLET_RADIUS
 
         motion = self._normalize_stone(stone_or_x, y, vx, vy)
         origin = (motion.x, motion.y)
@@ -63,7 +63,7 @@ class TrajectoryPredictor:
         sample_elapsed = 0.0
         bend_count = 0
         simulation_steps = 0
-        collision_distance_sq = (layout.STONE_RADIUS + actual_obstacle_radius) ** 2
+        collision_distance_sq = (core.STONE_RADIUS + actual_obstacle_radius) ** 2
 
         while len(trajectory) < max_points and simulation_steps < max_simulation_steps:
             simulation_steps += 1

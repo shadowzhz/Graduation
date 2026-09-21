@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-import air_hockey_config as layout
+import core_config as layout
 from air_hockey_ai import AirHockeyAI
 from game_state import GameState, StoneState
 

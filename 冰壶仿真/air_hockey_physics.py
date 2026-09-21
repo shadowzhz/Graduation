@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, field
 
-import air_hockey_config as layout
+import core_config as core
 
 
 def clamp(value, low, high):
@@ -11,7 +11,7 @@ def clamp(value, low, high):
 
 
 def stone_inside_goal_mouth(x):
-    return layout.GOAL_LEFT + layout.STONE_RADIUS < x < layout.GOAL_RIGHT - layout.STONE_RADIUS
+    return core.GOAL_LEFT + core.STONE_RADIUS < x < core.GOAL_RIGHT - core.STONE_RADIUS
 
 
 def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
@@ -21,22 +21,22 @@ def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
     distance_sq = dx * dx + dy * dy
     if distance_sq >= minimum_distance * minimum_distance:
         return None
-    if distance_sq > layout.COLLISION_EPSILON:
+    if distance_sq > core.COLLISION_EPSILON:
         distance = math.sqrt(distance_sq)
         return distance, dx / distance, dy / distance
     # 重合时拿指向场地中心的方向当法线
-    nx = layout.RINK_CENTER_X - post_x
-    ny = layout.RINK_CENTER_Y - post_y
+    nx = core.RINK_CENTER_X - post_x
+    ny = core.RINK_CENTER_Y - post_y
     length = math.hypot(nx, ny)
-    if length <= layout.COLLISION_EPSILON:
+    if length <= core.COLLISION_EPSILON:
         return 0.0, 0.0, 1.0
     return 0.0, nx / length, ny / length
 
 
 @dataclass
 class StoneMotion:
-    x: float = field(default_factory=lambda: layout.RINK_CENTER_X)
-    y: float = field(default_factory=lambda: layout.RINK_CENTER_Y)
+    x: float = field(default_factory=lambda: core.RINK_CENTER_X)
+    y: float = field(default_factory=lambda: core.RINK_CENTER_Y)
     vx: float = 0.0
     vy: float = 0.0
     target_vx: float = 0.0
@@ -46,9 +46,9 @@ class StoneMotion:
     @staticmethod
     def _limited_velocity(vx, vy):
         speed = math.hypot(vx, vy)
-        if speed <= layout.MAX_STONE_SPEED:
+        if speed <= core.MAX_STONE_SPEED:
             return vx, vy
-        scale = layout.MAX_STONE_SPEED / speed
+        scale = core.MAX_STONE_SPEED / speed
         return vx * scale, vy * scale
 
     def collision_velocity(self):
@@ -77,7 +77,7 @@ class StoneMotion:
         self.vx, self.vy = self._limited_velocity(vx, vy)
         if self.response_active:
             self.target_vx, self.target_vy = self._limited_velocity(target_vx, target_vy)
-            self.response_active = math.hypot(self.target_vx - self.vx, self.target_vy - self.vy) > layout.COLLISION_EPSILON
+            self.response_active = math.hypot(self.target_vx - self.vx, self.target_vy - self.vy) > core.COLLISION_EPSILON
         else:
             self.target_vx = self.vx
             self.target_vy = self.vy
@@ -87,7 +87,7 @@ class StoneMotion:
             delta_x = self.target_vx - self.vx
             delta_y = self.target_vy - self.vy
             delta_speed = math.hypot(delta_x, delta_y)
-            velocity_step = layout.STONE_RESPONSE_ACCELERATION * dt
+            velocity_step = core.STONE_RESPONSE_ACCELERATION * dt
             if delta_speed <= velocity_step + 1e-9:
                 self.vx = self.target_vx
                 self.vy = self.target_vy
@@ -97,7 +97,7 @@ class StoneMotion:
                 self.vx += delta_x * scale
                 self.vy += delta_y * scale
         speed = math.hypot(self.vx, self.vy)
-        new_speed = max(0.0, speed - layout.STONE_FRICTION_DECELERATION * dt)
+        new_speed = max(0.0, speed - core.STONE_FRICTION_DECELERATION * dt)
         if speed <= 1e-9 or new_speed <= 1e-9:
             self.vx = self.vy = 0.0
         else:
@@ -107,88 +107,88 @@ class StoneMotion:
         self.vx, self.vy = self._limited_velocity(self.vx, self.vy)
 
     def resolve_walls(self):
-        left_limit = layout.RINK_LEFT + layout.STONE_RADIUS
-        right_limit = layout.RINK_RIGHT - layout.STONE_RADIUS
-        top_limit = layout.RINK_TOP + layout.STONE_RADIUS
-        bottom_limit = layout.RINK_BOTTOM - layout.STONE_RADIUS
+        left_limit = core.RINK_LEFT + core.STONE_RADIUS
+        right_limit = core.RINK_RIGHT - core.STONE_RADIUS
+        top_limit = core.RINK_TOP + core.STONE_RADIUS
+        bottom_limit = core.RINK_BOTTOM - core.STONE_RADIUS
         vx, vy = self.vx, self.vy
         target_vx, target_vy = self.target_vx, self.target_vy
         reflected_vx, reflected_vy = vx, vy
         reflected_target_vx, reflected_target_vy = target_vx, target_vy
         bounced = False
-        if self.x < left_limit - layout.COLLISION_EPSILON:
+        if self.x < left_limit - core.COLLISION_EPSILON:
             self.x = left_limit
-            if vx < -layout.COLLISION_EPSILON:
-                reflected_vx = abs(vx) * layout.WALL_RESTITUTION
-                if target_vx < -layout.COLLISION_EPSILON:
-                    reflected_target_vx = abs(target_vx) * layout.WALL_RESTITUTION
+            if vx < -core.COLLISION_EPSILON:
+                reflected_vx = abs(vx) * core.WALL_RESTITUTION
+                if target_vx < -core.COLLISION_EPSILON:
+                    reflected_target_vx = abs(target_vx) * core.WALL_RESTITUTION
                 bounced = True
-        elif self.x > right_limit + layout.COLLISION_EPSILON:
+        elif self.x > right_limit + core.COLLISION_EPSILON:
             self.x = right_limit
-            if vx > layout.COLLISION_EPSILON:
-                reflected_vx = -abs(vx) * layout.WALL_RESTITUTION
-                if target_vx > layout.COLLISION_EPSILON:
-                    reflected_target_vx = -abs(target_vx) * layout.WALL_RESTITUTION
+            if vx > core.COLLISION_EPSILON:
+                reflected_vx = -abs(vx) * core.WALL_RESTITUTION
+                if target_vx > core.COLLISION_EPSILON:
+                    reflected_target_vx = -abs(target_vx) * core.WALL_RESTITUTION
                 bounced = True
-        elif self.x <= left_limit + layout.COLLISION_EPSILON and vx < -layout.COLLISION_EPSILON:
+        elif self.x <= left_limit + core.COLLISION_EPSILON and vx < -core.COLLISION_EPSILON:
             self.x = left_limit
-            reflected_vx = abs(vx) * layout.WALL_RESTITUTION
-            if target_vx < -layout.COLLISION_EPSILON:
-                reflected_target_vx = abs(target_vx) * layout.WALL_RESTITUTION
+            reflected_vx = abs(vx) * core.WALL_RESTITUTION
+            if target_vx < -core.COLLISION_EPSILON:
+                reflected_target_vx = abs(target_vx) * core.WALL_RESTITUTION
             bounced = True
-        elif self.x >= right_limit - layout.COLLISION_EPSILON and vx > layout.COLLISION_EPSILON:
+        elif self.x >= right_limit - core.COLLISION_EPSILON and vx > core.COLLISION_EPSILON:
             self.x = right_limit
-            reflected_vx = -abs(vx) * layout.WALL_RESTITUTION
-            if target_vx > layout.COLLISION_EPSILON:
-                reflected_target_vx = -abs(target_vx) * layout.WALL_RESTITUTION
+            reflected_vx = -abs(vx) * core.WALL_RESTITUTION
+            if target_vx > core.COLLISION_EPSILON:
+                reflected_target_vx = -abs(target_vx) * core.WALL_RESTITUTION
             bounced = True
         # 球门口不封上下边，让球能进洞
         if not stone_inside_goal_mouth(self.x):
-            if self.y < top_limit - layout.COLLISION_EPSILON:
+            if self.y < top_limit - core.COLLISION_EPSILON:
                 self.y = top_limit
-                if vy < -layout.COLLISION_EPSILON:
-                    reflected_vy = abs(vy) * layout.WALL_RESTITUTION
-                    if target_vy < -layout.COLLISION_EPSILON:
-                        reflected_target_vy = abs(target_vy) * layout.WALL_RESTITUTION
+                if vy < -core.COLLISION_EPSILON:
+                    reflected_vy = abs(vy) * core.WALL_RESTITUTION
+                    if target_vy < -core.COLLISION_EPSILON:
+                        reflected_target_vy = abs(target_vy) * core.WALL_RESTITUTION
                     bounced = True
-            elif self.y > bottom_limit + layout.COLLISION_EPSILON:
+            elif self.y > bottom_limit + core.COLLISION_EPSILON:
                 self.y = bottom_limit
-                if vy > layout.COLLISION_EPSILON:
-                    reflected_vy = -abs(vy) * layout.WALL_RESTITUTION
-                    if target_vy > layout.COLLISION_EPSILON:
-                        reflected_target_vy = -abs(target_vy) * layout.WALL_RESTITUTION
+                if vy > core.COLLISION_EPSILON:
+                    reflected_vy = -abs(vy) * core.WALL_RESTITUTION
+                    if target_vy > core.COLLISION_EPSILON:
+                        reflected_target_vy = -abs(target_vy) * core.WALL_RESTITUTION
                     bounced = True
-            elif self.y <= top_limit + layout.COLLISION_EPSILON and vy < -layout.COLLISION_EPSILON:
+            elif self.y <= top_limit + core.COLLISION_EPSILON and vy < -core.COLLISION_EPSILON:
                 self.y = top_limit
-                reflected_vy = abs(vy) * layout.WALL_RESTITUTION
-                if target_vy < -layout.COLLISION_EPSILON:
-                    reflected_target_vy = abs(target_vy) * layout.WALL_RESTITUTION
+                reflected_vy = abs(vy) * core.WALL_RESTITUTION
+                if target_vy < -core.COLLISION_EPSILON:
+                    reflected_target_vy = abs(target_vy) * core.WALL_RESTITUTION
                 bounced = True
-            elif self.y >= bottom_limit - layout.COLLISION_EPSILON and vy > layout.COLLISION_EPSILON:
+            elif self.y >= bottom_limit - core.COLLISION_EPSILON and vy > core.COLLISION_EPSILON:
                 self.y = bottom_limit
-                reflected_vy = -abs(vy) * layout.WALL_RESTITUTION
-                if target_vy > layout.COLLISION_EPSILON:
-                    reflected_target_vy = -abs(target_vy) * layout.WALL_RESTITUTION
+                reflected_vy = -abs(vy) * core.WALL_RESTITUTION
+                if target_vy > core.COLLISION_EPSILON:
+                    reflected_target_vy = -abs(target_vy) * core.WALL_RESTITUTION
                 bounced = True
         # 卡在角落出不来时给一个最小弹出速度
-        at_left_or_right = self.x <= left_limit + layout.COLLISION_EPSILON or self.x >= right_limit - layout.COLLISION_EPSILON
-        at_top_or_bottom = self.y <= top_limit + layout.COLLISION_EPSILON or self.y >= bottom_limit - layout.COLLISION_EPSILON
+        at_left_or_right = self.x <= left_limit + core.COLLISION_EPSILON or self.x >= right_limit - core.COLLISION_EPSILON
+        at_top_or_bottom = self.y <= top_limit + core.COLLISION_EPSILON or self.y >= bottom_limit - core.COLLISION_EPSILON
         current_speed = math.hypot(vx, vy)
-        if at_left_or_right and at_top_or_bottom and current_speed <= layout.COLLISION_EPSILON:
-            direction_x = 1.0 if self.x <= left_limit + layout.COLLISION_EPSILON else -1.0
-            direction_y = 1.0 if self.y <= top_limit + layout.COLLISION_EPSILON else -1.0
-            component_speed = layout.MIN_WALL_BOUNCE_SPEED / math.sqrt(2.0)
+        if at_left_or_right and at_top_or_bottom and current_speed <= core.COLLISION_EPSILON:
+            direction_x = 1.0 if self.x <= left_limit + core.COLLISION_EPSILON else -1.0
+            direction_y = 1.0 if self.y <= top_limit + core.COLLISION_EPSILON else -1.0
+            component_speed = core.MIN_WALL_BOUNCE_SPEED / math.sqrt(2.0)
             reflected_vx = direction_x * component_speed
             reflected_vy = direction_y * component_speed
             bounced = True
-        elif bounced and current_speed > layout.COLLISION_EPSILON and at_left_or_right and at_top_or_bottom:
+        elif bounced and current_speed > core.COLLISION_EPSILON and at_left_or_right and at_top_or_bottom:
             reflected_speed = math.hypot(reflected_vx, reflected_vy)
-            if reflected_speed < layout.MIN_WALL_BOUNCE_SPEED:
-                scale = layout.MIN_WALL_BOUNCE_SPEED / reflected_speed
+            if reflected_speed < core.MIN_WALL_BOUNCE_SPEED:
+                scale = core.MIN_WALL_BOUNCE_SPEED / reflected_speed
                 reflected_vx *= scale
                 reflected_vy *= scale
         if bounced:
-            if current_speed <= layout.COLLISION_EPSILON:
+            if current_speed <= core.COLLISION_EPSILON:
                 self.set_immediate_velocity(reflected_vx, reflected_vy)
             else:
                 self.set_wall_reflection(reflected_vx, reflected_vy, reflected_target_vx, reflected_target_vy)
@@ -196,8 +196,8 @@ class StoneMotion:
 
     def resolve_goal_posts(self):
         bounced = False
-        minimum_distance = layout.STONE_RADIUS + layout.GOAL_POST_RADIUS
-        for post_x, post_y in layout.GOAL_POSTS:
+        minimum_distance = core.STONE_RADIUS + core.GOAL_POST_RADIUS
+        for post_x, post_y in core.GOAL_POSTS:
             contact = circle_post_contact(self.x, self.y, post_x, post_y, minimum_distance)
             if contact is None:
                 continue
@@ -207,7 +207,7 @@ class StoneMotion:
             vx, vy = self.collision_velocity()
             normal_speed = vx * nx + vy * ny
             if normal_speed < 0:
-                impulse = (1.0 + layout.GOAL_POST_RESTITUTION) * normal_speed
+                impulse = (1.0 + core.GOAL_POST_RESTITUTION) * normal_speed
                 self.set_immediate_velocity(vx - impulse * nx, vy - impulse * ny)
                 bounced = True
         return bounced
@@ -217,8 +217,8 @@ def goal_scorer(stone):
     """球整体越过门线时返回得分方，否则返回 None。"""
     if not stone_inside_goal_mouth(stone.x):
         return None
-    if stone.y + layout.STONE_RADIUS < layout.RINK_TOP:
+    if stone.y + core.STONE_RADIUS < core.RINK_TOP:
         return "player"
-    if stone.y - layout.STONE_RADIUS > layout.RINK_BOTTOM:
+    if stone.y - core.STONE_RADIUS > core.RINK_BOTTOM:
         return "ai"
     return None
