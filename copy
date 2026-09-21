@@ -1,0 +1,32 @@
+先不要修改任何代码。
+
+这是一个运行在 Jetson 上的实时视觉项目。
+
+以前在 commit:
+65ec572adbc5d6d627722121faa03655ee5f0a1f
+
+摄像头实际采集能达到 100+ FPS。
+
+现在运行：
+
+python3 air_hockey/tools/test_camera.py \
+  --benchmark \
+  --backend gstreamer \
+  --duration 10
+
+只有 50 多 FPS。
+
+请直接检查当前 Jetson 本机环境和项目代码，重点排查：
+
+1. /dev/video0 实际支持的分辨率和帧率
+2. 当前是否真的工作在 1280x720 MJPG 200 FPS
+3. USB 是否为 USB 3 SuperSpeed
+4. 当前曝光时间和自动曝光状态
+5. Jetson nvpmodel、CPU、GPU、EMC 状态
+6. GStreamer 实际 negotiated caps
+7. nvv4l2decoder / nvvidconv 是否成为瓶颈
+8. 分别运行 map、bgrx-copy、bgr-copy 性能测试
+9. 对比 commit 65ec572 和当前版本的 camera 相关代码
+
+先收集证据，不要修改代码。
+最后按“最可能原因 -> 证据 -> 下一步验证命令”给我结论。
