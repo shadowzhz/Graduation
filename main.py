@@ -120,11 +120,13 @@ def run_vision(args):
             "fatal": None,
         }
 
+    table_calibration_file = None if args.disable_homography else args.table_calibration
     runtime = VisionRuntime(
         table_roi=tuple(args.roi),
         lower=tuple(args.lower),
         upper=tuple(args.upper),
         calibration_file=args.calibration,
+        table_calibration_file=table_calibration_file,
         disable_undistort=args.disable_undistort,
     )
 
@@ -140,8 +142,10 @@ def run_vision(args):
     print(f"{mode_label}开始{'，Ctrl+C 退出' if headless else '，Q / ESC 或关闭窗口退出'}")
     print(f"视觉管线：最新帧 + 每 {runtime.detection_interval} 帧检测，其余帧使用 tracker 预测")
     print("视觉校正:")
-    print(f"  calibration: {args.calibration}")
-    print(f"  undistort: {'校正开启' if not args.disable_undistort else '校正关闭'}")
+    print(f"  camera calibration: {args.calibration}")
+    print(f"  undistort: {'OFF' if args.disable_undistort else 'ON'}")
+    print(f"  table mapping: {'linear ROI' if args.disable_homography else 'Homography'}")
+    print(f"  table calibration: {table_calibration_file if table_calibration_file is not None else 'None (linear ROI)'}")
 
     stop = threading.Event()
 
@@ -250,13 +254,21 @@ def main():
     # 视觉模式相关参数
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
-    parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机标定文件")
-    parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正")
+    parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
+    parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
+    parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正（必须同时 --disable-homography）")
+    parser.add_argument("--disable-homography", action="store_true", help="关闭 Homography，回退到旧 ROI 线性映射（调试用）")
     parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
 
     args = parser.parse_args()
+
+    if not args.sim and args.disable_undistort and not args.disable_homography:
+        parser.error(
+            "--disable-undistort 必须与 --disable-homography 一起使用："
+            "Homography 基于去畸变坐标标定，二者不能只关一半"
+        )
 
     if args.sim:
         run_game()

@@ -30,6 +30,7 @@ class CameraGeometry:
         image_size: Optional[Tuple[int, int]] = None,
         table_roi: Optional[Tuple[float, float, float, float]] = None,
         homography_matrix: Optional[np.ndarray] = None,
+        homography_image_size: Optional[Tuple[int, int]] = None,
         enabled: bool = True,
     ) -> None:
         if rink_bounds is None:
@@ -47,6 +48,7 @@ class CameraGeometry:
         self.table_roi = None
         self.homography_matrix = None
         self.homography_inverse = None
+        self.homography_image_size = None
 
         if image_size is not None:
             self.set_image_size(image_size)
@@ -55,7 +57,7 @@ class CameraGeometry:
             self.set_table_roi(table_roi)
 
         if homography_matrix is not None:
-            self.set_homography(homography_matrix)
+            self.set_homography(homography_matrix, homography_image_size)
 
     @classmethod
     def from_calibration_file(
@@ -69,18 +71,24 @@ class CameraGeometry:
         """从标定 .npz 文件构建 CameraGeometry。
 
         calibration_file 提供相机内参 + 畸变；table_calibration_file 提供
-        undistorted -> table 的球台四点单应矩阵。后者缺失时回退为 ROI 线性映射。
+        undistorted -> table 的球台四点单应矩阵。
+
+        table_calibration_file 为 None 时明确使用旧 ROI 线性映射；
+        非 None 时文件必须存在，否则直接抛 FileNotFoundError（不做静默 fallback）。
         """
         if rink_bounds is None:
             raise ValueError("rink_bounds must be provided")
 
-        homography_matrix = cls._load_homography(table_calibration_file)
+        homography = cls._load_homography(table_calibration_file)
+        homography_matrix = homography[0] if homography is not None else None
+        homography_image_size = homography[1] if homography is not None else None
 
         if not enabled:
             return cls(
                 rink_bounds=rink_bounds,
                 table_roi=table_roi,
                 homography_matrix=homography_matrix,
+                homography_image_size=homography_image_size,
                 enabled=False,
             )
 
@@ -104,27 +112,62 @@ class CameraGeometry:
             image_size=image_size,
             table_roi=table_roi,
             homography_matrix=homography_matrix,
+            homography_image_size=homography_image_size,
             enabled=True,
         )
 
     @staticmethod
-    def _load_homography(table_calibration_file: Optional[Union[str, Path]]) -> Optional[np.ndarray]:
-        """从球台标定文件读取 undistorted -> table 的单应矩阵，缺失时返回 None。"""
+    def _load_homography(table_calibration_file: Optional[Union[str, Path]]):
+        """读取 undistorted -> table 的单应矩阵与标定分辨率。
+
+        path 为 None 时返回 None（走旧 ROI 线性映射）；path 非 None 但文件不存在
+        时直接抛 FileNotFoundError，不做静默 fallback。
+        """
         if table_calibration_file is None:
             return None
         path = Path(table_calibration_file)
         if not path.is_file():
-            return None
+            raise FileNotFoundError(f"table calibration file not found: {table_calibration_file}")
         with np.load(path) as data:
-            return data["homography_matrix"]
+            homography_matrix = data["homography_matrix"]
+            raw_size = data.get("image_size")
+            image_size = tuple(int(v) for v in raw_size) if raw_size is not None else None
+        return homography_matrix, image_size
 
-    def set_homography(self, homography_matrix: np.ndarray) -> None:
-        """设置 undistorted pixel -> table 的 3x3 单应矩阵，并立即求解逆矩阵。"""
+    def set_homography(
+        self,
+        homography_matrix: np.ndarray,
+        image_size: Optional[Tuple[int, int]] = None,
+    ) -> None:
+        """设置 undistorted pixel -> table 的 3x3 单应矩阵，并立即求解逆矩阵。
+
+        Homography 基于去畸变坐标标定，因此要求相机畸变校正处于启用状态
+        （enabled=True）；disable_undistort + Homography 属于坐标定义冲突，直接报错。
+        """
+        if not self.enabled:
+            raise ValueError(
+                "undistorted -> table Homography requires distortion correction "
+                "(enabled=True); disable_undistort + Homography is not allowed"
+            )
         matrix = np.asarray(homography_matrix, dtype=np.float64)
         if matrix.shape != (3, 3):
             raise ValueError(f"homography_matrix must be a 3x3 matrix, got shape {matrix.shape}")
         self.homography_matrix = matrix
         self.homography_inverse = np.linalg.inv(matrix)
+        if image_size is not None:
+            self.homography_image_size = (int(image_size[0]), int(image_size[1]))
+        self._validate_homography_image_size()
+
+    def _validate_homography_image_size(self) -> None:
+        """Homography 标定分辨率必须与当前实际图像分辨率一致，不做自动缩放。"""
+        if self.homography_image_size is None or self.image_size is None:
+            return
+        if tuple(self.image_size) != tuple(self.homography_image_size):
+            raise ValueError(
+                f"Homography calibrated for "
+                f"{self.homography_image_size[0]}x{self.homography_image_size[1]}, "
+                f"but runtime image is {self.image_size[0]}x{self.image_size[1]}"
+            )
 
     def set_image_size(self, image_size: Tuple[int, int]) -> None:
         """更新图像分辨率并计算最优新相机矩阵（不保存/不使用 calibration ROI 裁剪偏移）。"""
@@ -141,6 +184,8 @@ class CameraGeometry:
                 0,
                 (width, height),
             )
+
+        self._validate_homography_image_size()
 
     def set_table_roi(self, table_roi: Tuple[float, float, float, float]) -> None:
         """设置定义在原始相机图像像素坐标系下的球台区域 (x, y, w, h)。"""

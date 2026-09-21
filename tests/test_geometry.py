@@ -11,6 +11,7 @@
 """
 
 import math
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -45,14 +46,25 @@ TRAPEZOID_SOURCE = np.array(
 
 
 def _make_trapezoid_geometry():
-    """构造启用 Homography 的 CameraGeometry（关闭畸变，raw == undistorted 便于验证）。"""
+    """构造启用 Homography 的 CameraGeometry（无相机内参，直接验证 undistorted -> table）。"""
     homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
     geometry = CameraGeometry(
         rink_bounds=RINK_BOUNDS,
         homography_matrix=homography,
-        enabled=False,
+        enabled=True,
     )
     return geometry, homography
+
+
+def _write_homography_file(path, homography, image_size):
+    """写入一个符合 calibrate_table.py 输出格式的球台 Homography 文件。"""
+    np.savez(
+        path,
+        homography_matrix=np.asarray(homography, dtype=np.float64),
+        raw_points=np.zeros((4, 2), dtype=np.float64),
+        undistorted_points=np.zeros((4, 2), dtype=np.float64),
+        image_size=np.asarray(image_size, dtype=np.int32),
+    )
 
 
 def _diagonal_intersection(quad):
@@ -73,6 +85,7 @@ def test_raw_to_undistorted_and_table():
         CALIB_FILE,
         table_roi=table_roi,
         rink_bounds=rink_bounds,
+        table_calibration_file=None,
         enabled=True,
     )
     assert geom.enabled
@@ -109,6 +122,7 @@ def test_raw_velocity_with_distortion():
         CALIB_FILE,
         table_roi=table_roi,
         rink_bounds=rink_bounds,
+        table_calibration_file=None,
         enabled=True,
     )
 
@@ -137,6 +151,7 @@ def test_raw_velocity_with_distortion():
         CALIB_FILE,
         table_roi=table_roi,
         rink_bounds=rink_bounds,
+        table_calibration_file=None,
         enabled=False,
     )
     scale_x, scale_y = geom_off._get_rink_scales()
@@ -215,7 +230,12 @@ def test_tracker_independent_of_calibration_roi():
     track1 = tracker1.update(det2)[0]
 
     # Tracker 2: 即便存在 VisionPipeline (包含标定参数)，检测结果不被修改，Tracker 2 也接收相同的 raw 坐标
-    pipeline = VisionPipeline(CALIB_FILE, rink_bounds=(0.0, 1000.0, 0.0, 2000.0), enabled=True)
+    pipeline = VisionPipeline(
+        CALIB_FILE,
+        rink_bounds=(0.0, 1000.0, 0.0, 2000.0),
+        table_calibration_file=None,
+        enabled=True,
+    )
     assert pipeline.enabled
     # 按照新架构，pipeline 不会改变检测结果
     tracker2.update(det1)
@@ -265,12 +285,14 @@ def test_distortion_toggle_no_offset():
         CALIB_FILE,
         table_roi=table_roi,
         rink_bounds=rink_bounds,
+        table_calibration_file=None,
         enabled=True,
     )
     geom_disabled = CameraGeometry.from_calibration_file(
         CALIB_FILE,
         table_roi=table_roi,
         rink_bounds=rink_bounds,
+        table_calibration_file=None,
         enabled=False,
     )
 
@@ -335,7 +357,9 @@ def test_homography_undistorted_table_round_trip():
 
 def test_homography_raw_table_round_trip():
     """含畸变校正时，raw -> table -> raw 往返一致。"""
-    base = CameraGeometry.from_calibration_file(CALIB_FILE, rink_bounds=RINK_BOUNDS, enabled=True)
+    base = CameraGeometry.from_calibration_file(
+        CALIB_FILE, rink_bounds=RINK_BOUNDS, table_calibration_file=None, enabled=True
+    )
     raw_quad = np.array([[350.0, 50.0], [930.0, 60.0], [950.0, 620.0], [330.0, 600.0]], dtype=np.float64)
     undistorted = np.array([base.raw_to_undistorted(px, py) for px, py in raw_quad], dtype=np.float32)
     homography = cv2.getPerspectiveTransform(undistorted, RINK_CORNERS)
@@ -395,15 +419,124 @@ def test_homography_velocity_matches_finite_difference():
 
 
 def test_homography_ignores_table_roi():
-    """Homography 启用后，table_roi 不再参与 undistorted -> table 的数学映射。"""
+    """Homography 启用后，table_roi 不再参与 undistorted <-> table 的数学映射。"""
     homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
-    without_roi = CameraGeometry(rink_bounds=RINK_BOUNDS, homography_matrix=homography, enabled=False)
+    without_roi = CameraGeometry(rink_bounds=RINK_BOUNDS, homography_matrix=homography, enabled=True)
     with_roi = CameraGeometry(
         rink_bounds=RINK_BOUNDS,
         table_roi=(0.0, 0.0, 100.0, 100.0),
         homography_matrix=homography,
-        enabled=False,
+        enabled=True,
     )
+    # undistorted -> table 不受 table_roi 影响
     for undist_x, undist_y in ((450.0, 150.0), (300.0, 380.0), (700.0, 500.0)):
         assert without_roi.undistorted_to_table(undist_x, undist_y) == with_roi.undistorted_to_table(undist_x, undist_y)
-        assert without_roi.table_to_undistorted(undist_x, undist_y) == with_roi.table_to_undistorted(undist_x, undist_y)
+    # table -> undistorted 在真正的 table 坐标上同样不受 table_roi 影响
+    for table_x, table_y in (
+        (core.RINK_CENTER_X, core.RINK_CENTER_Y),
+        (core.RINK_LEFT, core.RINK_TOP),
+        (core.RINK_RIGHT, core.RINK_BOTTOM),
+    ):
+        assert without_roi.table_to_undistorted(table_x, table_y) == with_roi.table_to_undistorted(table_x, table_y)
+
+
+def test_missing_table_calibration_file_raises_error():
+    """table_calibration_file 非 None 但文件不存在时直接 FileNotFoundError，不静默 fallback。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "no_table_homography.npz"
+        try:
+            CameraGeometry.from_calibration_file(
+                CALIB_FILE,
+                rink_bounds=RINK_BOUNDS,
+                table_calibration_file=missing,
+                enabled=True,
+            )
+            assert False, "Should have raised FileNotFoundError"
+        except FileNotFoundError as exc:
+            assert "table calibration file not found" in str(exc)
+
+
+def test_none_table_calibration_uses_linear_roi():
+    """table_calibration_file=None 时明确使用旧 ROI 线性映射。"""
+    rink_bounds = (0.0, 1000.0, 0.0, 2000.0)
+    geom = CameraGeometry.from_calibration_file(
+        CALIB_FILE,
+        table_roi=(100.0, 50.0, 400.0, 600.0),
+        rink_bounds=rink_bounds,
+        table_calibration_file=None,
+        enabled=True,
+    )
+    assert geom.homography_matrix is None
+
+    tx_tl, ty_tl = geom.raw_to_table(100.0, 50.0)
+    assert abs(tx_tl - 0.0) < 1e-4
+    assert abs(ty_tl - 0.0) < 1e-4
+    tx_br, ty_br = geom.raw_to_table(500.0, 650.0)
+    assert abs(tx_br - 1000.0) < 1e-4
+    assert abs(ty_br - 2000.0) < 1e-4
+
+
+def test_homography_resolution_mismatch_raises_error():
+    """Homography 标定分辨率与运行分辨率不同时抛 ValueError，不自动缩放。"""
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "table_homography.npz"
+        _write_homography_file(path, homography, (1280, 720))
+        geom = CameraGeometry.from_calibration_file(
+            CALIB_FILE,
+            rink_bounds=RINK_BOUNDS,
+            table_calibration_file=path,
+            enabled=True,
+        )
+        assert geom.homography_image_size == (1280, 720)
+        try:
+            geom.set_image_size((1920, 1080))
+            assert False, "Should have raised ValueError"
+        except ValueError as exc:
+            assert "Homography calibrated for 1280x720" in str(exc)
+            assert "runtime image is 1920x1080" in str(exc)
+
+
+def test_disable_undistort_with_homography_rejected():
+    """disable_undistort 与 Homography 同时启用时直接报错，不偷偷改变坐标定义。"""
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "table_homography.npz"
+        _write_homography_file(path, homography, (1280, 720))
+        try:
+            CameraGeometry.from_calibration_file(
+                CALIB_FILE,
+                rink_bounds=RINK_BOUNDS,
+                table_calibration_file=path,
+                enabled=False,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError as exc:
+            assert "Homography" in str(exc)
+
+    try:
+        CameraGeometry(rink_bounds=RINK_BOUNDS, homography_matrix=homography, enabled=False)
+        assert False, "Should have raised ValueError"
+    except ValueError as exc:
+        assert "Homography" in str(exc)
+
+
+def test_homography_file_loads_matrix_and_image_size():
+    """Homography 文件正确加载后，matrix 与 image_size 应正确。"""
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "table_homography.npz"
+        _write_homography_file(path, homography, (1280, 720))
+        geom = CameraGeometry.from_calibration_file(
+            CALIB_FILE,
+            rink_bounds=RINK_BOUNDS,
+            table_calibration_file=path,
+            enabled=True,
+        )
+        assert geom.homography_matrix is not None
+        assert geom.homography_image_size == (1280, 720)
+        assert np.max(np.abs(geom.homography_matrix - homography)) < 1e-9
+        for (sx, sy), (tx, ty) in zip(TRAPEZOID_SOURCE, RINK_CORNERS):
+            gx, gy = geom.undistorted_to_table(float(sx), float(sy))
+            assert abs(gx - tx) < 1e-3
+            assert abs(gy - ty) < 1e-3
