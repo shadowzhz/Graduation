@@ -58,6 +58,7 @@ class VisionRuntime:
         lower: tuple[int, int, int] = (170, 100, 80),
         upper: tuple[int, int, int] = (179, 255, 255),
         calibration_file: str = "calibration/camera_calibration.npz",
+        table_calibration_file: str = "calibration/table_homography.npz",
         disable_undistort: bool = False,
         detection_interval: int = DETECTION_INTERVAL,
         detector: Optional[StoneDetector] = None,
@@ -90,6 +91,7 @@ class VisionRuntime:
                 enabled=not disable_undistort,
                 table_roi=self.table_roi,
                 rink_bounds=(core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM),
+                table_calibration_file=table_calibration_file,
             )
             self.camera_geometry = self.vision_pipeline.geometry
 

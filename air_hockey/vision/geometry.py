@@ -4,8 +4,12 @@
 以及桌面/球台坐标 (table/rink coordinate) 之间的单向清晰转换。
 
 坐标流定义：
-  raw pixel -> undistorted pixel -> table coordinate
+  raw pixel -> undistorted pixel -> (Homography) -> table coordinate
   table coordinate -> undistorted pixel -> raw pixel
+
+undistorted -> table 的映射有两种模式：
+  1. 配置了 homography_matrix 时，使用 undistorted pixel -> table 的 3x3 单应矩阵；
+  2. 未配置时，回退为基于 table_roi 的轴对齐线性缩放（历史行为）。
 """
 
 from pathlib import Path
@@ -25,6 +29,7 @@ class CameraGeometry:
         dist_coeffs: Optional[np.ndarray] = None,
         image_size: Optional[Tuple[int, int]] = None,
         table_roi: Optional[Tuple[float, float, float, float]] = None,
+        homography_matrix: Optional[np.ndarray] = None,
         enabled: bool = True,
     ) -> None:
         if rink_bounds is None:
@@ -40,6 +45,8 @@ class CameraGeometry:
         self.image_size = None
         self.new_camera_matrix = None
         self.table_roi = None
+        self.homography_matrix = None
+        self.homography_inverse = None
 
         if image_size is not None:
             self.set_image_size(image_size)
@@ -47,22 +54,33 @@ class CameraGeometry:
         if table_roi is not None:
             self.set_table_roi(table_roi)
 
+        if homography_matrix is not None:
+            self.set_homography(homography_matrix)
+
     @classmethod
     def from_calibration_file(
         cls,
         calibration_file: Optional[Union[str, Path]],
         rink_bounds: Tuple[float, float, float, float],
         table_roi: Optional[Tuple[float, float, float, float]] = None,
+        table_calibration_file: Optional[Union[str, Path]] = None,
         enabled: bool = True,
     ) -> "CameraGeometry":
-        """从标定 .npz 文件构建 CameraGeometry。"""
+        """从标定 .npz 文件构建 CameraGeometry。
+
+        calibration_file 提供相机内参 + 畸变；table_calibration_file 提供
+        undistorted -> table 的球台四点单应矩阵。后者缺失时回退为 ROI 线性映射。
+        """
         if rink_bounds is None:
             raise ValueError("rink_bounds must be provided")
+
+        homography_matrix = cls._load_homography(table_calibration_file)
 
         if not enabled:
             return cls(
                 rink_bounds=rink_bounds,
                 table_roi=table_roi,
+                homography_matrix=homography_matrix,
                 enabled=False,
             )
 
@@ -85,8 +103,28 @@ class CameraGeometry:
             dist_coeffs=dist_coeffs,
             image_size=image_size,
             table_roi=table_roi,
+            homography_matrix=homography_matrix,
             enabled=True,
         )
+
+    @staticmethod
+    def _load_homography(table_calibration_file: Optional[Union[str, Path]]) -> Optional[np.ndarray]:
+        """从球台标定文件读取 undistorted -> table 的单应矩阵，缺失时返回 None。"""
+        if table_calibration_file is None:
+            return None
+        path = Path(table_calibration_file)
+        if not path.is_file():
+            return None
+        with np.load(path) as data:
+            return data["homography_matrix"]
+
+    def set_homography(self, homography_matrix: np.ndarray) -> None:
+        """设置 undistorted pixel -> table 的 3x3 单应矩阵，并立即求解逆矩阵。"""
+        matrix = np.asarray(homography_matrix, dtype=np.float64)
+        if matrix.shape != (3, 3):
+            raise ValueError(f"homography_matrix must be a 3x3 matrix, got shape {matrix.shape}")
+        self.homography_matrix = matrix
+        self.homography_inverse = np.linalg.inv(matrix)
 
     def set_image_size(self, image_size: Tuple[int, int]) -> None:
         """更新图像分辨率并计算最优新相机矩阵（不保存/不使用 calibration ROI 裁剪偏移）。"""
@@ -172,7 +210,13 @@ class CameraGeometry:
         return float(projected[0][0][0]), float(projected[0][0][1])
 
     def undistorted_to_table(self, undist_x: float, undist_y: float) -> Tuple[float, float]:
-        """去畸变相机像素坐标 -> 球台/场地坐标。"""
+        """去畸变相机像素坐标 -> 球台/场地坐标。
+
+        配置了 Homography 时使用 undistorted -> table 的透视变换；
+        否则回退为基于 table_roi 的轴对齐线性缩放。
+        """
+        if self.homography_matrix is not None:
+            return self._apply_homography(self.homography_matrix, undist_x, undist_y)
         ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
         scale_x, scale_y = self._get_rink_scales()
         rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
@@ -181,13 +225,25 @@ class CameraGeometry:
         return table_x, table_y
 
     def table_to_undistorted(self, table_x: float, table_y: float) -> Tuple[float, float]:
-        """球台/场地坐标 -> 去畸变相机像素坐标。"""
+        """球台/场地坐标 -> 去畸变相机像素坐标。
+
+        配置了 Homography 时使用其逆矩阵进行透视变换；否则回退为 ROI 线性缩放。
+        """
+        if self.homography_inverse is not None:
+            return self._apply_homography(self.homography_inverse, table_x, table_y)
         ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
         scale_x, scale_y = self._get_rink_scales()
         rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
         undist_x = ux0 + (float(table_x) - rink_left) / scale_x
         undist_y = uy0 + (float(table_y) - rink_top) / scale_y
         return undist_x, undist_y
+
+    @staticmethod
+    def _apply_homography(matrix: np.ndarray, x: float, y: float) -> Tuple[float, float]:
+        """对单个点应用 3x3 单应矩阵。"""
+        pts = np.array([[[float(x), float(y)]]], dtype=np.float64)
+        transformed = cv2.perspectiveTransform(pts, matrix)
+        return float(transformed[0][0][0]), float(transformed[0][0][1])
 
     def raw_to_table(self, raw_x: float, raw_y: float) -> Tuple[float, float]:
         """原始相机像素坐标 -> 球台/场地坐标。
