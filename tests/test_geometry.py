@@ -5,6 +5,9 @@
 2. Tracker 坐标不受相机校正 ROI 影响。
 3. 动态 ROI 中心与 Tracker raw 坐标一致。
 4. 开启/关闭畸变校正时，不产生坐标系错位。
+5. 开启畸变校正后速度转换通过差分正确计算，位置与速度使用同一套逻辑。
+6. 缺少 rink_bounds 时抛错。
+7. 启用校正但标定文件不存在时抛错。
 """
 
 import math
@@ -57,11 +60,105 @@ def test_raw_to_undistorted_and_table():
     assert abs(back_raw_x - test_raw_x) < 0.05
     assert abs(back_raw_y - test_raw_y) < 0.05
 
-    # 4. 验证速度尺度转换
-    scale_x, scale_y = geom._get_rink_scales()
-    tvx, tvy = geom.raw_velocity_to_table(test_raw_x, test_raw_y, 10.0, -20.0)
-    assert abs(tvx - 10.0 * scale_x) < 1e-4
-    assert abs(tvy - (-20.0 * scale_y)) < 1e-4
+
+def test_raw_velocity_with_distortion():
+    """验证开启畸变校正后速度通过差分计算正确，保证位置和速度使用同一套坐标转换逻辑。"""
+    table_roi = (350.0, 0.0, 580.0, 650.0)
+    rink_bounds = (36.0, 564.0, 46.0, 714.0)
+    geom = CameraGeometry.from_calibration_file(
+        CALIB_FILE,
+        table_roi=table_roi,
+        rink_bounds=rink_bounds,
+        enabled=True,
+    )
+
+    raw_x, raw_y = 400.0, 300.0
+    raw_vx, raw_vy = 120.0, -80.0
+    dt = 0.01
+
+    # 执行速度转换
+    tvx, tvy = geom.raw_velocity_to_table(raw_x, raw_y, raw_vx, raw_vy, dt=dt)
+
+    # 独立用 raw_to_table 计算差分进行断言，验证位置和速度转换逻辑严格一致
+    tx0, ty0 = geom.raw_to_table(raw_x, raw_y)
+    tx1, ty1 = geom.raw_to_table(raw_x + raw_vx * dt, raw_y + raw_vy * dt)
+    expected_tvx = (tx1 - tx0) / dt
+    expected_tvy = (ty1 - ty0) / dt
+
+    assert abs(tvx - expected_tvx) < 1e-9
+    assert abs(tvy - expected_tvy) < 1e-9
+
+    # 速度为 0 时结果为 0
+    zero_vx, zero_vy = geom.raw_velocity_to_table(raw_x, raw_y, 0.0, 0.0)
+    assert zero_vx == 0.0 and zero_vy == 0.0
+
+    # 关闭畸变校正时，差分计算结果应与线性比例严格一致
+    geom_off = CameraGeometry.from_calibration_file(
+        CALIB_FILE,
+        table_roi=table_roi,
+        rink_bounds=rink_bounds,
+        enabled=False,
+    )
+    scale_x, scale_y = geom_off._get_rink_scales()
+    off_vx, off_vy = geom_off.raw_velocity_to_table(raw_x, raw_y, raw_vx, raw_vy, dt=dt)
+    assert abs(off_vx - raw_vx * scale_x) < 1e-5
+    assert abs(off_vy - raw_vy * scale_y) < 1e-5
+
+
+def test_missing_rink_bounds_raises_error():
+    """验证缺少 rink_bounds 时直接抛错，不保留任何宽泛 fallback。"""
+    # 直接实例化 CameraGeometry 时不给 rink_bounds
+    try:
+        CameraGeometry(rink_bounds=None)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "rink_bounds must be provided" in str(e)
+
+    # 通过 from_calibration_file 调用时不给 rink_bounds
+    try:
+        CameraGeometry.from_calibration_file(CALIB_FILE, rink_bounds=None)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "rink_bounds must be provided" in str(e)
+
+    # 通过 VisionPipeline 调用时不给 rink_bounds
+    try:
+        VisionPipeline(calibration_file=CALIB_FILE, rink_bounds=None)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "rink_bounds must be provided" in str(e)
+
+    # 传入不符合 4 元素长度的 rink_bounds
+    try:
+        CameraGeometry(rink_bounds=(0.0, 100.0))
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "exactly 4 values" in str(e)
+
+
+def test_enabled_calibration_missing_file_raises_error():
+    """验证启用校正但标定文件不存在时直接抛错。"""
+    rink_bounds = (0.0, 1000.0, 0.0, 2000.0)
+
+    # calibration_file 为 None 且 enabled=True
+    try:
+        CameraGeometry.from_calibration_file(None, rink_bounds=rink_bounds, enabled=True)
+        assert False, "Should have raised FileNotFoundError"
+    except FileNotFoundError as e:
+        assert "calibration_file must be provided" in str(e)
+
+    # calibration_file 不存在 且 enabled=True
+    fake_path = "this_calibration_file_does_not_exist_12345.npz"
+    try:
+        CameraGeometry.from_calibration_file(fake_path, rink_bounds=rink_bounds, enabled=True)
+        assert False, "Should have raised FileNotFoundError"
+    except FileNotFoundError as e:
+        assert "calibration file not found" in str(e)
+
+    # 如果 enabled=False，则不要求标定文件存在
+    geom = CameraGeometry.from_calibration_file(fake_path, rink_bounds=rink_bounds, enabled=False)
+    assert not geom.enabled
+    assert geom.camera_matrix is None
 
 
 def test_tracker_independent_of_calibration_roi():
@@ -78,7 +175,7 @@ def test_tracker_independent_of_calibration_roi():
     track1 = tracker1.update(det2)[0]
 
     # Tracker 2: 即便存在 VisionPipeline (包含标定参数)，检测结果不被修改，Tracker 2 也接收相同的 raw 坐标
-    pipeline = VisionPipeline(CALIB_FILE, enabled=True)
+    pipeline = VisionPipeline(CALIB_FILE, rink_bounds=(0.0, 1000.0, 0.0, 2000.0), enabled=True)
     assert pipeline.enabled
     # 按照新架构，pipeline 不会改变检测结果
     tracker2.update(det1)
