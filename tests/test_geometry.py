@@ -521,6 +521,29 @@ def test_disable_undistort_with_homography_rejected():
         assert "Homography" in str(exc)
 
 
+def test_homography_missing_image_size_rejected():
+    """缺少 image_size 的旧版 Homography 文件必须被拒绝，不能静默绕过分辨率检查。"""
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "table_homography.npz"
+        np.savez(
+            path,
+            homography_matrix=np.asarray(homography, dtype=np.float64),
+            raw_points=np.zeros((4, 2), dtype=np.float64),
+            undistorted_points=np.zeros((4, 2), dtype=np.float64),
+        )
+        try:
+            CameraGeometry.from_calibration_file(
+                CALIB_FILE,
+                rink_bounds=RINK_BOUNDS,
+                table_calibration_file=path,
+                enabled=True,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError as exc:
+            assert "image_size" in str(exc)
+
+
 def test_homography_file_loads_matrix_and_image_size():
     """Homography 文件正确加载后，matrix 与 image_size 应正确。"""
     homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
