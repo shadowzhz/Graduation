@@ -50,8 +50,8 @@ from core_config import (
     STONE_RADIUS,
     STONE_STOP_SPEED,
 )
-from air_hockey_ai import AIDecision, AirHockeyAI
-from air_hockey_physics import (
+from ai import AIDecision, AirHockeyAI
+from physics import (
     StoneMotion,
     circle_post_contact,
     clamp,

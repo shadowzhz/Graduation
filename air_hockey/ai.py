@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass, replace
 
 import core_config as core
-from air_hockey_physics import clamp
+from physics import clamp
 from game_state import GameState
 from prediction import TrajectoryPredictor
 
