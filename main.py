@@ -33,7 +33,7 @@ import air_hockey_config as layout
 from air_hockey_ai import AirHockeyAI
 from camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
-from vision import StoneDetector, VisionPipeline
+from vision import CameraGeometry, StoneDetector, VisionPipeline
 from vision.predictor import predict_position, predict_trajectory
 from vision.tracker import StoneTracker, TrackState
 from vision.types import ROI
@@ -50,81 +50,48 @@ def run_game():
     subprocess.run([sys.executable, str(SIM_ROOT / "air_hockey.py")], cwd=str(SIM_ROOT))
 
 
-def _rink_scales(roi):
-    _x, _y, w, h = roi
-    safe_w = max(1.0, float(w))
-    safe_h = max(1.0, float(h))
-    return (
-        (layout.RINK_RIGHT - layout.RINK_LEFT) / safe_w,
-        (layout.RINK_BOTTOM - layout.RINK_TOP) / safe_h,
-    )
-
-
-def pixel_to_rink(x, y, roi):
-    roi_x, roi_y, _w, _h = roi
-    scale_x, scale_y = _rink_scales(roi)
-    return (
-        layout.RINK_LEFT + (x - roi_x) * scale_x,
-        layout.RINK_TOP + (y - roi_y) * scale_y,
-    )
-
-
-def rink_to_pixel(x, y, roi):
-    roi_x, roi_y, _w, _h = roi
-    scale_x, scale_y = _rink_scales(roi)
-    return (
-        roi_x + (x - layout.RINK_LEFT) / scale_x,
-        roi_y + (y - layout.RINK_TOP) / scale_y,
-    )
-
-
-def track_to_rink_state(track, roi):
-    stone = StoneState.from_tracker(track)
-    x, y = pixel_to_rink(stone.x, stone.y, roi)
-    scale_x, scale_y = _rink_scales(roi)
-    return replace(stone, x=x, y=y, vx=stone.vx * scale_x, vy=stone.vy * scale_y)
-
-
-def annotate(image, roi, detection, track, ai_target_pixel, display_fps, trajectory=None, pipeline_roi=None):
+def track_to_rink_state(track, rink_x: float, rink_y: float, rink_vx: float, rink_vy: float) -> StoneState:
+    """将 Tracker(raw) 输出与已明确转换的桌面/球台坐标合并为 StoneState。
+    不使用任何 calibration ROI，只接收已明确转换后的 rink 坐标。
     """
-    可视化绘制函数。
-    绘图时自动加上相机内部的偏移量 (cx, cy)，确保 UI 可视化依然精准。
+    stone = StoneState.from_tracker(track)
+    return replace(stone, x=float(rink_x), y=float(rink_y), vx=float(rink_vx), vy=float(rink_vy))
+
+
+def annotate(image, table_roi, detection, track, ai_target_pixel, display_fps, trajectory=None):
+    """可视化绘制函数。
+
+    全程统一使用 raw pixel，无需人工添加任何偏移。
     """
     output = image.copy()
-    
-    ox, oy = 0, 0
-    if pipeline_roi is not None:
-        cx, cy, rw, rh = pipeline_roi
-        if rw > 0 and rh > 0:
-            ox, oy = int(cx), int(cy)
 
-    x, y, w, h = roi
-    cv2.rectangle(output, (x + ox, y + oy), (x + w + ox, y + h + oy), (0, 255, 255), 2)
-    
+    rx, ry, rw, rh = table_roi
+    cv2.rectangle(output, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
+
     if detection is not None:
-        center = (round(detection.center_x) + ox, round(detection.center_y) + oy)
+        center = (round(detection.center_x), round(detection.center_y))
         cv2.circle(output, center, max(1, round(detection.radius)), (0, 255, 0), 2)
         cv2.circle(output, center, 3, (0, 255, 0), -1)
-        
+
     if track is not None:
-        center = (round(track.center_x) + ox, round(track.center_y) + oy)
-        end = (round(track.center_x + track.vx * 0.1) + ox, round(track.center_y + track.vy * 0.1) + oy)
+        center = (round(track.center_x), round(track.center_y))
+        end = (round(track.center_x + track.vx * 0.1), round(track.center_y + track.vy * 0.1))
         cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
-        
+
     if trajectory and len(trajectory) > 1:
         for i in range(len(trajectory) - 1):
-            pt1 = (round(trajectory[i][0]) + ox, round(trajectory[i][1]) + oy)
-            pt2 = (round(trajectory[i + 1][0]) + ox, round(trajectory[i + 1][1]) + oy)
+            pt1 = (round(trajectory[i][0]), round(trajectory[i][1]))
+            pt2 = (round(trajectory[i + 1][0]), round(trajectory[i + 1][1]))
             fade = max(50, 255 - i * 6)
             line_color = (fade, int(fade * 0.75), 50)
             cv2.line(output, pt1, pt2, line_color, 2, cv2.LINE_AA)
         for i, (px, py) in enumerate(trajectory):
             alpha = max(60, 255 - i * 6)
-            cv2.circle(output, (round(px) + ox, round(py) + oy), 2, (alpha, 170, 70), -1)
-            
+            cv2.circle(output, (round(px), round(py)), 2, (alpha, 170, 70), -1)
+
     if ai_target_pixel is not None:
-        cv2.drawMarker(output, (ai_target_pixel[0] + ox, ai_target_pixel[1] + oy), (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
-        
+        cv2.drawMarker(output, (ai_target_pixel[0], ai_target_pixel[1]), (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
+
     cv2.putText(output, f"FPS {display_fps:.1f}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     return output
 
@@ -191,7 +158,7 @@ class VisionWindow:
 
 
 def run_vision(args):
-    roi = tuple(args.roi)   
+    table_roi = tuple(args.roi)   
     headless = args.headless
     
     window = None
@@ -199,7 +166,7 @@ def run_vision(args):
         window = VisionWindow()     
 
     detector = StoneDetector(
-        roi=roi,
+        roi=table_roi,
         lower=tuple(args.lower),
         upper=tuple(args.upper),
         min_area=500.0,
@@ -212,8 +179,11 @@ def run_vision(args):
 
     vision_pipeline = VisionPipeline(
         calibration_file=args.calibration,
-        enabled=not args.disable_undistort,     
+        enabled=not args.disable_undistort,
+        table_roi=table_roi,
+        rink_bounds=(layout.RINK_LEFT, layout.RINK_RIGHT, layout.RINK_TOP, layout.RINK_BOTTOM),
     )
+    camera_geometry = vision_pipeline.geometry
 
     camera = CameraManager()
     try:
@@ -286,31 +256,15 @@ def run_vision(args):
                     box_size = 140
                     
                     if tracker.track is not None and tracker.track.state == TrackState.ACTIVE:
-                        pred_x, pred_y = tracker._predict_position(frame.timestamp)
-                        approx_x, approx_y = pred_x, pred_y
-                        if vision_pipeline.roi is not None:
-                            cx, cy, rw, rh = vision_pipeline.roi
-                            if rw > 0 and rh > 0:
-                                approx_x += cx
-                                approx_y += cy
-                                
+                        pred_raw_x, pred_raw_y = tracker._predict_position(frame.timestamp)
                         img_h, img_w = frame.image.shape[:2]
-                        rx = max(0, min(int(approx_x - box_size / 2), img_w - 1))
-                        ry = max(0, min(int(approx_y - box_size / 2), img_h - 1))
+                        rx = max(0, min(int(pred_raw_x - box_size / 2), img_w - 1))
+                        ry = max(0, min(int(pred_raw_y - box_size / 2), img_h - 1))
                         rw = max(1, min(box_size, img_w - rx))
                         rh = max(1, min(box_size, img_h - ry))
-                        
                         dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
 
                     detection = detector.detect(frame, dynamic_roi=dynamic_roi)
-                    
-                    if detection is not None:
-                        real_x, real_y = vision_pipeline.undistort_point(
-                            detection.center_x, detection.center_y
-                        )
-                        detection.center_x = real_x
-                        detection.center_y = real_y
-
                     detect_ms = detect_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
                     tracks = tracker.update(detection)
                 else:
@@ -318,17 +272,24 @@ def run_vision(args):
 
                 track = tracks[0] if tracks else None
 
-                correction_status = "ON" if vision_pipeline.camera_matrix is not None else "OFF"
+                correction_status = "ON" if camera_geometry.enabled and camera_geometry.camera_matrix is not None else "OFF"
                 status_text = f"FPS {display_fps:.1f} | 校正 {correction_status} | 未检测到冰壶"
                 ai_target_pixel = None
                 pixel_trajectory = None
 
                 if track is not None:
-                    stone = track_to_rink_state(track, roi)
+                    # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
+                    undist_x, undist_y = camera_geometry.raw_to_undistorted(track.center_x, track.center_y)
+                    table_x, table_y = camera_geometry.undistorted_to_table(undist_x, undist_y)
+                    table_vx, table_vy = camera_geometry.raw_velocity_to_table(
+                        track.center_x, track.center_y, track.vx, track.vy
+                    )
 
-                    raw_trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.06)
-                    if raw_trajectory:
-                        pixel_trajectory = [rink_to_pixel(px, py, roi) for px, py in raw_trajectory]
+                    stone = track_to_rink_state(track, table_x, table_y, table_vx, table_vy)
+
+                    table_trajectory = predict_trajectory(stone.x, stone.y, stone.vx, stone.vy, duration=2.0, step=0.06)
+                    if table_trajectory:
+                        pixel_trajectory = [camera_geometry.table_to_raw(px, py) for px, py in table_trajectory]
 
                     state = GameState(
                         ai_x=ai_current_pos[0],
@@ -354,8 +315,8 @@ def run_vision(args):
                     ai_current_pos[0] += (target[0] - ai_current_pos[0]) * smooth_alpha
                     ai_current_pos[1] += (target[1] - ai_current_pos[1]) * smooth_alpha
 
-                    tx, ty = rink_to_pixel(decision.target_x, decision.target_y, roi)
-                    ai_target_pixel = (round(tx), round(ty))
+                    target_raw_x, target_raw_y = camera_geometry.table_to_raw(decision.target_x, decision.target_y)
+                    ai_target_pixel = (round(target_raw_x), round(target_raw_y))
 
                     status_text = (
                         f"FPS {display_fps:.1f} | 校正 {correction_status} | "
@@ -366,13 +327,12 @@ def run_vision(args):
 
                 marked = annotate(
                     frame.image, 
-                    roi, 
+                    table_roi, 
                     detection, 
                     track, 
                     ai_target_pixel, 
                     display_fps, 
                     pixel_trajectory,
-                    pipeline_roi=vision_pipeline.roi
                 )
 
                 with preview_lock:
