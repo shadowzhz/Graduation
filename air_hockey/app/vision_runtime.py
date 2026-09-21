@@ -1,7 +1,7 @@
 """实时视觉运行核心。
 
 统一单向数据流：
-相机帧 -> 检测(CurlingState) -> Tracker -> 坐标转换 -> 轨迹预测(CurlingState) -> AI 决策。
+相机帧 -> Detector(CurlingState) -> Tracker -> KalmanFilter(状态估计) -> CurlingState -> Predictor(PredictionState) -> AI 决策。
 每处理一帧返回明确的 VisionResult，完全与 GUI 和显示层解耦。
 """
 
@@ -15,6 +15,7 @@ from .. import core_config as core
 from ..ai import AirHockeyAI
 from ..camera.types import Frame
 from game_state import CurlingState, GameState, StoneState
+from ..estimation import KalmanFilter
 from ..prediction import PredictionState, TrajectoryPredictor
 from ..vision import StoneDetector, VisionPipeline
 from ..vision.tracker import StoneTracker, TrackState
@@ -60,7 +61,7 @@ def track_to_rink_state(track: Track, rink_x: float, rink_y: float, rink_vx: flo
 class VisionRuntime:
     """实时视觉处理运行时。
 
-    负责：相机帧 -> 检测 -> Tracker -> 坐标转换 -> 轨迹预测 -> AI 决策。
+    负责：相机帧 -> Detector -> Tracker -> KalmanFilter -> CurlingState -> Predictor -> AI 决策。
     每处理一帧返回明确的 VisionResult 对象，不负责 GUI 显示或绘制。
     """
 
@@ -75,6 +76,7 @@ class VisionRuntime:
         detection_interval: int = DETECTION_INTERVAL,
         detector: Optional[StoneDetector] = None,
         tracker: Optional[StoneTracker] = None,
+        kalman: Optional[KalmanFilter] = None,
         predictor: Optional[TrajectoryPredictor] = None,
         ai: Optional[AirHockeyAI] = None,
         vision_pipeline: Optional[VisionPipeline] = None,
@@ -91,6 +93,7 @@ class VisionRuntime:
             min_circularity=0.65,
         )
         self.tracker = tracker or StoneTracker(max_missed_frames=self.detection_interval * 4)
+        self.kalman = kalman or KalmanFilter()
         self.predictor = predictor or TrajectoryPredictor()
         self.ai = ai or AirHockeyAI(predictor=self.predictor)
 
@@ -170,21 +173,24 @@ class VisionRuntime:
             # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
             undist_x, undist_y = self.camera_geometry.raw_to_undistorted(track.center_x, track.center_y)
             table_x, table_y = self.camera_geometry.undistorted_to_table(undist_x, undist_y)
-            table_vx, table_vy = self.camera_geometry.raw_velocity_to_table(
-                track.center_x, track.center_y, track.vx, track.vy
-            )
 
-            # 统一状态：Tracker 的轨迹 + 已转换的球台坐标 + 检测置信度
-            curling = CurlingState(
-                x=table_x,
-                y=table_y,
-                vx=table_vx,
-                vy=table_vy,
-                timestamp=track.last_timestamp,
-                confidence=track.confidence,
-                radius=track.radius,
-            )
-            stone = track_to_rink_state(track, table_x, table_y, table_vx, table_vy)
+            # 状态估计层：KalmanFilter 平滑位置/速度，输出统一 CurlingState
+            # 有检测则用观测校正，检测间隔帧则按模型外推
+            if detection is not None:
+                curling = self.kalman.update(
+                    table_x,
+                    table_y,
+                    track.last_timestamp,
+                    confidence=track.confidence,
+                    radius=track.radius,
+                )
+            else:
+                curling = self.kalman.predict(
+                    track.last_timestamp,
+                    confidence=track.confidence,
+                    radius=track.radius,
+                )
+            stone = track_to_rink_state(track, curling.x, curling.y, curling.vx, curling.vy)
 
             # 预测数据层：业务层只与 PredictionState 交互，不再直接传递裸点列表
             prediction_state = self.predictor.predict(curling)
@@ -220,6 +226,9 @@ class VisionRuntime:
             self.ai_current_pos[1] += (self.target[1] - self.ai_current_pos[1]) * smooth_alpha
 
             ai_target = (decision.target_x, decision.target_y)
+        else:
+            # 轨迹丢失时清空估计器，避免下一个冰壶被旧状态污染
+            self.kalman.reset()
 
         self.frame_ms = self.frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
 
