@@ -72,7 +72,7 @@ class GStreamerBackend:
             width = caps.get_value("width")
             height = caps.get_value("height")
             frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 4))
-            return True, frame[:, :, :3].copy()
+            return True, cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
         finally:
             buffer.unmap(map_info)
 
