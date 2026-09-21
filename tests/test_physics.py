@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 
-import air_hockey_config as layout
+import core_config as layout
 from air_hockey_physics import (
     StoneMotion,
     clamp,
@@ -295,3 +295,67 @@ def test_vision_sim_ai_share_same_prediction_core():
 
     assert vision_traj == sim_traj
     assert vision_traj == ai_traj
+
+
+def test_gui_scale_change_does_not_affect_physics_and_predictor():
+    """验证调整 GUI UI_SCALE 后，共享物理参数和 Predictor 结果不发生变化。"""
+    import air_hockey_config as gui_config
+    import core_config as core
+
+    # 1. 记录共享物理核心配置快照
+    initial_params = {
+        "RINK_LEFT": core.RINK_LEFT,
+        "RINK_RIGHT": core.RINK_RIGHT,
+        "RINK_TOP": core.RINK_TOP,
+        "RINK_BOTTOM": core.RINK_BOTTOM,
+        "RINK_CENTER_X": core.RINK_CENTER_X,
+        "RINK_CENTER_Y": core.RINK_CENTER_Y,
+        "STONE_RADIUS": core.STONE_RADIUS,
+        "MALLET_RADIUS": core.MALLET_RADIUS,
+        "GOAL_LEFT": core.GOAL_LEFT,
+        "GOAL_RIGHT": core.GOAL_RIGHT,
+        "MAX_STONE_SPEED": core.MAX_STONE_SPEED,
+        "STONE_STOP_SPEED": core.STONE_STOP_SPEED,
+        "STONE_FRICTION_DECELERATION": core.STONE_FRICTION_DECELERATION,
+        "MIN_WALL_BOUNCE_SPEED": core.MIN_WALL_BOUNCE_SPEED,
+        "WALL_RESTITUTION": core.WALL_RESTITUTION,
+    }
+
+    # 2. 预测器在原始状态下的预测结果
+    predictor = TrajectoryPredictor()
+    stone = StoneState(x=300.0, y=400.0, vx=200.0, vy=-150.0)
+    base_traj = predictor.predict(stone)
+
+    orig_ui_scale = gui_config.UI_SCALE
+    orig_canvas_w = gui_config.CANVAS_WIDTH
+    orig_canvas_h = gui_config.CANVAS_HEIGHT
+
+    try:
+        # 3. 模拟 GUI 屏幕缩放（例如缩小到 0.6 或调用响应式布局计算）
+        class MockScreenRoot:
+            @staticmethod
+            def winfo_screenwidth():
+                return 400
+
+            @staticmethod
+            def winfo_screenheight():
+                return 400
+
+        gui_config._apply_responsive_layout(MockScreenRoot())
+        assert gui_config.UI_SCALE < 1.0, "GUI 缩放应小于 1.0"
+        assert gui_config.CANVAS_WIDTH < core.BASE_CANVAS_WIDTH
+
+        # 4. 验证共享物理参数完全未发生变化
+        for param, expected_val in initial_params.items():
+            actual_val = getattr(core, param)
+            assert actual_val == expected_val, f"物理参数 {param} 受到 GUI 缩放影响: {actual_val} != {expected_val}"
+
+        # 5. 验证 Predictor 预测结果 100% 保持一致
+        scaled_gui_traj = predictor.predict(stone)
+        assert scaled_gui_traj == base_traj, "GUI 缩放导致 Predictor 输出结果发生变化"
+
+    finally:
+        gui_config.UI_SCALE = orig_ui_scale
+        gui_config.CANVAS_WIDTH = orig_canvas_w
+        gui_config.CANVAS_HEIGHT = orig_canvas_h
+

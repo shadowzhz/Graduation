@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import time
 from typing import Any, Optional
 
-import air_hockey_config as layout
+import core_config as core
 from air_hockey_ai import AirHockeyAI
 from camera.types import Frame
 from game_state import GameState, StoneState
@@ -21,7 +21,7 @@ from vision.tracker import StoneTracker, TrackState
 from vision.types import Detection, ROI, Track
 
 DETECTION_INTERVAL = 3
-AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
+AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
 
 
 @dataclass
@@ -89,7 +89,7 @@ class VisionRuntime:
                 calibration_file=calibration_file,
                 enabled=not disable_undistort,
                 table_roi=self.table_roi,
-                rink_bounds=(layout.RINK_LEFT, layout.RINK_RIGHT, layout.RINK_TOP, layout.RINK_BOTTOM),
+                rink_bounds=(core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM),
             )
             self.camera_geometry = self.vision_pipeline.geometry
 
@@ -100,10 +100,10 @@ class VisionRuntime:
         self.frame_ms = 0.0
 
         self.ai_home_y = AI_HOME_Y
-        self.target = [layout.RINK_CENTER_X, self.ai_home_y]
+        self.target = [core.RINK_CENTER_X, self.ai_home_y]
         self.reaction_timer = 0.0
         self.stalled_phase = "idle"
-        self.ai_current_pos = [layout.RINK_CENTER_X, self.ai_home_y]
+        self.ai_current_pos = [core.RINK_CENTER_X, self.ai_home_y]
 
     def process_frame(self, frame: Frame) -> VisionResult:
         """处理单帧：检测/追踪预测 -> 坐标转换 -> 轨迹预测 -> AI 决策。"""
@@ -173,7 +173,7 @@ class VisionRuntime:
                 serve_phase="idle",
                 stalled_stone_phase=self.stalled_phase,
                 reaction_timer=self.reaction_timer,
-                difficulty=layout.DIFFICULTIES["普通"],
+                difficulty=core.DIFFICULTIES["普通"],
             )
 
             decision = self.ai.update(state, dt)

@@ -18,7 +18,38 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "air_hockey"))
 
-from air_hockey_config import *
+import air_hockey_config as gui_config
+import core_config as core
+from core_config import (
+    COLLISION_EPSILON,
+    DIFFICULTIES,
+    FRAME_INTERVAL_MS,
+    GOAL_DEPTH,
+    GOAL_LEFT,
+    GOAL_POST_RADIUS,
+    GOAL_POST_RESTITUTION,
+    GOAL_POSTS,
+    GOAL_RIGHT,
+    MALLET_RADIUS,
+    MALLET_RESTITUTION,
+    MAX_FRAME_GAP,
+    MAX_FRAME_TIME,
+    MAX_PHYSICS_STEP,
+    PLAYER_IMPACT_SPEED_SCALE,
+    AI_IMPACT_SPEED_SCALE,
+    PLAYER_MAX_SPEED,
+    PREDICTION_COLOR,
+    PREDICTION_DISPLAY_SMOOTHING,
+    PREDICTION_REFRESH_INTERVAL,
+    RINK_BOTTOM,
+    RINK_CENTER_X,
+    RINK_CENTER_Y,
+    RINK_LEFT,
+    RINK_RIGHT,
+    RINK_TOP,
+    STONE_RADIUS,
+    STONE_STOP_SPEED,
+)
 from air_hockey_ai import AIDecision, AirHockeyAI
 from air_hockey_physics import (
     StoneMotion,
@@ -33,8 +64,9 @@ from prediction import TrajectoryPredictor
 
 
 class AirHockeyGame:
-    def __init__(self, root: tk.Tk, plc_ip: str = None) -> None:
+    def __init__(self, root: tk.Tk, plc_ip: str = None, ui_scale: float = None) -> None:
         self.root = root
+        self.ui_scale = float(ui_scale if ui_scale is not None else gui_config.UI_SCALE)
         self.predictor = TrajectoryPredictor()
         self.ai_controller = AirHockeyAI(predictor=self.predictor)
         self.closed = False
@@ -106,7 +138,7 @@ class AirHockeyGame:
         title_box.pack(side="left")
         tk.Label(title_box, text="虚拟空气冰壶", bg="#0b2239", fg="#ffffff", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
         tk.Label(title_box, text="红方电脑在上 · 蓝方玩家在下", bg="#0b2239", fg="#9fc6df", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(2, 0))
-        tk.Label(title_box, textvariable=self.status_header_var, bg="#0b2239", fg="#f5cf70", font=("Microsoft YaHei UI", 9, "bold"), anchor="w", wraplength=max(240, int(CANVAS_WIDTH * 0.58))).pack(anchor="w", pady=(2, 0))
+        tk.Label(title_box, textvariable=self.status_header_var, bg="#0b2239", fg="#f5cf70", font=("Microsoft YaHei UI", 9, "bold"), anchor="w", wraplength=max(240, int(gui_config.CANVAS_WIDTH * 0.58))).pack(anchor="w", pady=(2, 0))
         score_box = tk.Frame(title_row, bg="#0b2239")
         score_box.pack(side="right")
         tk.Label(score_box, text="玩家          电脑", bg="#0b2239", fg="#9fc6df", font=("Microsoft YaHei UI", 9)).pack()
@@ -123,38 +155,41 @@ class AirHockeyGame:
         button_box.pack(side="right")
         tk.Button(button_box, textvariable=self.start_button_var, command=self.toggle_pause, width=10, relief="flat", bd=0, bg="#18a7d6", activebackground="#36b9e3", fg="#ffffff", activeforeground="#ffffff", font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2").pack(side="left", padx=(0, 8))
         tk.Button(button_box, text="重新开局", command=self.reset_match, width=9, relief="flat", bd=0, bg="#274c69", activebackground="#356685", fg="#ffffff", activeforeground="#ffffff", font=("Microsoft YaHei UI", 10), cursor="hand2").pack(side="left")
-        self.canvas = tk.Canvas(self.root, width=CANVAS_WIDTH, height=CANVAS_HEIGHT, bg="#dff4fc", highlightthickness=0, cursor="arrow")
+        self.canvas = tk.Canvas(self.root, width=gui_config.CANVAS_WIDTH, height=gui_config.CANVAS_HEIGHT, bg="#dff4fc", highlightthickness=0, cursor="arrow")
         self.canvas.pack(padx=20, pady=(0, 7))
         self._draw_rink()
-        tk.Label(self.root, text="按住左键拖动：控制球槌    预测线：预测轨迹    空格：开始/暂停    R：重新开局", bg="#0b2239", fg="#86adc5", font=("Microsoft YaHei UI", 9), wraplength=CANVAS_WIDTH).pack(pady=(0, 12))
+        tk.Label(self.root, text="按住左键拖动：控制球槌    预测线：预测轨迹    空格：开始/暂停    R：重新开局", bg="#0b2239", fg="#86adc5", font=("Microsoft YaHei UI", 9), wraplength=gui_config.CANVAS_WIDTH).pack(pady=(0, 12))
 
     def _draw_rink(self) -> None:
         c = self.canvas
-        scale = UI_SCALE
+        scale = self.ui_scale
         line_width_4 = max(1, round(4 * scale))
         line_width_3 = max(1, round(3 * scale))
         line_width_2 = max(1, round(2 * scale))
-        goal_ranges = ((RINK_TOP - GOAL_DEPTH, RINK_TOP), (RINK_BOTTOM, RINK_BOTTOM + GOAL_DEPTH))
+        goal_ranges = (
+            ((RINK_TOP - GOAL_DEPTH) * scale, RINK_TOP * scale),
+            (RINK_BOTTOM * scale, (RINK_BOTTOM + GOAL_DEPTH) * scale),
+        )
         for y1, y2 in goal_ranges:
-            c.create_rectangle(GOAL_LEFT, y1, GOAL_RIGHT, y2, fill="#c7e8f4", outline="#e84b5f", width=line_width_4)
+            c.create_rectangle(GOAL_LEFT * scale, y1, GOAL_RIGHT * scale, y2, fill="#c7e8f4", outline="#e84b5f", width=line_width_4)
         for y1, y2 in goal_ranges:
-            for x in range(int(GOAL_LEFT + 14 * scale), int(GOAL_RIGHT), max(1, round(16 * scale))):
+            for x in range(int((GOAL_LEFT + 14) * scale), int(GOAL_RIGHT * scale), max(1, round(16 * scale))):
                 c.create_line(x, y1, x, y2, fill="#98c6d7")
-        c.create_rectangle(RINK_LEFT, RINK_TOP, RINK_RIGHT, RINK_BOTTOM, fill="#edfaff", outline="#167ca8", width=max(1, round(5 * scale)))
-        c.create_line(RINK_LEFT + 3 * scale, RINK_CENTER_Y, RINK_RIGHT - 3 * scale, RINK_CENTER_Y, fill="#e45b69", width=line_width_4)
-        c.create_oval(RINK_CENTER_X - 82 * scale, RINK_CENTER_Y - 82 * scale, RINK_CENTER_X + 82 * scale, RINK_CENTER_Y + 82 * scale, outline="#55aacf", width=line_width_3)
-        c.create_oval(RINK_CENTER_X - 7 * scale, RINK_CENTER_Y - 7 * scale, RINK_CENTER_X + 7 * scale, RINK_CENTER_Y + 7 * scale, fill="#e45b69", outline="")
-        for y in (RINK_TOP + 205 * scale, RINK_BOTTOM - 205 * scale):
-            c.create_line(RINK_LEFT + 3 * scale, y, RINK_RIGHT - 3 * scale, y, fill="#7cc5df", width=line_width_2)
-            for x in (RINK_CENTER_X - 145 * scale, RINK_CENTER_X + 145 * scale):
+        c.create_rectangle(RINK_LEFT * scale, RINK_TOP * scale, RINK_RIGHT * scale, RINK_BOTTOM * scale, fill="#edfaff", outline="#167ca8", width=max(1, round(5 * scale)))
+        c.create_line((RINK_LEFT + 3) * scale, RINK_CENTER_Y * scale, (RINK_RIGHT - 3) * scale, RINK_CENTER_Y * scale, fill="#e45b69", width=line_width_4)
+        c.create_oval((RINK_CENTER_X - 82) * scale, (RINK_CENTER_Y - 82) * scale, (RINK_CENTER_X + 82) * scale, (RINK_CENTER_Y + 82) * scale, outline="#55aacf", width=line_width_3)
+        c.create_oval((RINK_CENTER_X - 7) * scale, (RINK_CENTER_Y - 7) * scale, (RINK_CENTER_X + 7) * scale, (RINK_CENTER_Y + 7) * scale, fill="#e45b69", outline="")
+        for y in ((RINK_TOP + 205) * scale, (RINK_BOTTOM - 205) * scale):
+            c.create_line((RINK_LEFT + 3) * scale, y, (RINK_RIGHT - 3) * scale, y, fill="#7cc5df", width=line_width_2)
+            for x in ((RINK_CENTER_X - 145) * scale, (RINK_CENTER_X + 145) * scale):
                 c.create_oval(x - 29 * scale, y - 29 * scale, x + 29 * scale, y + 29 * scale, outline="#7cc5df", width=line_width_2)
                 c.create_oval(x - 5 * scale, y - 5 * scale, x + 5 * scale, y + 5 * scale, fill="#e45b69", outline="")
-        for y, text in ((RINK_TOP + 25 * scale, "电脑半场"), (RINK_BOTTOM - 25 * scale, "玩家半场")):
-            c.create_text(RINK_CENTER_X, y, text=text, fill="#5b9fbd", font=("Microsoft YaHei UI", max(8, round(11 * scale)), "bold"))
+        for y, text in (((RINK_TOP + 25) * scale, "电脑半场"), ((RINK_BOTTOM - 25) * scale, "玩家半场")):
+            c.create_text(RINK_CENTER_X * scale, y, text=text, fill="#5b9fbd", font=("Microsoft YaHei UI", max(8, round(11 * scale)), "bold"))
         self.prediction_line_item = c.create_line(0, 0, 0, 0, fill=PREDICTION_COLOR, width=max(2, round(3.2 * scale)), capstyle=tk.BUTT, joinstyle=tk.ROUND, state="hidden")
-        self.player_item = c.create_oval(0, 0, 0, 0, fill="#118fc5", outline="#075e83", width=4)
-        self.ai_item = c.create_oval(0, 0, 0, 0, fill="#eb4f5d", outline="#9f2633", width=4)
-        self.stone_item = c.create_oval(0, 0, 0, 0, fill="#172b3b", outline="#07121b", width=3)
+        self.player_item = c.create_oval(0, 0, 0, 0, fill="#118fc5", outline="#075e83", width=max(1, round(4 * scale)))
+        self.ai_item = c.create_oval(0, 0, 0, 0, fill="#eb4f5d", outline="#9f2633", width=max(1, round(4 * scale)))
+        self.stone_item = c.create_oval(0, 0, 0, 0, fill="#172b3b", outline="#07121b", width=max(1, round(3 * scale)))
         self.player_glint = c.create_oval(0, 0, 0, 0, fill="#76d1ee", outline="")
         self.ai_glint = c.create_oval(0, 0, 0, 0, fill="#ff9ca5", outline="")
 
@@ -170,8 +205,8 @@ class AirHockeyGame:
         self.root.bind("3", lambda _event: self._set_difficulty("困难"))
 
     def _update_mouse_target(self, event) -> None:
-        self.mouse_target_x = float(event.x)
-        self.mouse_target_y = float(event.y)
+        self.mouse_target_x = float(event.x) / self.ui_scale
+        self.mouse_target_y = float(event.y) / self.ui_scale
 
     def _mouse_pressed(self, event) -> None:
         self._update_mouse_target(event)
@@ -255,7 +290,7 @@ class AirHockeyGame:
         else:
             player_min_y = RINK_CENTER_Y + MALLET_RADIUS
             if server == "ai":
-                player_min_y += STONE_RADIUS + 8 * UI_SCALE
+                player_min_y += STONE_RADIUS + 8.0
             self.player_x = clamp(previous_player_position[0], RINK_LEFT + MALLET_RADIUS, RINK_RIGHT - MALLET_RADIUS)
             self.player_y = clamp(previous_player_position[1], player_min_y, RINK_BOTTOM - MALLET_RADIUS)
         self.player_vx = self.player_vy = 0.0
@@ -324,7 +359,7 @@ class AirHockeyGame:
         target_x = clamp(target_x, RINK_LEFT + MALLET_RADIUS, RINK_RIGHT - MALLET_RADIUS)
         player_min_y = RINK_CENTER_Y + MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "ai":
-            player_min_y = RINK_CENTER_Y + MALLET_RADIUS + STONE_RADIUS + 8 * UI_SCALE
+            player_min_y = RINK_CENTER_Y + MALLET_RADIUS + STONE_RADIUS + 8.0
         target_y = clamp(target_y, player_min_y, RINK_BOTTOM - MALLET_RADIUS)
         self.player_x, self.player_y, self.player_vx, self.player_vy = self._move_towards(self.player_x, self.player_y, target_x, target_y, PLAYER_MAX_SPEED, dt)
         self.player_x, self.player_y, self.player_vx, self.player_vy = self._resolve_mallet_goal_posts(self.player_x, self.player_y, self.player_vx, self.player_vy)
@@ -336,7 +371,7 @@ class AirHockeyGame:
         ai_min_y = RINK_TOP + MALLET_RADIUS
         ai_max_y = RINK_CENTER_Y - MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "player":
-            ai_max_y = RINK_CENTER_Y - MALLET_RADIUS - STONE_RADIUS - 8 * UI_SCALE
+            ai_max_y = RINK_CENTER_Y - MALLET_RADIUS - STONE_RADIUS - 8.0
             self.ai_y = min(self.ai_y, ai_max_y)
         self.ai_target_y = clamp(self.ai_target_y, ai_min_y, ai_max_y)
         self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._move_towards(self.ai_x, self.ai_y, self.ai_target_x, self.ai_target_y, difficulty.ai_speed, dt)
@@ -606,8 +641,8 @@ class AirHockeyGame:
         cached_vx, cached_vy, cached_target_vx, cached_target_vy = self.prediction_cache_velocity
         velocity_delta = math.hypot(stone.vx - cached_vx, stone.vy - cached_vy)
         target_delta = math.hypot(stone.target_vx - cached_target_vx, stone.target_vy - cached_target_vy)
-        reference_speed = max(math.hypot(cached_vx, cached_vy), math.hypot(cached_target_vx, cached_target_vy), UI_SCALE)
-        cache_state_changed = stone.response_active != self.prediction_cache_response_active or velocity_delta > max(10.0 * UI_SCALE, reference_speed * 0.25) or target_delta > max(10.0 * UI_SCALE, reference_speed * 0.25)
+        reference_speed = max(math.hypot(cached_vx, cached_vy), math.hypot(cached_target_vx, cached_target_vy), 1.0)
+        cache_state_changed = stone.response_active != self.prediction_cache_response_active or velocity_delta > max(10.0, reference_speed * 0.25) or target_delta > max(10.0, reference_speed * 0.25)
         if self.prediction_cache_age >= PREDICTION_REFRESH_INTERVAL or cache_state_changed:
             self.prediction_cache = self._calculate_predicted_trajectory()
             self.prediction_cache_origin = (stone.x, stone.y)
@@ -625,7 +660,7 @@ class AirHockeyGame:
             self.prediction_display_points = [(display_x + (target_x - display_x) * blend, display_y + (target_y - display_y) * blend) for (display_x, display_y), (target_x, target_y) in zip(self.prediction_display_points, target_points)]
         predicted_points = [(stone.x + point_x, stone.y + point_y) for point_x, point_y in self.prediction_display_points]
         path_points = [(stone.x, stone.y)]
-        minimum_render_distance = max(1.5, 2.5 * UI_SCALE)
+        minimum_render_distance = 2.5
         for point_x, point_y in predicted_points:
             last_x, last_y = path_points[-1]
             if (point_x - last_x) ** 2 + (point_y - last_y) ** 2 >= minimum_render_distance ** 2:
@@ -636,7 +671,7 @@ class AirHockeyGame:
                 self.canvas.itemconfigure(self.prediction_line_item, state="hidden")
                 self.prediction_line_visible = False
             return
-        coordinates = [coordinate for point in path_points for coordinate in point]
+        coordinates = [coordinate * self.ui_scale for point in path_points for coordinate in point]
         self.canvas.coords(self.prediction_line_item, *coordinates)
         if not self.prediction_line_visible:
             self.canvas.itemconfigure(self.prediction_line_item, state="normal")
@@ -652,7 +687,8 @@ class AirHockeyGame:
         return traj
 
     def _position_circle(self, item, x, y, radius) -> None:
-        self.canvas.coords(item, x - radius, y - radius, x + radius, y + radius)
+        s = self.ui_scale
+        self.canvas.coords(item, (x - radius) * s, (y - radius) * s, (x + radius) * s, (y + radius) * s)
 
     def _close(self) -> None:
         if self.closed:
@@ -665,13 +701,12 @@ class AirHockeyGame:
                 pass
             finally:
                 self.game_loop_id = None
-        if self.plc:
-            self.plc.disconnect()
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
-
+            if self.plc:
+                self.plc.disconnect()
+            try:
+                self.root.destroy()
+            except tk.TclError:
+                pass
 
 def main():
     parser = argparse.ArgumentParser()
@@ -684,10 +719,9 @@ def main():
         if os.path.exists(xauthority) and not os.environ.get("XAUTHORITY"):
             os.environ["XAUTHORITY"] = xauthority
     root = tk.Tk()
-    configure_responsive_layout(root)
-    sync_layout_globals(globals())
+    gui_config.configure_responsive_layout(root)
     AirHockeyGame(root, plc_ip=args.plc)
-    center_window(root)
+    gui_config.center_window(root)
     root.mainloop()
 
 

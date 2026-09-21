@@ -25,7 +25,8 @@ sys.path.insert(0, str(VISION_ROOT))
 sys.path.insert(0, str(SIMULATION_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import air_hockey_config as layout
+import air_hockey_config as gui_config
+import core_config as layout
 from air_hockey_ai import AIDecision, AirHockeyAI
 from air_hockey_physics import StoneMotion, goal_scorer
 from game_state import GameState, StoneState
@@ -141,8 +142,8 @@ class TkVisualizer:
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.canvas = tk.Canvas(
             self.root,
-            width=round(layout.CANVAS_WIDTH),
-            height=round(layout.CANVAS_HEIGHT),
+            width=round(gui_config.CANVAS_WIDTH),
+            height=round(gui_config.CANVAS_HEIGHT),
             background="#f2faff",
             highlightthickness=0,
         )
@@ -191,7 +192,7 @@ class OpenCVVisualizer:
         self.closed = False
 
     def draw(self, stone, track, target, path) -> None:
-        image = self.np.full((int(layout.CANVAS_HEIGHT), int(layout.CANVAS_WIDTH), 3), (242, 250, 255), dtype=self.np.uint8)
+        image = self.np.full((int(gui_config.CANVAS_HEIGHT), int(gui_config.CANVAS_WIDTH), 3), (242, 250, 255), dtype=self.np.uint8)
         self.cv2.rectangle(image, (int(layout.RINK_LEFT), int(layout.RINK_TOP)), (int(layout.RINK_RIGHT), int(layout.RINK_BOTTOM)), (180, 130, 40), 2)
         if len(path) > 1:
             self.cv2.polylines(image, [self.np.asarray(path, dtype=self.np.int32)], False, (0, 190, 0), 2)
