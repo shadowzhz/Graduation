@@ -53,6 +53,7 @@ def test_vision_runtime_dataflow_track_to_ai():
     runtime = VisionRuntime(
         table_roi=(350, 0, 580, 650),
         calibration_file=str(CALIB_FILE),
+        table_calibration_file=None,
         disable_undistort=True,
         detector=detector,
     )
@@ -112,6 +113,7 @@ def test_vision_runtime_without_detection():
     runtime = VisionRuntime(
         table_roi=(350, 0, 580, 650),
         calibration_file=str(CALIB_FILE),
+        table_calibration_file=None,
         disable_undistort=True,
         detector=detector,
     )

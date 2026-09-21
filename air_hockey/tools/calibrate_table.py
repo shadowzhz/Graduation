@@ -108,8 +108,10 @@ class CornerCollector:
         return view
 
 
-def save_homography(geometry: CameraGeometry, raw_points, output: Path) -> None:
+def save_homography(geometry: CameraGeometry, raw_points, image_size, output: Path) -> None:
     """把 4 个 raw 角点转换到 undistorted 并求解 undistorted -> table 的 Homography。"""
+    if image_size is None:
+        raise SystemExit("缺少标定图像分辨率，无法保存 Homography")
     raw = np.asarray(raw_points, dtype=np.float64)
     undistorted = np.array(
         [geometry.raw_to_undistorted(px, py) for px, py in raw],
@@ -125,8 +127,10 @@ def save_homography(geometry: CameraGeometry, raw_points, output: Path) -> None:
         homography_matrix=homography.astype(np.float64),
         raw_points=raw,
         undistorted_points=undistorted.astype(np.float64),
+        image_size=np.asarray(image_size, dtype=np.int32),
     )
     print(f"已保存: {output}")
+    print(f"标定分辨率: {int(image_size[0])}x{int(image_size[1])}")
     print("homography_matrix (undistorted -> table):")
     print(homography)
 
@@ -161,7 +165,7 @@ def main():
             if len(collector.points) != len(CORNER_LABELS):
                 print(f"还需要点击 {len(CORNER_LABELS) - len(collector.points)} 个角点")
                 continue
-            save_homography(geometry, collector.points, output)
+            save_homography(geometry, collector.points, geometry.image_size, output)
             break
         if cv2.getWindowProperty(collector.window, cv2.WND_PROP_VISIBLE) < 1:
             break
