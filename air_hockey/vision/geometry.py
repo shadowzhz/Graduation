@@ -122,6 +122,9 @@ class CameraGeometry:
 
         path 为 None 时返回 None（走旧 ROI 线性映射）；path 非 None 但文件不存在
         时直接抛 FileNotFoundError，不做静默 fallback。
+
+        image_size 为必填项：旧版 Homography 文件缺少该字段会让 homography_image_size
+        变成 None，从而静默绕过运行分辨率检查，因此这里直接拒绝。
         """
         if table_calibration_file is None:
             return None
@@ -129,9 +132,19 @@ class CameraGeometry:
         if not path.is_file():
             raise FileNotFoundError(f"table calibration file not found: {table_calibration_file}")
         with np.load(path) as data:
+            if "image_size" not in data.files:
+                raise ValueError(
+                    f"table calibration file {table_calibration_file} is missing required 'image_size'; "
+                    "regenerate it with air_hockey/tools/calibrate_table.py"
+                )
             homography_matrix = data["homography_matrix"]
-            raw_size = data.get("image_size")
-            image_size = tuple(int(v) for v in raw_size) if raw_size is not None else None
+            raw_size = data["image_size"]
+        image_size = tuple(int(v) for v in np.asarray(raw_size).ravel())
+        if len(image_size) != 2:
+            raise ValueError(f"image_size must contain exactly 2 values (width, height), got {raw_size}")
+        width, height = image_size
+        if width <= 0 or height <= 0:
+            raise ValueError(f"image_size width and height must be positive, got {raw_size}")
         return homography_matrix, image_size
 
     def set_homography(
