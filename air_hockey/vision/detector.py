@@ -5,6 +5,8 @@ from math import inf, pi        # inf 代表无穷大
 
 import cv2
 
+from game_state import CurlingState
+
 from ..camera.types import Frame
 
 from .preprocess import crop_roi, external_contours, morphology, threshold, validate_bgr
@@ -37,7 +39,7 @@ class StoneDetector:
 
     # 拿一帧图像尝试找冰壶，新增 dynamic_roi 参数
     def detect(self, frame, dynamic_roi=None):
-        """跑一遍检测管线，返回得分最高的候选，找不到返回 None。"""
+        """跑一遍检测管线，返回得分最高候选对应的 CurlingState，找不到返回 None。"""
         # 优先使用动态 ROI，如果没有传动态 ROI（比如刚启动或跟丢了），则使用全局自定的 self.roi
         current_roi = dynamic_roi if dynamic_roi is not None else self.roi
         
@@ -83,7 +85,9 @@ class StoneDetector:
         if not candidates:
             return None
         # 分数相同取面积大的
-        return max(candidates, key=lambda item: (item[0], item[1].area))[1]
+        best = max(candidates, key=lambda item: (item[0], item[1].area))[1]
+        # 对外统一成 CurlingState，不再直接暴露散落的坐标字段
+        return CurlingState.from_detection(best)
 
     # 给候选冰壶评分
     def _score_candidate(self, detection):

@@ -105,7 +105,7 @@ def annotate(frame_image, detection):
     center = (round(detection.center_x), round(detection.center_y))
     cv2.circle(output, center, round(detection.radius), (0, 255, 0), 3)
     cv2.drawMarker(output, center, (0, 0, 255), cv2.MARKER_CROSS, 24, 3)
-    label = f"r={detection.radius:.1f} score={detection.score:.3f}"
+    label = f"r={detection.radius:.1f} confidence={detection.confidence:.3f}"
     cv2.putText(
         output,
         label,
@@ -245,7 +245,7 @@ def update_statistics():
             detection_value.config(text="已找到")
             center_value.config(text=f"({detection.center_x:.1f}, {detection.center_y:.1f})")
             radius_value.config(text=f"{detection.radius:.1f}")
-            score_value.config(text=f"{detection.score:.3f}")
+            score_value.config(text=f"{detection.confidence:.3f}")
     root.after(FPS_UPDATE_MS, update_statistics)
 
 
@@ -300,7 +300,7 @@ tk.Label(right_panel, text="检测结果", font=("Microsoft YaHei", 15, "bold"))
 detection_value = create_row(right_panel, "目标", "无")
 center_value = create_row(right_panel, "中心", "-")
 radius_value = create_row(right_panel, "半径", "-")
-score_value = create_row(right_panel, "Score", "-")
+score_value = create_row(right_panel, "Confidence", "-")
 
 button_frame = tk.Frame(right_panel)
 button_frame.pack(pady=(22, 0))

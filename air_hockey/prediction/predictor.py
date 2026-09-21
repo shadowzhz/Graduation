@@ -2,6 +2,8 @@
 
 视觉与仿真共用此预测核心，遵循同一套物理规则（摩擦阻尼、四周边界反弹、球门开口穿透、球门柱碰撞与停止速度）。
 物理常量统一在运行时从 core_config 获取，无任何硬编码 fallback。
+
+状态统一使用 CurlingState 描述，状态转换集中在 CurlingState.from_any，预测器本身不再重复解析坐标。
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from typing import Any, Sequence
 
 from .. import core_config as core
 from ..physics import StoneMotion, goal_scorer
+from game_state import CurlingState
 
 
 class TrajectoryPredictor:
@@ -43,6 +46,10 @@ class TrajectoryPredictor:
         obstacles: Sequence[tuple[float, float]] = (),
         obstacle_radius: float | None = None,
     ) -> list[tuple[float, float]]:
+        """输入统一冰壶状态，返回按 PREDICTION_POINT_INTERVAL 采样的预测轨迹点。
+
+        stone_or_x 可以是 CurlingState（视觉/控制侧）、StoneMotion（仿真侧）或裸坐标。
+        """
         substep = self._substep if self._substep is not None else core.PREDICTION_SUBSTEP
         point_interval = self._point_interval if self._point_interval is not None else core.PREDICTION_POINT_INTERVAL
         max_points = self._max_points if self._max_points is not None else core.PREDICTION_POINT_COUNT
@@ -105,24 +112,41 @@ class TrajectoryPredictor:
 
         return trajectory
 
+    def predict_endpoint(
+        self,
+        stone_or_x: Any,
+        y: float | None = None,
+        vx: float | None = None,
+        vy: float | None = None,
+        *,
+        obstacles: Sequence[tuple[float, float]] = (),
+        obstacle_radius: float | None = None,
+    ) -> tuple[float, float]:
+        """输入统一冰壶状态，返回预测轨迹的终点（冰壶最终停在/离场的位置）。"""
+        trajectory = self.predict(
+            stone_or_x,
+            y,
+            vx,
+            vy,
+            obstacles=obstacles,
+            obstacle_radius=obstacle_radius,
+        )
+        return trajectory[-1]
+
     @staticmethod
     def _normalize_stone(stone_or_x: Any, y: float | None = None, vx: float | None = None, vy: float | None = None) -> StoneMotion:
-        if y is not None:
-            return StoneMotion(
-                x=float(stone_or_x),
-                y=float(y),
-                vx=float(vx or 0.0),
-                vy=float(vy or 0.0),
-            )
+        # 仿真侧的 StoneMotion 自带目标速度/响应状态，直接复制保留。
         if isinstance(stone_or_x, StoneMotion):
             return replace(stone_or_x)
+        # 其余（CurlingState / 裸坐标）统一走 CurlingState 归一化，避免各调用点重复转换。
+        state = CurlingState.from_any(stone_or_x, y, vx, vy)
         return StoneMotion(
-            x=float(stone_or_x.x),
-            y=float(stone_or_x.y),
-            vx=float(stone_or_x.vx),
-            vy=float(stone_or_x.vy),
-            target_vx=float(getattr(stone_or_x, "target_vx", stone_or_x.vx)),
-            target_vy=float(getattr(stone_or_x, "target_vy", stone_or_x.vy)),
+            x=state.x,
+            y=state.y,
+            vx=state.vx,
+            vy=state.vy,
+            target_vx=float(getattr(stone_or_x, "target_vx", state.vx)),
+            target_vy=float(getattr(stone_or_x, "target_vy", state.vy)),
             response_active=bool(getattr(stone_or_x, "response_active", False)),
         )
 

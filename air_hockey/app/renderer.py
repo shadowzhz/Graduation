@@ -46,6 +46,19 @@ def render(result: VisionResult, table_roi: Sequence[int], camera_geometry) -> n
             alpha = max(60, 255 - i * 6)
             cv2.circle(output, (round(px), round(py)), 2, (alpha, 170, 70), -1)
 
+    # 轨迹调试：在预测终点画一个三角标记，与 AI 目标十字区分
+    if result.trajectory_debug is not None:
+        ex, ey = result.trajectory_debug.predicted_endpoint
+        end_px, end_py = camera_geometry.table_to_raw(ex, ey)
+        cv2.drawMarker(
+            output,
+            (round(end_px), round(end_py)),
+            (0, 165, 255),
+            cv2.MARKER_TRIANGLE_UP,
+            18,
+            2,
+        )
+
     if result.ai_target is not None:
         tx, ty = camera_geometry.table_to_raw(result.ai_target[0], result.ai_target[1])
         cv2.drawMarker(
@@ -70,10 +83,16 @@ def format_status(result: VisionResult, correction_enabled: bool = False) -> str
             if result.ai_target is not None
             else "none"
         )
+        # 轨迹调试信息：当前坐标 / 速度方向 / 预测终点
+        debug_str = ""
+        if result.trajectory_debug is not None:
+            direction_x, direction_y = result.trajectory_debug.direction
+            end_x, end_y = result.trajectory_debug.predicted_endpoint
+            debug_str = f"| 方向 ({direction_x:.2f}, {direction_y:.2f}) | 预测终点 ({end_x:.0f}, {end_y:.0f}) "
         return (
             f"FPS {result.fps:.1f} | 校正 {corr_status} | "
             f"追踪 {result.track.state.value} | 位置 ({result.stone_state.x:.0f}, {result.stone_state.y:.0f}) "
             f"| 速度 ({result.stone_state.vx:.0f}, {result.stone_state.vy:.0f}) | "
-            f"AI 目标 {target_str}"
+            f"{debug_str}AI 目标 {target_str}"
         )
     return f"FPS {result.fps:.1f} | 校正 {corr_status} | 未检测到冰壶"

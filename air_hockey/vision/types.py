@@ -62,3 +62,4 @@ class Track:
     age: int = 1
     missed_frames: int = 0
     state: TrackState = TrackState.ACTIVE
+    confidence: float = 0.0
