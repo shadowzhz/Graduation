@@ -35,9 +35,6 @@ class VisionResult:
     trajectory: Optional[list[tuple[float, float]]] = None
     ai_target: Optional[tuple[float, float]] = None
     fps: float = 0.0
-    pixel_trajectory: Optional[list[tuple[float, float]]] = None
-    ai_target_pixel: Optional[tuple[int, int]] = None
-    status_text: str = ""
 
 
 def track_to_rink_state(track: Track, rink_x: float, rink_y: float, rink_vx: float, rink_vy: float) -> StoneState:
@@ -148,17 +145,9 @@ class VisionRuntime:
 
         track = tracks[0] if tracks else None
 
-        correction_status = (
-            "ON"
-            if self.camera_geometry.enabled and self.camera_geometry.camera_matrix is not None
-            else "OFF"
-        )
-        status_text = f"FPS {self.display_fps:.1f} | 校正 {correction_status} | 未检测到冰壶"
         stone = None
         table_trajectory = None
-        pixel_trajectory = None
         ai_target = None
-        ai_target_pixel = None
 
         if track is not None:
             # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
@@ -171,8 +160,6 @@ class VisionRuntime:
             stone = track_to_rink_state(track, table_x, table_y, table_vx, table_vy)
 
             table_trajectory = self.predictor.predict(stone)
-            if table_trajectory and len(table_trajectory) > 1:
-                pixel_trajectory = [self.camera_geometry.table_to_raw(px, py) for px, py in table_trajectory]
 
             state = GameState(
                 ai_x=self.ai_current_pos[0],
@@ -198,16 +185,7 @@ class VisionRuntime:
             self.ai_current_pos[0] += (self.target[0] - self.ai_current_pos[0]) * smooth_alpha
             self.ai_current_pos[1] += (self.target[1] - self.ai_current_pos[1]) * smooth_alpha
 
-            target_raw_x, target_raw_y = self.camera_geometry.table_to_raw(decision.target_x, decision.target_y)
-            ai_target_pixel = (round(target_raw_x), round(target_raw_y))
             ai_target = (decision.target_x, decision.target_y)
-
-            status_text = (
-                f"FPS {self.display_fps:.1f} | 校正 {correction_status} | "
-                f"追踪 {track.state.value} | 位置 ({stone.x:.0f}, {stone.y:.0f}) "
-                f"| 速度 ({stone.vx:.0f}, {stone.vy:.0f}) | "
-                f"AI 目标 ({self.target[0]:.0f}, {self.target[1]:.0f})"
-            )
 
         self.frame_ms = self.frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
 
@@ -219,7 +197,4 @@ class VisionRuntime:
             trajectory=table_trajectory,
             ai_target=ai_target,
             fps=self.display_fps,
-            pixel_trajectory=pixel_trajectory,
-            ai_target_pixel=ai_target_pixel,
-            status_text=status_text,
         )
