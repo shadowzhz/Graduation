@@ -1,15 +1,15 @@
 import math
 from pathlib import Path
 
-import core_config as layout
-from physics import (
+from air_hockey import core_config as layout
+from air_hockey.physics import (
     StoneMotion,
     clamp,
     goal_scorer,
     stone_inside_goal_mouth,
 )
 from game_state import GameState, StoneState
-from prediction import TrajectoryPredictor, predict_trajectory
+from air_hockey.prediction import TrajectoryPredictor, predict_trajectory
 
 
 def test_clamp():
@@ -243,7 +243,7 @@ def test_predictor_reads_core_config_at_runtime():
 
 def test_ai_uses_shared_predictor_without_independent_physics():
     """验证 AI 不再保留任何独立物理公式（无 _reflect_coordinate），统一使用 TrajectoryPredictor。"""
-    import ai
+    from air_hockey import ai
 
     # 模块和类中绝无 _reflect_coordinate
     assert not hasattr(ai, "_reflect_coordinate")
@@ -273,7 +273,7 @@ def test_ai_uses_shared_predictor_without_independent_physics():
 
 def test_vision_sim_ai_share_same_prediction_core():
     """验证视觉、仿真、AI 对相同状态使用同一预测核心，轨迹 100% 一致。"""
-    import ai
+    from air_hockey import ai
 
     vision_predictor = TrajectoryPredictor()
     sim_predictor = TrajectoryPredictor()

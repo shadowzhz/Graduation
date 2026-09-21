@@ -5,7 +5,7 @@ from math import inf, pi        # inf 代表无穷大
 
 import cv2
 
-from camera.types import Frame
+from ..camera.types import Frame
 
 from .preprocess import crop_roi, external_contours, morphology, threshold, validate_bgr
 from .types import Detection, ROI

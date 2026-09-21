@@ -1,5 +1,5 @@
 from game_state import GameState, StoneState, TrackingState
-from vision.types import Track, TrackState
+from air_hockey.vision.types import Track, TrackState
 
 
 def make_track(state=TrackState.ACTIVE):

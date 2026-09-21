@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, field
 
-import core_config as core
+from . import core_config as core
 
 
 def clamp(value, low, high):

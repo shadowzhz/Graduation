@@ -7,11 +7,11 @@ frame -> detection -> track -> table StoneState -> predictor -> AI
 from pathlib import Path
 import numpy as np
 
-from app.vision_runtime import VisionResult, VisionRuntime, track_to_rink_state
-from camera.types import Frame
+from air_hockey.app.vision_runtime import VisionResult, VisionRuntime, track_to_rink_state
+from air_hockey.camera.types import Frame
 from game_state import StoneState
-from vision.tracker import StoneTracker
-from vision.types import Detection, TrackState
+from air_hockey.vision.tracker import StoneTracker
+from air_hockey.vision.types import Detection, TrackState
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 

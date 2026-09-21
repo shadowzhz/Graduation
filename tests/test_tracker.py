@@ -1,5 +1,5 @@
-from vision.tracker import StoneTracker
-from vision.types import Detection
+from air_hockey.vision.tracker import StoneTracker
+from air_hockey.vision.types import Detection
 
 
 def make_detection(x, y, t, radius=25.0):

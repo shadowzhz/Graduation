@@ -2,10 +2,10 @@
 
 import numpy as np
 
-from app.renderer import format_status, render
-from app.vision_runtime import VisionResult
-from camera.types import Frame
-from vision.types import Detection, Track, TrackState
+from air_hockey.app.renderer import format_status, render
+from air_hockey.app.vision_runtime import VisionResult
+from air_hockey.camera.types import Frame
+from air_hockey.vision.types import Detection, Track, TrackState
 
 
 class MockGeometry:

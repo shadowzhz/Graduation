@@ -6,8 +6,7 @@ import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-for path in (ROOT, ROOT / "air_hockey"):
-    sys.path.insert(0, str(path))
+sys.path.insert(0, str(ROOT))
 
 passed = failed = 0
 failures = []

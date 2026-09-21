@@ -16,11 +16,10 @@ from tkinter import ttk
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "air_hockey"))
 
 import air_hockey_config as gui_config
-import core_config as core
-from core_config import (
+from air_hockey import core_config as core
+from air_hockey.core_config import (
     COLLISION_EPSILON,
     DIFFICULTIES,
     FRAME_INTERVAL_MS,
@@ -50,8 +49,8 @@ from core_config import (
     STONE_RADIUS,
     STONE_STOP_SPEED,
 )
-from ai import AIDecision, AirHockeyAI
-from physics import (
+from air_hockey.ai import AIDecision, AirHockeyAI
+from air_hockey.physics import (
     StoneMotion,
     circle_post_contact,
     clamp,
@@ -60,7 +59,7 @@ from physics import (
 )
 from game_state import GameState, StoneState, TrackingState
 from plc_interface import PLCInterface
-from prediction import TrajectoryPredictor
+from air_hockey.prediction import TrajectoryPredictor
 
 
 class AirHockeyGame:

@@ -7,7 +7,7 @@ from typing import Sequence
 import cv2
 import numpy as np
 
-from app.vision_runtime import VisionResult
+from .vision_runtime import VisionResult
 
 
 def render(result: VisionResult, table_roi: Sequence[int], camera_geometry) -> np.ndarray:
