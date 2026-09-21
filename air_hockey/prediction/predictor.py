@@ -1,7 +1,7 @@
 """统一轨迹预测物理核心。
 
 视觉与仿真共用此预测核心，遵循同一套物理规则（摩擦阻尼、四周边界反弹、球门开口穿透、球门柱碰撞与停止速度）。
-物理常量统一在运行时从 air_hockey_config 获取，确保响应式缩放后参数正确，无任何硬编码 fallback。
+物理常量统一在运行时从 core_config 获取，无任何硬编码 fallback。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any, Sequence
 
 import core_config as core
-from air_hockey_physics import StoneMotion, goal_scorer
+from physics import StoneMotion, goal_scorer
 
 
 class TrajectoryPredictor:

@@ -12,7 +12,7 @@ import time
 from typing import Any, Optional
 
 import core_config as core
-from air_hockey_ai import AirHockeyAI
+from ai import AirHockeyAI
 from camera.types import Frame
 from game_state import GameState, StoneState
 from prediction import TrajectoryPredictor

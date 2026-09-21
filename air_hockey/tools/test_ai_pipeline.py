@@ -27,8 +27,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import air_hockey_config as gui_config
 import core_config as layout
-from air_hockey_ai import AIDecision, AirHockeyAI
-from air_hockey_physics import StoneMotion, goal_scorer
+from ai import AIDecision, AirHockeyAI
+from physics import StoneMotion, goal_scorer
 from game_state import GameState, StoneState
 from vision.tracker import StoneTracker
 from vision.types import Detection, Track

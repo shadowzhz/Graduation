@@ -14,13 +14,11 @@ import tkinter as tk
 import cv2
 
 
-# 视觉工程、根目录（共享的 game_state）、仿真工程都在搜索路径里
+# 视觉工程、根目录（共享的 game_state）都在搜索路径里
 SCRIPT_DIR = Path(__file__).resolve().parent
 VISION_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = VISION_ROOT.parent
-SIMULATION_ROOT = PROJECT_ROOT / "冰壶仿真"
 sys.path.insert(0, str(VISION_ROOT))
-sys.path.insert(0, str(SIMULATION_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from camera import CameraConfig, CameraManager
