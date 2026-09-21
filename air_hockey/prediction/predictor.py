@@ -4,6 +4,8 @@
 物理常量统一在运行时从 air_hockey_config 获取，确保响应式缩放后参数正确，无任何硬编码 fallback。
 """
 
+from __future__ import annotations
+
 import math
 from dataclasses import replace
 from typing import Any, Sequence

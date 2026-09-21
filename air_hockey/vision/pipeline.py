@@ -1,7 +1,7 @@
 """视觉帧处理管线。"""
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from camera.types import Frame
 from .geometry import CameraGeometry
@@ -15,7 +15,7 @@ class VisionPipeline:
 
     def __init__(
         self,
-        calibration_file: Optional[str or Path] = None,
+        calibration_file: Optional[Union[str, Path]] = None,
         enabled: bool = True,
         table_roi: Optional[Tuple[float, float, float, float]] = None,
         rink_bounds: Optional[Tuple[float, float, float, float]] = None,

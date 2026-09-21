@@ -9,7 +9,7 @@
 """
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -50,7 +50,7 @@ class CameraGeometry:
     @classmethod
     def from_calibration_file(
         cls,
-        calibration_file: Optional[str or Path],
+        calibration_file: Optional[Union[str, Path]],
         rink_bounds: Tuple[float, float, float, float],
         table_roi: Optional[Tuple[float, float, float, float]] = None,
         enabled: bool = True,
