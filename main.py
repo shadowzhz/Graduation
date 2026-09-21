@@ -6,9 +6,9 @@
     python main.py --sim                # 仿真模式：启动冰壶仿真游戏（也可写作 --game）
 
 线程分工：
-    主线程    Tk mainloop + 显示定时器
-    处理线程  取最新帧 -> VisionRuntime 处理 -> 标注
-    编码线程  最新标注帧 -> 缩放 -> PPM（按预览帧率限速）
+    主线程    Tk mainloop + 显示定时器（GUI 模式）/ 等待退出（headless 模式）
+    处理线程  取最新帧 -> VisionRuntime 处理 -> （GUI 模式：render 标注与共享）
+    编码线程  最新标注帧 -> 缩放 -> PPM（按预览帧率限速，仅 GUI 模式）
 """
 
 import argparse
@@ -28,6 +28,7 @@ sys.path.insert(0, str(VISION_ROOT))
 import cv2
 import tkinter as tk
 
+from app.renderer import render
 from app.vision_runtime import VisionRuntime
 from camera import CameraManager
 
@@ -40,42 +41,6 @@ def run_game():
     subprocess.run([sys.executable, str(SIM_ROOT / "air_hockey.py")], cwd=str(SIM_ROOT))
 
 
-def annotate(image, table_roi, detection, track, ai_target_pixel, display_fps, trajectory=None):
-    """可视化绘制函数。
-
-    全程统一使用 raw pixel，无需人工添加任何偏移。
-    """
-    output = image.copy()
-
-    rx, ry, rw, rh = table_roi
-    cv2.rectangle(output, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
-
-    if detection is not None:
-        center = (round(detection.center_x), round(detection.center_y))
-        cv2.circle(output, center, max(1, round(detection.radius)), (0, 255, 0), 2)
-        cv2.circle(output, center, 3, (0, 255, 0), -1)
-
-    if track is not None:
-        center = (round(track.center_x), round(track.center_y))
-        end = (round(track.center_x + track.vx * 0.1), round(track.center_y + track.vy * 0.1))
-        cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
-
-    if trajectory and len(trajectory) > 1:
-        for i in range(len(trajectory) - 1):
-            pt1 = (round(trajectory[i][0]), round(trajectory[i][1]))
-            pt2 = (round(trajectory[i + 1][0]), round(trajectory[i + 1][1]))
-            fade = max(50, 255 - i * 6)
-            line_color = (fade, int(fade * 0.75), 50)
-            cv2.line(output, pt1, pt2, line_color, 2, cv2.LINE_AA)
-        for i, (px, py) in enumerate(trajectory):
-            alpha = max(60, 255 - i * 6)
-            cv2.circle(output, (round(px), round(py)), 2, (alpha, 170, 70), -1)
-
-    if ai_target_pixel is not None:
-        cv2.drawMarker(output, (ai_target_pixel[0], ai_target_pixel[1]), (255, 0, 255), cv2.MARKER_CROSS, 28, 3)
-
-    cv2.putText(output, f"FPS {display_fps:.1f}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    return output
 
 
 class VisionWindow:
@@ -143,8 +108,20 @@ def run_vision(args):
     headless = args.headless
 
     window = None
+    preview_lock = None
+    shared = None
+
     if not headless:
         window = VisionWindow()
+        preview_lock = threading.Lock()
+        shared = {
+            "img": None,
+            "img_seq": -1,
+            "ppm": None,
+            "ppm_seq": 0,
+            "status": "等待画面",
+            "fatal": None,
+        }
 
     runtime = VisionRuntime(
         table_roi=tuple(args.roi),
@@ -169,24 +146,14 @@ def run_vision(args):
     print(f"  calibration: {args.calibration}")
     print(f"  undistort: {'校正开启' if not args.disable_undistort else '校正关闭'}")
 
-    preview_lock = threading.Lock()
-    shared = {
-        "img": None,
-        "img_seq": -1,
-        "ppm": None,
-        "ppm_seq": 0,
-        "status": "等待画面",
-        "fatal": None,
-    }
-
     stop = threading.Event()
 
     def processing_loop():
-        """处理线程：取最新帧 -> VisionRuntime 处理 -> 标注。"""
+        """处理线程：取最新帧 -> VisionRuntime 处理 -> （GUI 模式：render 标注与共享）。"""
         last_sequence = -1
         stats_timer = time.perf_counter()
 
-        window_closed = lambda: window.closed if window is not None else False
+        window_closed = (lambda: window.closed) if window is not None else (lambda: False)
 
         try:
             while not stop.is_set() and not window_closed():
@@ -198,20 +165,12 @@ def run_vision(args):
 
                 result = runtime.process_frame(frame)
 
-                marked = annotate(
-                    result.frame.image,
-                    runtime.table_roi,
-                    result.detection,
-                    result.track,
-                    result.ai_target_pixel,
-                    result.fps,
-                    result.pixel_trajectory,
-                )
-
-                with preview_lock:
-                    shared["img"] = marked
-                    shared["img_seq"] = result.frame.sequence
-                    shared["status"] = result.status_text + "    Q / ESC 退出"
+                if not headless:
+                    marked = render(result, runtime.table_roi)
+                    with preview_lock:
+                        shared["img"] = marked
+                        shared["img_seq"] = result.frame.sequence
+                        shared["status"] = result.status_text + "    Q / ESC 退出"
 
                 stats_interval = 1.0 if headless else STATS_INTERVAL
                 if time.perf_counter() - stats_timer >= stats_interval:
@@ -231,8 +190,9 @@ def run_vision(args):
                         )
         except Exception as exc:
             traceback.print_exc()
-            with preview_lock:
-                shared["fatal"] = f"处理线程异常退出：{exc!r}"
+            if preview_lock is not None and shared is not None:
+                with preview_lock:
+                    shared["fatal"] = f"处理线程异常退出：{exc!r}"
         finally:
             stop.set()
 
