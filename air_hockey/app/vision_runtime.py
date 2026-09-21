@@ -1,7 +1,7 @@
 """实时视觉运行核心。
 
 统一单向数据流：
-相机帧 -> 检测 -> Tracker -> 坐标转换 -> 轨迹预测 -> AI 决策。
+相机帧 -> 检测(CurlingState) -> Tracker -> 坐标转换 -> 轨迹预测(CurlingState) -> AI 决策。
 每处理一帧返回明确的 VisionResult，完全与 GUI 和显示层解耦。
 """
 
@@ -14,7 +14,7 @@ from typing import Optional
 from .. import core_config as core
 from ..ai import AirHockeyAI
 from ..camera.types import Frame
-from game_state import GameState, StoneState
+from game_state import CurlingState, GameState, StoneState
 from ..prediction import TrajectoryPredictor
 from ..vision import StoneDetector, VisionPipeline
 from ..vision.tracker import StoneTracker, TrackState
@@ -25,6 +25,15 @@ AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
 
 
 @dataclass
+class TrajectoryDebug:
+    """轨迹调试信息：当前坐标、速度方向、预测终点。"""
+
+    position: tuple[float, float]
+    direction: tuple[float, float]
+    predicted_endpoint: tuple[float, float]
+
+
+@dataclass
 class VisionResult:
     """单帧视觉与 AI 处理的完整结果快照。"""
 
@@ -32,7 +41,9 @@ class VisionResult:
     detection: Optional[Detection] = None
     track: Optional[Track] = None
     stone_state: Optional[StoneState] = None
+    curling_state: Optional[CurlingState] = None
     trajectory: Optional[list[tuple[float, float]]] = None
+    trajectory_debug: Optional[TrajectoryDebug] = None
     ai_target: Optional[tuple[float, float]] = None
     fps: float = 0.0
 
@@ -148,7 +159,9 @@ class VisionRuntime:
         track = tracks[0] if tracks else None
 
         stone = None
+        curling = None
         table_trajectory = None
+        trajectory_debug = None
         ai_target = None
 
         if track is not None:
@@ -159,9 +172,25 @@ class VisionRuntime:
                 track.center_x, track.center_y, track.vx, track.vy
             )
 
+            # 统一状态：Tracker 的轨迹 + 已转换的球台坐标 + 检测置信度
+            curling = CurlingState(
+                x=table_x,
+                y=table_y,
+                vx=table_vx,
+                vy=table_vy,
+                timestamp=track.last_timestamp,
+                confidence=track.confidence,
+                radius=track.radius,
+            )
             stone = track_to_rink_state(track, table_x, table_y, table_vx, table_vy)
 
-            table_trajectory = self.predictor.predict(stone)
+            table_trajectory = self.predictor.predict(curling)
+            endpoint = self.predictor.predict_endpoint(curling)
+            trajectory_debug = TrajectoryDebug(
+                position=curling.position,
+                direction=curling.direction,
+                predicted_endpoint=endpoint,
+            )
 
             state = GameState(
                 ai_x=self.ai_current_pos[0],
@@ -196,7 +225,9 @@ class VisionRuntime:
             detection=detection,
             track=track,
             stone_state=stone,
+            curling_state=curling,
             trajectory=table_trajectory,
+            trajectory_debug=trajectory_debug,
             ai_target=ai_target,
             fps=self.display_fps,
         )

@@ -62,7 +62,7 @@ def annotate(image, detection, roi):
     radius = round(detection.radius)
     cv2.circle(output, center, radius, (0, 255, 0), 2)
     cv2.drawMarker(output, center, (0, 0, 255), cv2.MARKER_CROSS, 18, 2)
-    label = f"r={detection.radius:.1f} score={detection.score:.3f}"
+    label = f"r={detection.radius:.1f} confidence={detection.confidence:.3f}"
     text_origin = (max(0, center[0] - radius), max(24, center[1] - radius - 8))
     cv2.putText(output, label, text_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
     return output
@@ -96,8 +96,7 @@ def main():
     print(
         "Detection: "
         f"center=({detection.center_x:.1f}, {detection.center_y:.1f}), "
-        f"radius={detection.radius:.1f}, area={detection.area:.1f}, "
-        f"circularity={detection.circularity:.3f}, score={detection.score:.3f}"
+        f"radius={detection.radius:.1f}, confidence={detection.confidence:.3f}"
     )
     print(f"结果图: {output_path}")
     return 0

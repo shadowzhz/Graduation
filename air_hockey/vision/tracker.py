@@ -8,6 +8,11 @@ from math import hypot
 from .types import Detection, Track, TrackState
 
 
+def _detection_confidence(detection) -> float:
+    """检测结果可能是 CurlingState(confidence) 或 Detection(score)。"""
+    return float(getattr(detection, "confidence", 0.0) or getattr(detection, "score", 0.0))
+
+
 class StoneTracker:
     """常速模型预测 + 速度指数平滑的单目标跟踪器。"""
 
@@ -92,6 +97,7 @@ class StoneTracker:
             vx=0.0,
             vy=0.0,
             last_timestamp=detection.timestamp,
+            confidence=_detection_confidence(detection),
         )
         self._next_track_id += 1
         return track
@@ -109,6 +115,7 @@ class StoneTracker:
         track.center_y = detection.center_y
         track.radius = detection.radius
         track.last_timestamp = detection.timestamp
+        track.confidence = _detection_confidence(detection)
         track.age += 1
         track.missed_frames = 0
         track.state = TrackState.ACTIVE
