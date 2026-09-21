@@ -16,11 +16,11 @@ from pathlib import Path
 import numpy as np
 
 from game_state import StoneState
-from vision.detector import StoneDetector
-from vision.geometry import CameraGeometry
-from vision.pipeline import VisionPipeline
-from vision.tracker import StoneTracker, TrackState
-from vision.types import Detection, ROI
+from air_hockey.vision.detector import StoneDetector
+from air_hockey.vision.geometry import CameraGeometry
+from air_hockey.vision.pipeline import VisionPipeline
+from air_hockey.vision.tracker import StoneTracker, TrackState
+from air_hockey.vision.types import Detection, ROI
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 

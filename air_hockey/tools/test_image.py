@@ -10,10 +10,10 @@ from pathlib import Path
 
 import cv2
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from camera.types import Frame
-from vision import ROI, StoneDetector
+from air_hockey.camera.types import Frame
+from air_hockey.vision import ROI, StoneDetector
 
 
 def _int_triplet(values):

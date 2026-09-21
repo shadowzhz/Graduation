@@ -15,11 +15,11 @@ from tkinter import messagebox
 import cv2
 
 # Keep direct execution (``python3 tools/test_detection.py``) convenient.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from camera import CameraConfig, CameraManager
-from camera.types import Frame
-from vision import Detection, ROI, StoneDetector
+from air_hockey.camera import CameraConfig, CameraManager
+from air_hockey.camera.types import Frame
+from air_hockey.vision import Detection, ROI, StoneDetector
 
 
 PREVIEW_WIDTH, PREVIEW_HEIGHT = 960, 540

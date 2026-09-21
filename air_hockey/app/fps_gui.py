@@ -8,7 +8,7 @@ from tkinter import messagebox
 
 import cv2
 
-from camera import CameraConfig, CameraManager
+from ..camera import CameraConfig, CameraManager
 
 CAMERA_CONFIG = CameraConfig()
 BENCHMARK_MODE = "--benchmark" in sys.argv

@@ -14,18 +14,16 @@ import tkinter as tk
 import cv2
 
 
-# 视觉工程、根目录（共享的 game_state）都在搜索路径里
+# 项目根目录（air_hockey 包与共享的 game_state 都在这里）
 SCRIPT_DIR = Path(__file__).resolve().parent
-VISION_ROOT = SCRIPT_DIR.parent
-PROJECT_ROOT = VISION_ROOT.parent
-sys.path.insert(0, str(VISION_ROOT))
+PROJECT_ROOT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from camera import CameraConfig, CameraManager
+from air_hockey.camera import CameraConfig, CameraManager
 from game_state import GameState, StoneState
-from vision import StoneDetector
-from vision.tracker import StoneTracker
-from vision.types import Detection, Track
+from air_hockey.vision import StoneDetector
+from air_hockey.vision.tracker import StoneTracker
+from air_hockey.vision.types import Detection, Track
 
 
 def build_parser() -> argparse.ArgumentParser:

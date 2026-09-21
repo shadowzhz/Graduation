@@ -4,10 +4,10 @@ import math
 import random
 from dataclasses import dataclass, replace
 
-import core_config as core
-from physics import clamp
+from . import core_config as core
+from .physics import clamp
 from game_state import GameState
-from prediction import TrajectoryPredictor
+from .prediction import TrajectoryPredictor
 
 AI_SERVE_SETUP_GAP = 6.0
 

@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from camera.types import Frame
+from ..camera.types import Frame
 from .geometry import CameraGeometry
 
 

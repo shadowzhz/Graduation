@@ -20,16 +20,14 @@ import traceback
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent  # 找到 main.py 所在文件夹
-VISION_ROOT = PROJECT_ROOT / "air_hockey"       # 视觉代码
 SIM_ROOT = PROJECT_ROOT / "冰壶仿真"             # 仿真代码（仅 --sim 子进程使用）
-sys.path.insert(0, str(VISION_ROOT))
 
 import cv2
 import tkinter as tk
 
-from app.renderer import format_status, render
-from app.vision_runtime import VisionRuntime
-from camera import CameraManager
+from air_hockey.app.renderer import format_status, render
+from air_hockey.app.vision_runtime import VisionRuntime
+from air_hockey.camera import CameraManager
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
 STATS_INTERVAL = 5.0        # 统计间隔

@@ -9,16 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import time
-from typing import Any, Optional
+from typing import Optional
 
-import core_config as core
-from ai import AirHockeyAI
-from camera.types import Frame
+from .. import core_config as core
+from ..ai import AirHockeyAI
+from ..camera.types import Frame
 from game_state import GameState, StoneState
-from prediction import TrajectoryPredictor
-from vision import StoneDetector, VisionPipeline
-from vision.tracker import StoneTracker, TrackState
-from vision.types import Detection, ROI, Track
+from ..prediction import TrajectoryPredictor
+from ..vision import StoneDetector, VisionPipeline
+from ..vision.tracker import StoneTracker, TrackState
+from ..vision.types import Detection, ROI, Track
 
 DETECTION_INTERVAL = 3
 AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28

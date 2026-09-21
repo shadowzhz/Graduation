@@ -4,11 +4,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-for path in (ROOT, ROOT / "air_hockey"):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from prediction import TrajectoryPredictor
+from air_hockey.prediction import TrajectoryPredictor
 
 
 def main():

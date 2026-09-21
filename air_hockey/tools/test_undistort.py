@@ -4,11 +4,14 @@
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
 
-from calibration import Undistorter
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from air_hockey.calibration import Undistorter
 
 
 def main():

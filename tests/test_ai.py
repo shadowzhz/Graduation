@@ -1,7 +1,7 @@
 from dataclasses import replace
 
-import core_config as layout
-from ai import AirHockeyAI
+from air_hockey import core_config as layout
+from air_hockey.ai import AirHockeyAI
 from game_state import GameState, StoneState
 
 # 关掉瞄准误差，决策才可复现
@@ -41,7 +41,7 @@ def test_stone_behind_ai_does_not_chase():
 
 def test_defense_uses_injected_predictor():
     # 注入不同参数的预测器，防守预测的目标横坐标必须不同
-    from prediction import TrajectoryPredictor
+    from air_hockey.prediction import TrajectoryPredictor
 
     state = make_state(300.0, 500.0, vx=60.0, vy=-80.0)
     normal = AirHockeyAI().choose_target(state)

@@ -10,8 +10,8 @@ import math
 from dataclasses import replace
 from typing import Any, Sequence
 
-import core_config as core
-from physics import StoneMotion, goal_scorer
+from .. import core_config as core
+from ..physics import StoneMotion, goal_scorer
 
 
 class TrajectoryPredictor:

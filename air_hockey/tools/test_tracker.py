@@ -8,11 +8,11 @@ import time
 
 import cv2
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from camera import CameraConfig, CameraManager
-from vision import StoneDetector
-from vision.tracker import StoneTracker
+from air_hockey.camera import CameraConfig, CameraManager
+from air_hockey.vision import StoneDetector
+from air_hockey.vision.tracker import StoneTracker
 
 
 def parse_args():
