@@ -35,8 +35,8 @@ from prediction import TrajectoryPredictor
 class AirHockeyGame:
     def __init__(self, root: tk.Tk, plc_ip: str = None) -> None:
         self.root = root
-        self.ai_controller = AirHockeyAI()
         self.predictor = TrajectoryPredictor()
+        self.ai_controller = AirHockeyAI(predictor=self.predictor)
         self.closed = False
         self.game_loop_id = None
         self.player_score = self.ai_score = 0

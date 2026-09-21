@@ -7,16 +7,7 @@ from dataclasses import dataclass, replace
 import air_hockey_config as layout
 from air_hockey_physics import clamp
 from game_state import GameState
-
-
-def _reflect_coordinate(value: float, low: float, high: float) -> float:
-    span = high - low
-    if span <= 0:
-        return low
-    folded = (value - low) % (2 * span)
-    if folded > span:
-        folded = 2 * span - folded
-    return low + folded
+from prediction import TrajectoryPredictor
 
 
 AI_SERVE_SETUP_GAP = 6.0
@@ -33,13 +24,8 @@ class AIDecision:
 class AirHockeyAI:
     """只根据状态快照给目标，不直接改游戏实体。"""
 
-    def __init__(self, friction_deceleration=None) -> None:
-        # 冰面摩擦衰减；真机上要按实测值传入，默认用仿真参数
-        self.friction_deceleration = (
-            layout.STONE_FRICTION_DECELERATION
-            if friction_deceleration is None
-            else float(friction_deceleration)
-        )
+    def __init__(self, predictor=None) -> None:
+        self.predictor = predictor or TrajectoryPredictor()
         self._random = random.Random()
 
     def update(self, state: GameState, dt: float) -> AIDecision:
@@ -153,20 +139,21 @@ class AirHockeyAI:
             phase,
         )
 
-    def _predict_stone_x(self, state, target_y):
-        """按减速和边墙反射公式预估冰壶到 target_y 横线时的横坐标。"""
-        speed = math.hypot(state.stone.vx, state.stone.vy)
-        if speed <= layout.COLLISION_EPSILON or state.stone.vy >= -layout.COLLISION_EPSILON:
-            return _reflect_coordinate(state.stone.x, layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
-        direction_x = state.stone.vx / speed
-        direction_y = state.stone.vy / speed
-        distance_to_target = (target_y - state.stone.y) / direction_y
-        if distance_to_target <= 0:
-            return _reflect_coordinate(state.stone.x, layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
-        if self.friction_deceleration <= layout.COLLISION_EPSILON:
-            travel_distance = distance_to_target
-        else:
-            stopping_distance = speed * speed / (2.0 * self.friction_deceleration)
-            travel_distance = min(distance_to_target, stopping_distance)
-        projected_x = state.stone.x + direction_x * travel_distance
-        return _reflect_coordinate(projected_x, layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
+    def _predict_stone_x(self, state: GameState, target_y: float) -> float:
+        """从共享 TrajectoryPredictor 的轨迹中获取冰壶到达 target_y 横线附近时的横坐标。"""
+        traj = self.predictor.predict(state.stone)
+        if not traj:
+            return state.stone.x
+        if len(traj) == 1:
+            return traj[0][0]
+
+        for (x0, y0), (x1, y1) in zip(traj[:-1], traj[1:]):
+            if (y0 <= target_y <= y1) or (y1 <= target_y <= y0):
+                dy = y1 - y0
+                if abs(dy) > 1e-9:
+                    t = (target_y - y0) / dy
+                    return x0 + t * (x1 - x0)
+                return (x0 + x1) * 0.5
+
+        closest_point = min(traj, key=lambda pt: abs(pt[1] - target_y))
+        return closest_point[0]

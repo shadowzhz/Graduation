@@ -175,7 +175,8 @@ def run_vision(args):
     )
 
     tracker = StoneTracker(max_missed_frames=DETECTION_INTERVAL * 4)    
-    ai = AirHockeyAI()
+    predictor = TrajectoryPredictor()
+    ai = AirHockeyAI(predictor=predictor)
 
     vision_pipeline = VisionPipeline(
         calibration_file=args.calibration,
@@ -225,7 +226,6 @@ def run_vision(args):
         reaction_timer = 0.0
         stalled_phase = "idle"
         ai_current_pos = [layout.RINK_CENTER_X, AI_HOME_Y]
-        predictor = TrajectoryPredictor()
 
         window_closed = lambda: window.closed if window is not None else False
 
