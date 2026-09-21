@@ -10,17 +10,6 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
-def reflected_coordinate(value, low, high):
-    """把坐标按镜面反射折叠回 [low, high]，预测冰壶反弹位置用。"""
-    span = high - low
-    if span <= 0:
-        return low
-    folded = (value - low) % (2 * span)
-    if folded > span:
-        folded = 2 * span - folded
-    return low + folded
-
-
 def stone_inside_goal_mouth(x):
     return layout.GOAL_LEFT + layout.STONE_RADIUS < x < layout.GOAL_RIGHT - layout.STONE_RADIUS
 
