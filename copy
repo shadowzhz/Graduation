@@ -1,95 +1,36 @@
-未修改任何代码，仓库保持 clean。以下是完整排查证据与结论。
+已完成性能根因定位。
 
-  逐项排查结果
+现在只做一个最小修改，不要重构其他代码。
 
-  1. /dev/video0 支持的模式：MJPG 1920x1080@120、1280x720@200；YUYV
-  1920x1080@5、1280x720@10、640x480@30。200fps 模式确实存在。
-  2. 是否真的跑在 1280x720 MJPG 200：是。--get-fmt-video = MJPG
-  1280x720，--get-parm = 200/1，且 --mode map 实测 197~199 fps，说明
-  200fps 真的跑得动。
-  3. USB 是否 
-  SuperSpeed：否。/sys/bus/usb/devices/1-2.1/version=2.00、speed=480 →
-  USB 2.0 High Speed，且挂在 Realtek USB2 Hub（Bus 01）上；USB3 Hub（Bus
-   02）是空的。但每帧 MJPEG 约 90KB × 200fps ≈ 18MB/s，仍在 USB2
-  等时带宽（~24.5MB/s）内，所以 USB2 够用但不是主因（余量仅约 25%）。
-  4. 曝光：exposure_auto=3（全自动），exposure_absolute
-  flags=inactive，无法读取实际值；但 map=198fps
-  已证明曝光没有把传感器帧率压下来。
-  5. nvpmodel / CPU / GPU / EMC：MODE_20W_6CORE（mode 8）；6 核
-  governor=performance，但 scaling_max=1420800，而 SoC 可用频率到
-  1907200，只有 mode 0/5/6 才放开 1907；GPU 1109MHz、nvv4l2decoder
-  793MHz 都已顶到 cap；EMC 没有 devfreq 节点，jetson_clocks 在本 L4T
-  35.6.5 上静默失效，pre_test.sh 的 devfreq 循环因此根本覆盖不到
-  EMC；温度 35°C，无降频。
-  6. 实际 negotiated caps：image/jpeg 1280x720 framerate=200/1 →
-  nvv4l2decoder 输出 video/x-raw(memory:NVMM) I420 → nvvidconv 输出
-  video/x-raw BGRx 1280x720@200（系统内存）→ appsink。
-  7. decoder/nvvidconv 是否瓶颈：不是。整条管道（含解码+转换）--mode map
-   = 197~199 fps。
-  8. map / bgrx-copy / bgr-copy：map ≈ 198，bgrx-copy ≈ 197，bgr-copy ≈ 
-  67~83（不稳，app 实测 56 一次、80.6 一次）。在 live mapped buffer
-  上测得：
+修改：
+air_hockey/camera/gst_backend.py
 
-  - bgr-take (take([0,1,2],axis=2)) ≈ 186~194
-  - cv2.cvtColor(BGRA2BGR) ≈ 198（首轮 114 预热）
-  - np.ascontiguousarray/copy(order='C') ≈ 92
-  - 只有 [:, :, :3].copy() 掉到 67~83 —— 恰好就是 app 现在用的写法。
+当前：
 
-  1. 代码对比 65ec572 vs HEAD：git diff 65ec572 HEAD -- 
-  air_hockey/camera/ 完全为空；test_gstreamer_transfer.py 的管道在
-  65ec572 也一样；frame[:, :, :3].copy() 自初始提交 48c514e
-  就存在。没有任何代码回归，唯一变化是打包后 import 路径（from camera →
-  from air_hockey.camera）。
+frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 4))
+return True, frame[:, :, :3].copy()
 
-  最可能原因（按可能性排序）
+改为：
 
-  ① 应用层每帧的三通道抽取 frame[:, :, :3].copy()，是唯一的性能天花板
+frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 4))
+return True, cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-  - 证据：同一 live buffer 上，map=198、4 通道整块 copy=197，而 [:, :, 
-  :3].copy() 只有 6783；换成 take/cv2.cvtColor 立刻回到 186198。app 实测
-   56~80 与 bgr-copy 完全吻合。
-  - 机理：这是 stride=4 的非连续视图拷贝，numpy 1.17.4
-  走了低效路径，单核 CPU 密集、cache-line 利用率差；而整块 4 通道 copy
-  走 memcpy，几乎免费。
-  - 下一步验证：  python3 air_hockey/tools/test_gstreamer_transfer.py 
-  --mode map       --duration 10   # 期望 ~199
-      python3 air_hockey/tools/test_gstreamer_transfer.py --mode 
-  bgrx-copy --duration 10   # 期望 ~197
-      python3 air_hockey/tools/test_gstreamer_transfer.py --mode 
-  bgr-copy  --duration 10   # 期望 ~67~83
+原因：
+GStreamer 输出 BGRx。
+实测同一 live buffer：
+map ≈ 198 FPS
+bgrx-copy ≈ 197 FPS
+[:, :, :3].copy() ≈ 67~83 FPS
+cv2.cvtColor(BGRA2BGR) ≈ 198 FPS
 
-  ② CPU 被 nvpmodel mode 8 限在 1420MHz，而可用 
-  1907MHz（−34%）——这解释"以前 100+ 现在 56"
-
-  - 证据：scaling_max_freq=1420800，scaling_available_frequencies 最高
-  1907200；mode 0/5/6 允许 1907，而 /etc/nvpmodel.conf 默认是 mode
-  5。bgr-copy 是单核 CPU 密集（实测 python 150% CPU、单核
-  100%），频率线性影响结果：6783 × 1.34 ≈ 90111，正好跨过 100 这条线。
-  - 下一步验证：  cat 
-  /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq   # 现在 1420800
-      sudo nvpmodel -m 5 && sudo bash air_hockey/tools/pre_test.sh
-      python3 air_hockey/tools/test_camera.py --benchmark --backend 
-  gstreamer --duration 10
-    （注意 mode 5 的 GPU/EMC cap 与 mode 8 不同，测完记得切回 mode 8）
-
-  ③ EMC 频率实际无法锁定（次要）
-
-  - 证据：本机 EMC 没有 devfreq 节点，jetson_clocks 因 emc_iso_cap
-  读取失败静默失效，pre_test.sh 只遍历 /sys/class/devfreq/*/governor
-  因而漏掉 EMC；root 才能读 bpmp/debug/clk/emc/rate。交接文档第 391
-  行也警告过这点。
-  - 但本次瓶颈的拷贝带宽（bgrx-copy 仅约 1.5GB/s）远低于 EMC 上限，所以
-  EMC 不是当前这个瓶颈的直接原因——仍建议按要求锁频。
-  - 下一步验证：  sudo cat /sys/kernel/debug/bpmp/debug/clk/emc/rate
-      sudo cat /sys/kernel/debug/bpmp/debug/clk/emc/max_rate
-
-  明确排除的原因：USB 2.0 带宽（能撑 200fps）、MJPEG
-  硬件解码、nvvidconv、曝光/自动曝光、热降频、以及 camera 代码变更（与
-  65ec572 逐字节一致）。另外顺带发现 --backend v4l2 会 segfault（OpenCV
-  V4L2+MJPG 路径），与本次降速无关但值得单独记录。
-
-  如果要在不改管道的前提下恢复高帧率，最短路径是把
-  gst_backend._read_native 里的 frame[:, :, :3].copy() 换成
-  np.ascontiguousarray/take/cv2.cvtColor（我实测可达
-  186~198fps），并确认 CPU
-  跑在可用最高频——但这属于改代码，等你确认后再动。
+要求：
+1. 只修改这一处性能路径。
+2. 不修改 GStreamer pipeline。
+3. 不修改 CameraManager。
+4. 不修改 nvpmodel 或系统配置。
+5. 不做额外防御性编程。
+6. 修改后运行现有测试。
+7. 运行：
+   python3 air_hockey/tools/test_camera.py --benchmark --backend gstreamer --duration 10
+8. 连续测试 3 次，记录 current / average / max FPS。
+9. 不自动提交 git，测试结果先汇报。
