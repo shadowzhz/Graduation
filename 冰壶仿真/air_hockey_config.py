@@ -1,7 +1,6 @@
 """空气冰壶的场地尺寸和难度配置。"""
 
 import threading
-import tkinter as tk
 from dataclasses import dataclass
 
 

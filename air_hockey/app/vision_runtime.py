@@ -28,7 +28,7 @@ AI_HOME_Y = layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
 class VisionResult:
     """单帧视觉与 AI 处理的完整结果快照。"""
 
-    frame: Any
+    frame: Frame
     detection: Optional[Detection] = None
     track: Optional[Track] = None
     stone_state: Optional[StoneState] = None
