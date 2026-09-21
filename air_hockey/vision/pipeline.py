@@ -19,11 +19,13 @@ class VisionPipeline:
         enabled: bool = True,
         table_roi: Optional[Tuple[float, float, float, float]] = None,
         rink_bounds: Optional[Tuple[float, float, float, float]] = None,
+        table_calibration_file: Optional[Union[str, Path]] = "calibration/table_homography.npz",
     ) -> None:
         self.geometry = CameraGeometry.from_calibration_file(
             calibration_file=calibration_file,
             table_roi=table_roi,
             rink_bounds=rink_bounds,
+            table_calibration_file=table_calibration_file,
             enabled=enabled,
         )
 

@@ -13,8 +13,10 @@
 import math
 from pathlib import Path
 
+import cv2
 import numpy as np
 
+from air_hockey import core_config as core
 from game_state import StoneState
 from air_hockey.vision.detector import StoneDetector
 from air_hockey.vision.geometry import CameraGeometry
@@ -23,6 +25,44 @@ from air_hockey.vision.tracker import StoneTracker, TrackState
 from air_hockey.vision.types import Detection, ROI
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
+
+RINK_BOUNDS = (core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM)
+# 固定的 table 目标点顺序：左上 -> 右上 -> 右下 -> 左下
+RINK_CORNERS = np.array(
+    [
+        [core.RINK_LEFT, core.RINK_TOP],
+        [core.RINK_RIGHT, core.RINK_TOP],
+        [core.RINK_RIGHT, core.RINK_BOTTOM],
+        [core.RINK_LEFT, core.RINK_BOTTOM],
+    ],
+    dtype=np.float32,
+)
+# 透视梯形：去畸变像素平面上的任意四边形，用于验证 Homography 的透视非线性
+TRAPEZOID_SOURCE = np.array(
+    [[120.0, 60.0], [780.0, 90.0], [830.0, 640.0], [90.0, 610.0]],
+    dtype=np.float32,
+)
+
+
+def _make_trapezoid_geometry():
+    """构造启用 Homography 的 CameraGeometry（关闭畸变，raw == undistorted 便于验证）。"""
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
+    geometry = CameraGeometry(
+        rink_bounds=RINK_BOUNDS,
+        homography_matrix=homography,
+        enabled=False,
+    )
+    return geometry, homography
+
+
+def _diagonal_intersection(quad):
+    """四边形对角线 TL-BR 与 TR-BL 的交点。"""
+    (x1, y1), (x2, y2), (x3, y3), (x4, y4) = quad
+    denominator = (x1 - x3) * (y2 - y4) - (y1 - y3) * (x2 - x4)
+    px = ((x1 * y3 - y1 * x3) * (x2 - x4) - (x1 - x3) * (x2 * y4 - y2 * x4)) / denominator
+    py = ((x1 * y3 - y1 * x3) * (y2 - y4) - (y1 - y3) * (x2 * y4 - y2 * x4)) / denominator
+    return px, py
+
 
 
 def test_raw_to_undistorted_and_table():
@@ -258,3 +298,112 @@ def test_distortion_toggle_no_offset():
     rand_x, rand_y = 480.0, 270.0
     ux_off, uy_off = geom_disabled.raw_to_undistorted(rand_x, rand_y)
     assert ux_off == rand_x and uy_off == rand_y
+
+
+def test_homography_corners_map_to_rink_corners():
+    """四个 Homography 角点（undistorted）必须精确映射到 rink 四角（TL -> TR -> BR -> BL）。"""
+    geometry, _homography = _make_trapezoid_geometry()
+    for (sx, sy), (tx, ty) in zip(TRAPEZOID_SOURCE, RINK_CORNERS):
+        mapped_x, mapped_y = geometry.undistorted_to_table(float(sx), float(sy))
+        assert abs(mapped_x - float(tx)) < 1e-3
+        assert abs(mapped_y - float(ty)) < 1e-3
+
+
+def test_homography_center_maps_correctly():
+    """四边形对角线交点（即 rink 中心的原像）必须映射到 rink 中心。"""
+    geometry, _homography = _make_trapezoid_geometry()
+    center_undist_x, center_undist_y = _diagonal_intersection(TRAPEZOID_SOURCE)
+    table_x, table_y = geometry.undistorted_to_table(center_undist_x, center_undist_y)
+    assert abs(table_x - core.RINK_CENTER_X) < 1e-3
+    assert abs(table_y - core.RINK_CENTER_Y) < 1e-3
+
+    # 反方向：table 中心经逆 Homography 后仍回到 table 中心
+    back_x, back_y = geometry.table_to_undistorted(core.RINK_CENTER_X, core.RINK_CENTER_Y)
+    assert abs(back_x - center_undist_x) < 1e-3
+    assert abs(back_y - center_undist_y) < 1e-3
+
+
+def test_homography_undistorted_table_round_trip():
+    """undistorted -> table -> undistorted 往返一致。"""
+    geometry, _homography = _make_trapezoid_geometry()
+    for undist_x, undist_y in ((450.0, 150.0), (300.0, 380.0), (700.0, 500.0)):
+        table_x, table_y = geometry.undistorted_to_table(undist_x, undist_y)
+        back_x, back_y = geometry.table_to_undistorted(table_x, table_y)
+        assert abs(back_x - undist_x) < 1e-6
+        assert abs(back_y - undist_y) < 1e-6
+
+
+def test_homography_raw_table_round_trip():
+    """含畸变校正时，raw -> table -> raw 往返一致。"""
+    base = CameraGeometry.from_calibration_file(CALIB_FILE, rink_bounds=RINK_BOUNDS, enabled=True)
+    raw_quad = np.array([[350.0, 50.0], [930.0, 60.0], [950.0, 620.0], [330.0, 600.0]], dtype=np.float64)
+    undistorted = np.array([base.raw_to_undistorted(px, py) for px, py in raw_quad], dtype=np.float32)
+    homography = cv2.getPerspectiveTransform(undistorted, RINK_CORNERS)
+
+    geometry = CameraGeometry(
+        rink_bounds=RINK_BOUNDS,
+        camera_matrix=base.camera_matrix,
+        dist_coeffs=base.dist_coeffs,
+        image_size=base.image_size,
+        homography_matrix=homography,
+        enabled=True,
+    )
+
+    for raw_x, raw_y in ((500.0, 200.0), (700.0, 400.0), (400.0, 550.0)):
+        table_x, table_y = geometry.raw_to_table(raw_x, raw_y)
+        back_x, back_y = geometry.table_to_raw(table_x, table_y)
+        assert abs(back_x - raw_x) < 0.05
+        assert abs(back_y - raw_y) < 0.05
+
+
+def test_homography_local_scale_varies_across_trapezoid():
+    """透视梯形下，不同位置的局部比例尺必须不同（非线性透视映射）。"""
+    geometry, _homography = _make_trapezoid_geometry()
+
+    def local_scale(undist_x, undist_y, step=1.0):
+        base_x, base_y = geometry.undistorted_to_table(undist_x, undist_y)
+        next_x, next_y = geometry.undistorted_to_table(undist_x + step, undist_y)
+        down_x, down_y = geometry.undistorted_to_table(undist_x, undist_y + step)
+        return (
+            math.hypot(next_x - base_x, next_y - base_y) / step,
+            math.hypot(down_x - base_x, down_y - base_y) / step,
+        )
+
+    top_scale_x, top_scale_y = local_scale(450.0, 110.0)
+    bottom_scale_x, bottom_scale_y = local_scale(460.0, 590.0)
+
+    assert abs(top_scale_x - bottom_scale_x) > 1e-3
+    assert abs(top_scale_y - bottom_scale_y) > 1e-3
+
+
+def test_homography_velocity_matches_finite_difference():
+    """Homography 下速度转换仍与位置有限差分严格一致。"""
+    geometry, _homography = _make_trapezoid_geometry()
+    raw_x, raw_y = 460.0, 320.0
+    raw_vx, raw_vy = 120.0, -80.0
+    dt = 0.01
+
+    table_vx, table_vy = geometry.raw_velocity_to_table(raw_x, raw_y, raw_vx, raw_vy, dt=dt)
+    tx0, ty0 = geometry.raw_to_table(raw_x, raw_y)
+    tx1, ty1 = geometry.raw_to_table(raw_x + raw_vx * dt, raw_y + raw_vy * dt)
+
+    assert abs(table_vx - (tx1 - tx0) / dt) < 1e-9
+    assert abs(table_vy - (ty1 - ty0) / dt) < 1e-9
+    # 非零速度，且已进入透视局部比例（不是简单的线性缩放）
+    assert abs(table_vx) > 1e-6
+    assert abs(table_vy) > 1e-6
+
+
+def test_homography_ignores_table_roi():
+    """Homography 启用后，table_roi 不再参与 undistorted -> table 的数学映射。"""
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
+    without_roi = CameraGeometry(rink_bounds=RINK_BOUNDS, homography_matrix=homography, enabled=False)
+    with_roi = CameraGeometry(
+        rink_bounds=RINK_BOUNDS,
+        table_roi=(0.0, 0.0, 100.0, 100.0),
+        homography_matrix=homography,
+        enabled=False,
+    )
+    for undist_x, undist_y in ((450.0, 150.0), (300.0, 380.0), (700.0, 500.0)):
+        assert without_roi.undistorted_to_table(undist_x, undist_y) == with_roi.undistorted_to_table(undist_x, undist_y)
+        assert without_roi.table_to_undistorted(undist_x, undist_y) == with_roi.table_to_undistorted(undist_x, undist_y)
