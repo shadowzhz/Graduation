@@ -12,7 +12,7 @@ import time
 from typing import Optional
 
 from .. import core_config as core
-from ..ai import AirHockeyAI
+from ..ai import AIDecision, AirHockeyAI
 from ..camera.types import Frame
 from game_state import CurlingState, GameState, TrackingState
 from ..estimation import KalmanFilter
@@ -51,6 +51,7 @@ class VisionResult:
     trajectory_debug: Optional[TrajectoryDebug] = None
     ai_target: Optional[tuple[float, float]] = None
     fps: float = 0.0
+    ai_decision: Optional[AIDecision] = None
 
     @property
     def stone_state(self) -> Optional[CurlingState]:
@@ -80,9 +81,11 @@ class VisionRuntime:
         predictor: Optional[TrajectoryPredictor] = None,
         ai: Optional[AirHockeyAI] = None,
         vision_pipeline: Optional[VisionPipeline] = None,
+        profile: bool = False,
     ) -> None:
         self.table_roi = tuple(table_roi)
         self.detection_interval = int(detection_interval)
+        self.profile = profile
 
         self.detector = detector or StoneDetector(
             roi=self.table_roi,
@@ -95,7 +98,8 @@ class VisionRuntime:
         self.tracker = tracker or StoneTracker(max_missed_frames=self.detection_interval * 4)
         self.kalman = kalman or KalmanFilter()
         self.predictor = predictor or TrajectoryPredictor()
-        self.ai = ai or AirHockeyAI(predictor=self.predictor)
+        self._reuse_prediction_for_ai = ai is None
+        self.ai = AirHockeyAI(predictor=self.predictor) if ai is None else ai
 
         if vision_pipeline is not None:
             self.vision_pipeline = vision_pipeline
@@ -115,6 +119,9 @@ class VisionRuntime:
         self.display_fps = 0.0
         self.detect_ms = 0.0
         self.frame_ms = 0.0
+        self.last_detect_ms: Optional[float] = None
+        self.last_predict_ms: Optional[float] = None
+        self.last_ai_ms: Optional[float] = None
 
         self.ai_home_y = AI_HOME_Y
         self.target = [core.RINK_CENTER_X, self.ai_home_y]
@@ -125,6 +132,9 @@ class VisionRuntime:
     def process_frame(self, frame: Frame) -> VisionResult:
         """处理单帧：检测/追踪预测 -> 坐标转换 -> 状态估计 -> 轨迹预测 -> AI 决策。"""
         t0 = time.perf_counter()
+        self.last_detect_ms = None
+        self.last_predict_ms = None
+        self.last_ai_ms = None
         self.frame_index += 1
 
         processed_frame = self.vision_pipeline.process(frame)
@@ -155,7 +165,10 @@ class VisionRuntime:
                 dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
 
             detection = self.detector.detect(processed_frame, dynamic_roi=dynamic_roi)
-            self.detect_ms = self.detect_ms * 0.9 + (time.perf_counter() - t_detect_start) * 1000 * 0.1
+            detected_ms = (time.perf_counter() - t_detect_start) * 1000
+            self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
+            if self.profile:
+                self.last_detect_ms = detected_ms
             tracks = self.tracker.update(detection)
         else:
             tracks = self.tracker.predict(processed_frame.timestamp)
@@ -168,6 +181,7 @@ class VisionRuntime:
         table_trajectory = None
         trajectory_debug = None
         ai_target = None
+        decision = None
 
         if track is not None:
             # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
@@ -198,7 +212,10 @@ class VisionRuntime:
             stone = curling
 
             # 预测数据层：业务层只与 PredictionState 交互，不再直接传递裸点列表
+            predict_start = time.perf_counter() if self.profile else 0.0
             prediction_state = self.predictor.predict(curling)
+            if self.profile:
+                self.last_predict_ms = (time.perf_counter() - predict_start) * 1000
             table_trajectory = prediction_state.trajectory
             trajectory_debug = TrajectoryDebug(
                 position=curling.position,
@@ -221,7 +238,13 @@ class VisionRuntime:
                 difficulty=core.DIFFICULTIES["普通"],
             )
 
-            decision = self.ai.update(state, dt)
+            ai_start = time.perf_counter() if self.profile else 0.0
+            if self._reuse_prediction_for_ai:
+                decision = self.ai.update(state, dt, prediction=prediction_state)
+            else:
+                decision = self.ai.update(state, dt)
+            if self.profile:
+                self.last_ai_ms = (time.perf_counter() - ai_start) * 1000
             self.target[0], self.target[1] = decision.target_x, decision.target_y
             self.reaction_timer = decision.reaction_timer
             self.stalled_phase = decision.stalled_stone_phase
@@ -247,4 +270,5 @@ class VisionRuntime:
             trajectory_debug=trajectory_debug,
             ai_target=ai_target,
             fps=self.display_fps,
+            ai_decision=decision,
         )

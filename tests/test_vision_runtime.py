@@ -7,9 +7,12 @@ frame -> detection -> track -> table StoneState -> predictor -> AI
 from pathlib import Path
 import numpy as np
 
-from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
+from air_hockey import core_config as core
+from air_hockey.ai import AIDecision, AirHockeyAI
+from air_hockey.app.vision_runtime import AI_HOME_Y, VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
-from game_state import StoneState
+from air_hockey.prediction import TrajectoryPredictor
+from game_state import CurlingState, GameState, StoneState
 from air_hockey.vision.tracker import StoneTracker
 from air_hockey.vision.types import Detection, TrackState
 
@@ -27,6 +30,24 @@ class MockDetector:
             self._index += 1
             return det
         return None
+
+
+class CountingPredictor(TrajectoryPredictor):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def predict(self, stone, *args, **kwargs):
+        self.calls += 1
+        return super().predict(stone, *args, **kwargs)
+
+
+class FixedKalman:
+    def __init__(self, x, y):
+        self.state = CurlingState(x, y, vx=180.0, vy=-250.0)
+
+    def update(self, *args, **kwargs):
+        return self.state
 
 
 def test_stone_tracker_predict_position_public():
@@ -106,6 +127,74 @@ def test_vision_runtime_dataflow_track_to_ai():
     assert res3.fps > 0.0
 
 
+def _assert_vision_runtime_threat_predicts_once(stone_y):
+    predictor = CountingPredictor()
+    runtime = VisionRuntime(
+        calibration_file=str(CALIB_FILE),
+        table_calibration_file=None,
+        disable_undistort=True,
+        detector=MockDetector([Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0)]),
+        kalman=FixedKalman(260.0, stone_y),
+        predictor=predictor,
+    )
+    runtime.ai._random.seed(120)
+    result = runtime.process_frame(Frame(image=np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=1.0, sequence=1))
+
+    assert predictor.calls == 1
+    assert result.prediction is not None
+    assert result.prediction.source_state is result.curling_state
+    assert isinstance(result.ai_decision, AIDecision)
+    assert result.ai_target == (result.ai_decision.target_x, result.ai_decision.target_y)
+    assert abs(result.ai_decision.reaction_timer - (core.DIFFICULTIES["普通"].reaction_delay - 0.001)) < 1e-9
+
+    baseline_ai = AirHockeyAI()
+    baseline_ai._random.seed(120)
+    baseline_state = GameState(
+        ai_x=core.RINK_CENTER_X,
+        ai_y=AI_HOME_Y,
+        ai_home_y=AI_HOME_Y,
+        target_x=core.RINK_CENTER_X,
+        target_y=AI_HOME_Y,
+        stone=result.curling_state,
+        awaiting_serve=False,
+        current_server="player",
+        serve_phase="idle",
+        stalled_stone_phase="idle",
+        reaction_timer=0.0,
+        difficulty=core.DIFFICULTIES["普通"],
+    )
+    baseline = baseline_ai.update(baseline_state, 0.001)
+    assert result.ai_target == (baseline.target_x, baseline.target_y)
+    assert result.ai_decision.stalled_stone_phase == baseline.stalled_stone_phase
+
+
+def test_vision_runtime_threat_behind_ai_predicts_once():
+    _assert_vision_runtime_threat_predicts_once(AI_HOME_Y - 50.0)
+
+
+def test_vision_runtime_threat_outside_attack_zone_predicts_once():
+    _assert_vision_runtime_threat_predicts_once(500.0)
+
+
+def test_vision_runtime_supports_custom_ai_without_prediction_parameter():
+    class IndependentAI:
+        def update(self, state, dt):
+            return AIDecision(225.0, 155.0, "striking", 0.35)
+
+    runtime = VisionRuntime(
+        calibration_file=str(CALIB_FILE),
+        table_calibration_file=None,
+        disable_undistort=True,
+        detector=MockDetector([Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0)]),
+        ai=IndependentAI(),
+    )
+    result = runtime.process_frame(Frame(image=np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=1.0, sequence=1))
+    assert result.ai_decision == AIDecision(225.0, 155.0, "striking", 0.35)
+    assert result.ai_target == (225.0, 155.0)
+    assert runtime.stalled_phase == "striking"
+    assert runtime.reaction_timer == 0.35
+
+
 def test_vision_runtime_without_detection():
     """验证未检测到目标时，调用链输出空状态并保持稳健。"""
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -127,3 +216,4 @@ def test_vision_runtime_without_detection():
     assert result.stone_state is None
     assert result.trajectory is None
     assert result.ai_target is None
+    assert result.ai_decision is None

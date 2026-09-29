@@ -1,10 +1,10 @@
-"""轨迹规划层。
+"""独立轨迹规划算法（当前 PLC DB 只接收目标坐标，不消费方向与速度）。
 
-把状态估计与预测结果连接到控制接口：
+把状态估计与预测结果转换为规划结果：
 
     CurlingState + PredictionState + target_position  ->  ControlCommand
 
-ControlCommand 给出控制侧需要的目标点、方向与速度，供上层控制/PLC 写值使用。
+ControlCommand 给出目标点、方向与速度，可用于独立规划实验。
 本模块不依赖也不修改 Detector / Tracker / KalmanFilter / Predictor / PLC。
 """
 

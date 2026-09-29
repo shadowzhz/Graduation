@@ -1,6 +1,6 @@
 """纯摄像头采集 FPS 基准，不开 GUI 也不做检测。
 
-用法: python3 tools/test_camera.py --benchmark --backend gstreamer --duration 10
+用法: python3 air_hockey/tools/test_camera.py --benchmark --duration 10
 """
 
 
@@ -17,19 +17,29 @@ from air_hockey.camera import CameraConfig, CameraManager
 def build_parser():
     parser = argparse.ArgumentParser(description="测试纯摄像头采集 FPS，不启动 GUI 和检测")
     parser.add_argument("--benchmark", action="store_true", help="运行 FPS 基准测试")
-    parser.add_argument(
-        "--backend",
-        choices=("auto", "gstreamer", "v4l2"),
-        default="gstreamer",
-        help="选择摄像头后端，默认使用 GStreamer，避免自动回退影响性能测试",
-    )
     parser.add_argument("--device", default=None, help="摄像头设备，例如 /dev/video0")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=200.0, dest="requested_fps")
-    parser.add_argument("--pixel-format", choices=("MJPG", "YUYV", "YUY2"), default="MJPG")
     parser.add_argument("--duration", type=float, default=10.0, help="测试时长，单位为秒")
     return parser
+
+
+def report_samples(name, samples):
+    if not samples:
+        print(f"{name}: 无样本")
+        return
+    ordered = sorted(samples)
+
+    def percentile(p):
+        position = (len(ordered) - 1) * p
+        lower = int(position)
+        return ordered[lower] + (ordered[min(lower + 1, len(ordered) - 1)] - ordered[lower]) * (position - lower)
+
+    print(
+        f"{name}: n={len(ordered)} min={ordered[0]:.3f} "
+        f"p50={percentile(0.5):.3f} p95={percentile(0.95):.3f} max={ordered[-1]:.3f} ms"
+    )
 
 
 def run_benchmark(args):
@@ -42,29 +52,51 @@ def run_benchmark(args):
         width=args.width,
         height=args.height,
         requested_fps=args.requested_fps,
-        pixel_format=args.pixel_format,
-        backend=args.backend,
     )
     camera = CameraManager(config)
     try:
         camera.start(timeout=3.0)
         info = camera.info
         print(
-            f"基准测试开始：后端={info.backend if info else '未知'}，"
+            f"基准测试开始：设备={info.device if info else config.device}，"
+            f"后端={info.backend if info else '未知'}，"
+            f"请求模式={config.width}x{config.height} @ {config.requested_fps:g} FPS，"
             f"模式={info.width if info else '?'}x{info.height if info else '?'}，"
-            f"协商 FPS={info.negotiated_fps if info else 0:.2f}，"
+            f"协商 caps FPS={info.negotiated_fps if info else 0:.2f}，"
             f"输入格式={info.source_format if info else '?'}"
         )
+        read_samples = []
+        convert_samples = []
+        last_sequence = -1
+        last_frame = None
         deadline = time.perf_counter() + args.duration
         while time.perf_counter() < deadline:
-            time.sleep(0.25)
+            if camera.error is not None:
+                raise RuntimeError(f"摄像头采集失败：{camera.error}") from camera.error
+            frame = camera.get_latest_frame()
+            if frame is not None and frame.sequence != last_sequence:
+                last_sequence = frame.sequence
+                last_frame = frame
+                read_samples.append(frame.capture_read_ms)
+                convert_samples.append(frame.color_convert_ms)
+            time.sleep(0.001)
+        if camera.error is not None:
+            raise RuntimeError(f"摄像头采集失败：{camera.error}") from camera.error
         stats = camera.get_stats()
         print(
-            f"benchmark: current={stats.current_fps:.1f} FPS, "
-            f"average={stats.average_fps:.1f} FPS, "
-            f"max={stats.max_fps:.1f} FPS, frames={stats.frame_count}, "
-            f"elapsed={stats.elapsed:.1f} s"
+            f"实际采集 FPS={stats.average_fps:.1f}（采集线程记录的 {stats.frame_count} 帧 / "
+            f"{stats.elapsed:.2f} s；请求/协商 FPS 不是实测采集 FPS）"
         )
+        print(f"阶段耗时来自读取最新帧的去重样本 {len(read_samples)} 帧；覆盖不保证每一采集帧。")
+        report_samples("appsink 读取总耗时（含颜色转换）", read_samples)
+        report_samples("颜色转换", convert_samples)
+        if last_frame is not None:
+            print(
+                f"最近样本 Frame.timestamp={last_frame.timestamp:.6f} (host perf_counter，取样/转换后)，"
+                f"Gst PTS={last_frame.gst_pts_ns} ns (原始管道时钟域)"
+            )
+        print("读取总耗时包含取样等待及颜色转换，不能与转换耗时相加；不含曝光到 appsink 之前的时间。")
+        print("PTS 未映射主机时钟，不能推算曝光/端到端延迟。")
         return 0
     except Exception as exc:
         print(f"摄像头基准测试失败: {exc}", file=sys.stderr)

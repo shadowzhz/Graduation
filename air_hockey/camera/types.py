@@ -7,11 +7,14 @@ import time
 
 @dataclass
 class Frame:
-    """一帧图像，timestamp 用单调时钟。"""
+    """一帧图像；timestamp 是采样读取和颜色转换完成后的 host 单调时钟。"""
 
     image: Any
     timestamp: float = field(default_factory=time.perf_counter)
     sequence: int = 0       # 帧编号
+    capture_read_ms: float = 0.0  # pull + map + conversion (host time)
+    color_convert_ms: float = 0.0
+    gst_pts_ns: Optional[int] = None  # Gst clock domain, not exposure latency
 
 
 @dataclass
@@ -26,13 +29,6 @@ class CameraConfig:
 
     # 请求帧率
     requested_fps: float = 200.0
-
-    # 请求摄像头输出格式
-    pixel_format: str = "MJPG"
-
-    # Jetson 视觉主链路固定使用硬件 GStreamer，避免 auto 静默回退到低性能 V4L2。
-    backend: str = "gstreamer"
-
 
 @dataclass
 class CameraInfo:

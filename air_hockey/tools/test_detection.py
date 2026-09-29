@@ -43,11 +43,6 @@ def build_parser():
         default=30.0,
         help="检测、标注和 GUI 预览的最大刷新率，默认 30 FPS",
     )
-    parser.add_argument(
-        "--hardware-preview",
-        action="store_true",
-        help="在 Jetson 上使用 nveglglessink 直接渲染预览，避免 Tk/PNG 开销",
-    )
     return parser
 
 
@@ -124,9 +119,10 @@ def preview_loop():
     global latest_preview_data, latest_preview_sequence, latest_detection
     seen_sequence = -1
     while not preview_stop.wait(PREVIEW_INTERVAL_SECONDS):
-        if camera is None:
+        active_camera = camera
+        if active_camera is None:
             continue
-        frame = camera.get_latest_frame()
+        frame = active_camera.get_latest_frame()
         # sequence 变了才是新帧
         if frame is None or frame.sequence == seen_sequence:
             continue
@@ -135,9 +131,6 @@ def preview_loop():
         # GUI 定时器会读，写入要加锁
         with preview_lock:
             latest_detection = detection
-        # 硬件预览由 GStreamer 直接画，Python 只做检测
-        if camera is not None and camera.hardware_preview:
-            continue
         annotated = annotate(frame.image, detection)
         preview = cv2.resize(
             annotated,
@@ -164,13 +157,7 @@ def start_camera():
     ):
         label.config(text=value)
     status_value.config(text="启动中")
-    if args.hardware_preview:
-        video_label.pack_forget()
-        video_panel.update_idletasks()
-        preview_window_handle = int(video_panel.winfo_id())
-    else:
-        preview_window_handle = None
-    camera = CameraManager(CAMERA_CONFIG, preview_window_handle=preview_window_handle)
+    camera = CameraManager(CAMERA_CONFIG)
     try:
         camera.start(timeout=2.0)
     except Exception as exc:
@@ -182,8 +169,7 @@ def start_camera():
         messagebox.showerror("摄像头启动失败", str(exc))
         return
     preview_stop.clear()
-    if not camera.hardware_preview:
-        show_tk_preview()
+    show_tk_preview()
     print(f"检测和预览刷新率上限：{args.preview_fps:g} FPS")
     preview_thread = threading.Thread(target=preview_loop, name="vision-preview", daemon=True)
     preview_thread.start()
@@ -214,7 +200,7 @@ def stop_camera():
 
 def update_video():
     global display_image, displayed_preview_sequence
-    if running and camera is not None and not camera.hardware_preview:
+    if running and camera is not None:
         with preview_lock:
             preview_data = latest_preview_data
             preview_sequence = latest_preview_sequence
@@ -227,6 +213,13 @@ def update_video():
 
 def update_statistics():
     if running and camera is not None:
+        if camera.error is not None:
+            error = camera.error
+            stop_camera()
+            status_value.config(text="采集失败")
+            messagebox.showerror("摄像头采集失败", str(error))
+            root.after(FPS_UPDATE_MS, update_statistics)
+            return
         stats = camera.get_stats()
         fps_value.config(text=f"{stats.current_fps:.1f}")
         avg_value.config(text=f"{stats.average_fps:.1f}")

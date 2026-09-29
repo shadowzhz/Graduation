@@ -40,7 +40,10 @@ def preview_loop():
     global latest_preview_data
     seen_sequence = -1
     while not preview_stop.wait(VIDEO_UPDATE_MS / 1000.0):
-        frame = camera.get_latest_frame()
+        active_camera = camera
+        if active_camera is None:
+            continue
+        frame = active_camera.get_latest_frame()
         # sequence 变了才算新帧
         if frame is None or frame.sequence == seen_sequence:
             continue
@@ -115,6 +118,13 @@ def update_video():
 def update_statistics():
     """定时刷新实时 FPS、平均 FPS 和峰值 FPS。"""
     if running and camera is not None:
+        if camera.error is not None:
+            error = camera.error
+            stop_camera()
+            status_value.config(text="采集失败")
+            messagebox.showerror("摄像头采集失败", str(error))
+            root.after(FPS_UPDATE_MS, update_statistics)
+            return
         stats = camera.get_stats()
         fps_value.config(text=f"{stats.current_fps:.1f}")
         avg_value.config(text=f"{stats.average_fps:.1f}")
@@ -146,7 +156,7 @@ video_label = tk.Label(video_panel, bg="black")
 video_label.pack(fill="both", expand=True)
 tk.Label(
     left_panel,
-    text=(f"GStreamer/V4L2 | 请求 {CAMERA_CONFIG.width} × "
+    text=(f"GStreamer | 请求 {CAMERA_CONFIG.width} × "
           f"{CAMERA_CONFIG.height} | 请求 {CAMERA_CONFIG.requested_fps:g} FPS"),
     font=("Microsoft YaHei", 10),
 ).pack(pady=8)
