@@ -2,10 +2,21 @@ from dataclasses import replace
 
 from air_hockey import core_config as layout
 from air_hockey.ai import AirHockeyAI
+from air_hockey.prediction import TrajectoryPredictor
 from game_state import GameState, StoneState
 
 # 关掉瞄准误差，决策才可复现
 NO_ERROR = replace(layout.DIFFICULTIES["普通"], aim_error=0.0)
+
+
+class CountingPredictor(TrajectoryPredictor):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def predict(self, stone, *args, **kwargs):
+        self.calls += 1
+        return super().predict(stone, *args, **kwargs)
 
 
 def ai_home_y():
@@ -47,6 +58,38 @@ def test_defense_uses_injected_predictor():
     normal = AirHockeyAI().choose_target(state)
     short_stop = AirHockeyAI(predictor=TrajectoryPredictor(stop_speed=90.0)).choose_target(state)
     assert normal.target_x != short_stop.target_x
+
+
+def _assert_realtime_threat_reuses_prediction(stone_y):
+    state = make_state(260.0, stone_y, vx=180.0, vy=-250.0)
+    predictor = CountingPredictor()
+    ai = AirHockeyAI(predictor=predictor)
+
+    # Standalone callers still compute their own prediction on every reaction tick.
+    baseline = ai.update(state, 1 / 60)
+    assert predictor.calls == 1
+
+    prediction = predictor.predict(state.stone)
+    assert predictor.calls == 2
+    reused = ai.update(state, 1 / 60, prediction=prediction)
+    assert (reused.target_x, reused.target_y) == (baseline.target_x, baseline.target_y)
+    assert reused.stalled_stone_phase == baseline.stalled_stone_phase
+    assert predictor.calls == 2
+
+    direct = ai.choose_target(state, prediction=prediction)
+    assert (direct.target_x, direct.target_y) == (baseline.target_x, baseline.target_y)
+    assert predictor.calls == 2
+    standalone = ai.choose_target(state)
+    assert (standalone.target_x, standalone.target_y) == (baseline.target_x, baseline.target_y)
+    assert predictor.calls == 3
+
+
+def test_realtime_threat_behind_ai_reuses_prediction():
+    _assert_realtime_threat_reuses_prediction(ai_home_y() - 50.0)
+
+
+def test_realtime_threat_outside_attack_zone_reuses_prediction():
+    _assert_realtime_threat_reuses_prediction(500.0)
 
 
 def test_reaction_timer_holds_previous_target():

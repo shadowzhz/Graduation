@@ -30,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="实时运行 Camera -> Detector -> Tracker -> GameState。"
     )
-    parser.add_argument("--backend", default="auto", choices=("auto", "gstreamer", "v4l2"))
     parser.add_argument("--device", default=None, help="例如 /dev/video0")
     parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"), default=(350, 0, 580, 650))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80))
@@ -139,7 +138,7 @@ def main():
         except tk.TclError as exc:
             raise SystemExit(f"无法启动 Tk 预览，请使用 --no-display：{exc}") from exc
 
-    camera = CameraManager(CameraConfig(device=args.device, width=args.width, height=args.height, requested_fps=args.fps, pixel_format="MJPG", backend=args.backend))
+    camera = CameraManager(CameraConfig(device=args.device, width=args.width, height=args.height, requested_fps=args.fps))
     detector = StoneDetector(roi=tuple(args.roi), color_space="hsv", lower=tuple(args.lower), upper=tuple(args.upper), min_area=args.min_area, min_radius=args.min_radius, min_circularity=args.min_circularity)
     tracker = StoneTracker(max_distance=args.max_distance, max_missed_frames=args.max_missed_frames)
     last_sequence = -1
@@ -154,6 +153,8 @@ def main():
         print("Vision pipeline started: Camera -> StoneDetector -> StoneTracker -> StoneState -> StoneState/GameState")
         print("Press Ctrl+C to stop" + (", or Q / ESC in the preview window." if preview else "."))
         while True:
+            if camera.error is not None:
+                raise RuntimeError(f"摄像头采集失败：{camera.error}") from camera.error
             frame = camera.get_latest_frame()
             if frame is None or frame.sequence == last_sequence:
                 time.sleep(0.001)

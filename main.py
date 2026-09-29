@@ -12,11 +12,14 @@
 """
 
 import argparse
+import json
+import math
 import subprocess
 import sys
 import threading
 import time
 import traceback
+from collections import deque
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent  # 找到 main.py 所在文件夹
@@ -25,7 +28,6 @@ SIM_ROOT = PROJECT_ROOT / "冰壶仿真"             # 仿真代码（仅 --sim 
 import cv2
 import tkinter as tk
 
-from air_hockey.ai import AIDecision
 from air_hockey.app.renderer import format_status, render
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera import CameraManager
@@ -34,6 +36,37 @@ from air_hockey.recording import RuntimeRecorder
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
 STATS_INTERVAL = 5.0        # 统计间隔
+
+
+class LatencySamples:
+    """保留最近的阶段样本；全部时间均为主机单调时钟，不代表曝光到执行器延迟。"""
+
+    def __init__(self, window=4096):
+        self._lock = threading.Lock()
+        self._values = {}
+        self.window = window
+
+    def add(self, stage, elapsed_ms):
+        if elapsed_ms is None:
+            return
+        with self._lock:
+            self._values.setdefault(stage, deque(maxlen=self.window)).append(float(elapsed_ms))
+
+    @staticmethod
+    def distribution(values):
+        if not values:
+            return None
+        ordered = sorted(values)
+        return {
+            "count": len(ordered),
+            "p50": ordered[(len(ordered) - 1) // 2],
+            "p95": ordered[math.ceil(len(ordered) * 0.95) - 1],
+            "max": ordered[-1],
+        }
+
+    def snapshot(self):
+        with self._lock:
+            return {key: self.distribution(values) for key, values in self._values.items()}
 
 
 def run_game():
@@ -132,6 +165,8 @@ def run_vision(args):
     window = None
     preview_lock = None
     shared = None
+    samples = LatencySamples() if headless or args.perf_json else None
+    processing_failure = [None]
 
     recorder = None
     if args.record:
@@ -140,6 +175,43 @@ def run_vision(args):
             source="runtime",
             meta={"mode": "headless" if headless else "display"},
         )
+
+    table_calibration_file = None if args.disable_homography else args.table_calibration
+    if table_calibration_file is not None and not Path(table_calibration_file).is_file():
+        raise SystemExit(
+            f"缺少球台标定文件: {table_calibration_file}。先运行 "
+            "python3 air_hockey/tools/calibrate_table.py 完成实台标定；"
+            "仅调试线性映射时使用 --disable-homography。"
+        )
+    runtime = VisionRuntime(
+        table_roi=tuple(args.roi),
+        lower=tuple(args.lower),
+        upper=tuple(args.upper),
+        calibration_file=args.calibration,
+        table_calibration_file=table_calibration_file,
+        disable_undistort=args.disable_undistort,
+        profile=samples is not None,
+    )
+
+    if not headless:
+        window = VisionWindow()
+        preview_lock = threading.Lock()
+        shared = {
+            "result": None,
+            "result_seq": -1,
+            "ppm": None,
+            "ppm_seq": 0,
+            "status": "等待画面",
+            "fatal": None,
+        }
+
+    camera = CameraManager()
+    try:
+        camera.start()
+    except Exception as exc:
+        if window is not None:
+            window.close()
+        raise SystemExit(f"摄像头启动失败：{exc}")
 
     plc = None
     plc_worker = None
@@ -158,38 +230,15 @@ def run_vision(args):
             else:
                 print("[PLC] 连接失败，跳过 PLC 输出")
 
-    if not headless:
-        window = VisionWindow()
-        preview_lock = threading.Lock()
-        shared = {
-            "result": None,
-            "result_seq": -1,
-            "ppm": None,
-            "ppm_seq": 0,
-            "status": "等待画面",
-            "fatal": None,
-        }
-
-    table_calibration_file = None if args.disable_homography else args.table_calibration
-    runtime = VisionRuntime(
-        table_roi=tuple(args.roi),
-        lower=tuple(args.lower),
-        upper=tuple(args.upper),
-        calibration_file=args.calibration,
-        table_calibration_file=table_calibration_file,
-        disable_undistort=args.disable_undistort,
-    )
-
-    camera = CameraManager()
-    try:
-        camera.start()
-    except Exception as exc:
-        if window is not None:
-            window.close()
-        raise SystemExit(f"摄像头启动失败：{exc}")
-
     mode_label = "headless 性能测试" if headless else "实时视觉演示"
     print(f"{mode_label}开始{'，Ctrl+C 退出' if headless else '，Q / ESC 或关闭窗口退出'}")
+    if camera.info is not None:
+        info = camera.info
+        print(
+            f"GStreamer: {info.device} | 协商 {info.width}x{info.height} "
+            f"@ {info.negotiated_fps:g} FPS ({info.source_format} -> {info.output_format}); "
+            "实际采集速度以帧计数为准"
+        )
     print(f"视觉管线：最新帧 + 每 {runtime.detection_interval} 帧检测，其余帧使用 tracker 预测")
     print("视觉校正:")
     print(f"  camera calibration: {args.calibration}")
@@ -200,6 +249,8 @@ def run_vision(args):
         print(f"运行数据记录: {args.record}")
 
     stop = threading.Event()
+    skipped_frames = [0]
+    gst_pts_count = [0]
 
     def processing_loop():
         """处理线程：取最新帧 -> VisionRuntime 处理 -> 保存最新 VisionResult 与状态。"""
@@ -212,35 +263,44 @@ def run_vision(args):
             while not stop.is_set() and not window_closed():
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
+                    if camera.error is not None:
+                        raise RuntimeError(f"GStreamer 采集已停止：{camera.error}") from camera.error
                     time.sleep(0.001)
                     continue
+                skipped_frames[0] += max(0, frame.sequence - (last_sequence if last_sequence >= 0 else 0) - 1)
                 last_sequence = frame.sequence
 
+                process_start = time.perf_counter() if samples is not None else 0.0
                 result = runtime.process_frame(frame)
+                if samples is not None:
+                    samples.add("capture_read_ms", frame.capture_read_ms)
+                    samples.add("color_convert_ms", frame.color_convert_ms)
+                    samples.add("post_read_wait_ms", max(0.0, (process_start - frame.timestamp) * 1000.0))
+                    samples.add("vision_ms", (time.perf_counter() - process_start) * 1000.0)
+                    samples.add("detect_ms", runtime.last_detect_ms)
+                    samples.add("prediction_ms", runtime.last_predict_ms)
+                    samples.add("ai_ms", runtime.last_ai_ms)
+                    if frame.gst_pts_ns is not None:
+                        gst_pts_count[0] += 1
 
-                # AI 决策 -> ControlCommand -> PLC 请求（同时也作为运行日志的一环）
-                decision = None
+                # 本帧 AI 原始决策供记录与 PLC 共用；PLC DB 仅下发目标与状态。
+                decision = result.ai_decision
                 plc_request = None
-                if result.ai_target is not None and result.curling_state is not None:
-                    decision = AIDecision(result.ai_target[0], result.ai_target[1], "")
-                    if plc_worker is not None and result.prediction is not None:
-                        try:
-                            command = plc_adapter.build_command(
-                                decision,
-                                result.curling_state,
-                                result.prediction,
-                                timestamp=result.frame.timestamp,
-                            )
-                            plc_request = plc_adapter.to_write_request(
-                                command,
-                                ai_position=runtime.ai_current_pos,
-                                curling_state=result.curling_state,
-                                timestamp=result.frame.timestamp,
-                            )
-                            # 非阻塞：只投递最新请求，实际写入在后台线程完成
-                            plc_worker.submit(plc_request)
-                        except ValueError:
-                            plc_request = None  # 目标非法(非有限值)时跳过本帧 PLC 输出
+                if plc_worker is not None and decision is not None and result.curling_state is not None:
+                    plc_prepare_start = time.perf_counter() if samples is not None else 0.0
+                    try:
+                        plc_request = plc_adapter.build_request(
+                            decision,
+                            ai_position=runtime.ai_current_pos,
+                            curling_state=result.curling_state,
+                            timestamp=result.frame.timestamp,
+                        )
+                        # 非阻塞：只投递最新请求，实际写入在后台线程完成
+                        plc_worker.submit(plc_request)
+                    except ValueError:
+                        plc_request = None  # 目标非法(非有限值)时跳过本帧 PLC 输出
+                    if samples is not None:
+                        samples.add("plc_prepare_submit_ms", (time.perf_counter() - plc_prepare_start) * 1000.0)
 
                 if recorder is not None:
                     recorder.record(result, ai_decision=decision, plc_request=plc_request)
@@ -261,10 +321,16 @@ def run_vision(args):
                     capture = camera.get_stats()
                     track_state = result.track.state.value if result.track else "none"
                     if headless:
+                        stage = samples.snapshot() if samples is not None else {}
+                        timing = " | ".join(
+                            f"{name} p50/p95 {stage[name]['p50']:.2f}/{stage[name]['p95']:.2f} ms"
+                            for name in ("capture_read_ms", "vision_ms", "prediction_ms", "post_read_wait_ms")
+                            if name in stage
+                        )
                         print(
                             f"[perf] FPS {result.fps:.1f} | 处理 {runtime.frame_ms:.1f} ms "
                             f"| 检测 {runtime.detect_ms:.1f} ms | 采集 {capture.current_fps:.1f} FPS "
-                            f"| Tracker {track_state}"
+                            f"| Tracker {track_state} | {timing}"
                         )
                     else:
                         print(
@@ -272,6 +338,7 @@ def run_vision(args):
                             f"(检测 {runtime.detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
                         )
         except Exception as exc:
+            processing_failure[0] = exc
             traceback.print_exc()
             if preview_lock is not None and shared is not None:
                 with preview_lock:
@@ -282,18 +349,28 @@ def run_vision(args):
     def encoding_loop():
         """预览转换线程：最新 VisionResult -> render 标注 -> 缩放 -> PPM（按预览帧率限速）。"""
         seen = -1
-        while not stop.wait(1.0 / args.preview_fps):
-            with preview_lock:
-                result = shared["result"]
-                seq = shared["result_seq"]
-            if result is None or seq == seen:
-                continue
-            seen = seq
+        try:
+            while not stop.wait(1.0 / args.preview_fps):
+                with preview_lock:
+                    result = shared["result"]
+                    seq = shared["result_seq"]
+                if result is None or seq == seen:
+                    continue
+                seen = seq
 
-            ppm_data = encode_preview_ppm(result, runtime.table_roi, runtime.camera_geometry)
+                encode_start = time.perf_counter() if samples is not None else 0.0
+                ppm_data = encode_preview_ppm(result, runtime.table_roi, runtime.camera_geometry)
+                if samples is not None:
+                    samples.add("preview_encode_ms", (time.perf_counter() - encode_start) * 1000.0)
+                with preview_lock:
+                    shared["ppm"] = ppm_data
+                    shared["ppm_seq"] += 1
+        except Exception as exc:
+            processing_failure[0] = exc
+            traceback.print_exc()
             with preview_lock:
-                shared["ppm"] = ppm_data
-                shared["ppm_seq"] += 1
+                shared["fatal"] = f"预览线程异常退出：{exc!r}"
+            stop.set()
 
     processing_thread = threading.Thread(target=processing_loop, name="processing", daemon=True)
     processing_thread.start()
@@ -304,15 +381,15 @@ def run_vision(args):
 
     try:
         if headless:
-            stop.wait()
+            stop.wait(args.benchmark_seconds or None)
         else:
             window.root.mainloop()
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
-        if processing_thread.is_alive():
-            processing_thread.join(timeout=0.6)
+        camera.stop()
+        processing_thread.join()
         if recorder is not None:
             recorded_path = recorder.close()
             if recorded_path is not None:
@@ -322,9 +399,47 @@ def run_vision(args):
             print(f"PLC 输出已停止（写入 {plc_worker.write_count} 次，失败 {plc_worker.error_count} 次）")
         if plc is not None:
             plc.disconnect()
-        camera.stop()
+        if samples is not None:
+            capture = camera.get_stats()
+            stages = samples.snapshot()
+            if plc_worker is not None:
+                write_ms, frame_to_write_ms = plc_worker.timing_samples()
+                if write_ms:
+                    stages["plc_write_ms"] = samples.distribution(write_ms)
+                if frame_to_write_ms:
+                    stages["post_read_to_plc_write_ms"] = samples.distribution(frame_to_write_ms)
+            info = camera.info
+            report = {
+                "time_reference": "Host perf_counter: frame timestamp is after GStreamer pull/map/convert, not sensor exposure; raw Gst PTS has a different clock domain",
+                "sample_scope": "Stage distributions cover the latest processed frames only; capture FPS counts all reads. PLC write completion is not motor acknowledgement.",
+                "camera": None if info is None else {
+                    "device": info.device,
+                    "backend": info.backend,
+                    "width": info.width,
+                    "height": info.height,
+                    "requested_fps": info.requested_fps,
+                    "negotiated_fps": info.negotiated_fps,
+                    "source_format": info.source_format,
+                    "output_format": info.output_format,
+                },
+                "capture": vars(capture),
+                "processed_frames": runtime.frame_index,
+                "skipped_sequence_frames": skipped_frames[0],
+                "raw_gst_pts_samples": gst_pts_count[0],
+                "sample_window": samples.window,
+                "stages_ms": stages,
+            }
+            print(f"[perf] 采集 {capture.frame_count} 帧 | 处理 {runtime.frame_index} 帧 | 跳过 {skipped_frames[0]} 帧")
+            if args.perf_json:
+                output = Path(args.perf_json)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"性能报告已写入: {output}")
         if window is not None:
             window.close()
+
+    if processing_failure[0] is not None:
+        raise SystemExit(f"实时处理失败：{processing_failure[0]}")
 
 
 def main():
@@ -336,6 +451,8 @@ def main():
 
     # 视觉模式相关参数
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式")
+    parser.add_argument("--benchmark-seconds", type=float, default=0.0, metavar="SEC", help="headless 模式自动停止时间；默认持续运行")
+    parser.add_argument("--perf-json", default=None, metavar="PATH", help="退出时保存最近 4096 样本的阶段耗时分布")
     parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
     parser.add_argument("--plc", default=None, metavar="IP", help="启用 AI->PLC 输出并连接该 S7 PLC（例如 192.168.0.1）")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 写入频率上限（Hz）")
@@ -350,8 +467,14 @@ def main():
 
     args = parser.parse_args()
 
-    if args.plc and args.plc_rate <= 0.0:
-        parser.error("--plc-rate 必须大于 0")
+    if args.plc and (not math.isfinite(args.plc_rate) or args.plc_rate <= 0.0):
+        parser.error("--plc-rate 必须为有限正数")
+
+    if not math.isfinite(args.benchmark_seconds) or args.benchmark_seconds < 0 or (args.benchmark_seconds and not args.headless):
+        parser.error("--benchmark-seconds 必须为非负数，且只适用于 --headless")
+
+    if args.sim and (args.benchmark_seconds or args.perf_json):
+        parser.error("--benchmark-seconds 和 --perf-json 只适用于视觉模式")
 
     if not args.sim and args.disable_undistort and not args.disable_homography:
         parser.error(

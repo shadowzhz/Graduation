@@ -17,10 +17,10 @@
 
 ### 1. 端到端数据链路
 
-全链路采用统一状态模型（`CurlingState` / `PredictionState` / `ControlCommand`）单向贯通，视觉、仿真与预测共用同一套物理核心：
+实时链路使用 `CurlingState` / `PredictionState` / `PlcWriteRequest` 单向贯通；离线轨迹规划仍保留独立的 `ControlCommand`，但现有 PLC DB 不消费其方向和速度：
 
 ```text
-Camera (GStreamer / V4L2, 无锁最新帧缓存)
+Camera (仅 GStreamer appsink，线程安全最新帧缓存)
   │  Frame(raw BGR)
   ▼
 StoneDetector            HSV/Lab 阈值 + 轮廓几何 + 动态 ROI
@@ -41,13 +41,10 @@ TrajectoryPredictor      微步物理：摩擦减速 + 弹墙 + 门柱 + 进球
 AirHockeyAI              守门 / 前压 / 回防决策
   │  AIDecision(target_x, target_y, ...)
   ▼
-TrajectoryPlanner        预测驱动的目标规划
-  │  ControlCommand(target_position / direction / speed)
-  ▼
-PlcControlAdapter        坐标范围检查 + 输出限幅 + 时间戳
+PlcControlAdapter        目标坐标检查 + 输出限幅 + 时间戳
   │  PlcWriteRequest
   ▼
-PlcOutputWorker(非阻塞)   覆盖式最新请求 → 后台线程写入
+PlcOutputWorker(非阻塞)   新请求唤醒 + 限频 + 覆盖式最新请求 → 后台写入
   │
   ▼
 PLCInterface             S7-1500 DB1 写入（可选，--plc）
@@ -78,20 +75,20 @@ Camera -> VisionRuntime
 | `StoneState` | `CurlingState` + `tracking_state`（视觉追踪路径） |
 | `GameState` | AI 决策快照：球槌位置 + 冰壶状态 + 开球/难度等 |
 | `PredictionState` | 预测结果：`trajectory` / `endpoint` / `duration` / `source_state` |
-| `ControlCommand` | 控制指令：`target_position` / `direction` / `speed` |
+| `ControlCommand` | 独立轨迹规划模型：`target_position` / `direction` / `speed`；当前 PLC DB 不接收方向/速度 |
 
 ---
 
 ## 💡 核心技术与系统实现
 
-1. **高帧率低延迟图像采集**：GStreamer 原生 appsink 硬件解码 + 无锁单帧覆盖队列，1280x720 实测采集 140+ FPS。
+1. **图像采集**：GStreamer 原生 appsink 解码 + 线程安全单帧覆盖缓存；实际采集 FPS 和阶段耗时需在目标设备实测，不以请求/协商 FPS 替代。
 2. **目标检测与动态局部 ROI**：HSV 颜色阈值 + 面积/半径/圆形度几何筛选，基于上一帧预测位置的动态 ROI 降低计算量，输出统一 `CurlingState`。
 3. **单目标追踪**：原始像素坐标下的常速关联与漏检维持，负责目标关联与动态 ROI 预测。
 4. **卡尔曼状态估计**：常量速度模型（`[px, py, vx, vy]`）融合观测序列，输出平滑的 `CurlingState`，显著降低检测抖动（观测误差 ≈3.8 → 滤波误差 ≈1.7）。
 5. **单目去畸变与坐标系几何映射**：`raw → undistorted → table` 三层解耦；`undistorted → table` 支持**球台四点 Homography**（透视校正），也保留 ROI 线性映射回退；速度用空间微元有限差分换算。
 6. **统一微步物理轨迹预测核心**：`TrajectoryPredictor` 涵盖摩擦阻尼、边墙弹性碰撞、门柱圆弧反弹与进球穿透判定；视觉、仿真、AI **共用同一物理核心**。
-7. **AI 智能防守与对战决策**：基于预测轨迹截距的门线防守、前压击球、死球处理与自动回中状态机。
-8. **轨迹规划与控制适配层**：`TrajectoryPlanner` 把预测结果转为 `ControlCommand`；`PlcControlAdapter` 做坐标范围检查、输出限幅与时间戳封装，`PlcOutputWorker` 非阻塞写入 PLC。
+7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距，覆盖前压击球、死球处理与自动回中状态机；独立仿真调用仍可自行预测。
+8. **轨迹规划与控制适配层**：独立 `TrajectoryPlanner` 可生成 `ControlCommand`；实时 `PlcControlAdapter` 按现有 DB 协议直接将 AI 目标与状态封装成 `PlcWriteRequest`，`PlcOutputWorker` 在新请求到达时唤醒并限频写入。
 9. **仿真 / 评估 / 记录工具链**：无摄像头运动仿真（真实轨迹→观测→Kalman→预测）、多组实验误差评估（JSON + 控制台报告）、真实/仿真统一格式运行日志（含 CurlingState / PredictionState / AIDecision / PLC request）。
 10. **西门子 PLC 工业通信**：`PLCInterface` 通过 snap7 将 AI 目标、球槌位置、冰壶状态与比分写入 S7 DB 块。
 
@@ -101,15 +98,22 @@ Camera -> VisionRuntime
 
 统一通过根目录 [main.py](file:///run/media/shadowemperor/游戏/Ubuntu/Project/Python/Graduation/main.py) 启动：
 
+默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。真实启动要求目标系统提供 `/dev/video*`、PyGObject/GStreamer 及 Jetson MJPEG 硬件解码元件；没有 V4L2/OpenCV 回退。
+
 ```bash
+python3 air_hockey/tools/calibrate_camera.py --cols 10 --rows 7 --square-size 25 --output calibration/camera_calibration.npz
+python3 air_hockey/tools/calibrate_table.py --output calibration/table_homography.npz
 python3 main.py                       # 实时视觉演示（Camera -> ... -> AI）
 python3 main.py --headless            # 无显示性能基准测试
+python3 main.py --headless --benchmark-seconds 30 --perf-json benchmark.json  # 有标定文件时的分段耗时报告
 python3 main.py --sim                 # 虚拟仿真对战（也可写作 --game）
 python3 main.py --record run.json     # 记录运行数据（统一 JSON 日志）
 python3 main.py --plc 192.168.0.1 --plc-rate 30   # 启用 AI->PLC 非阻塞输出
 ```
 
 常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
+
+P0 诊断：`python3 air_hockey/tools/test_camera.py --benchmark --duration 10` 给出设备、请求与真实 caps 协商模式、采集线程实测 FPS、独立取样的 read/convert 耗时分布（read 总耗时包含取样等待和转换，不与 convert 相加）；`python3 air_hockey/tools/test_gstreamer_transfer.py --mode bgr-copy --duration 10` 仅比较独立管道映射/复制，不是实际转换路径。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/协商 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的读取/转换完成时刻，Gst PTS 是未映射的管道时钟域原值，二者均不是曝光时间；不能据此声称曝光到显示或 PLC 端到端延迟。本机无 Jetson，尚未取得本次变更的实机测量数据。
 
 辅助工具：
 
@@ -156,7 +160,7 @@ Graduation/
 │   ├── core_config.py          # 场地几何、动力学参数、难度等级
 │   ├── physics.py              # StoneMotion 物理实体与碰撞规则
 │   ├── ai.py                   # AI 决策器（依赖注入 TrajectoryPredictor）
-│   ├── camera/                 # 采集层（GStreamer / V4L2 / 无锁最新帧缓存 / FPS 统计）
+│   ├── camera/                 # 采集层（GStreamer / 线程安全最新帧缓存 / FPS 统计）
 │   ├── vision/                 # 检测 + 追踪 + 坐标几何 + 预处理
 │   ├── estimation/             # KalmanFilter 状态估计层
 │   ├── prediction/             # PredictionState + TrajectoryPredictor（统一物理核心）
@@ -169,9 +173,9 @@ Graduation/
 │   ├── app/                    # VisionRuntime 运行核心 + 渲染 + FPS GUI
 │   ├── tools/                  # 标定 / 检测 / 追踪 / 预测 等诊断脚本
 │   └── 交接文档.md             # 面向开发者的详细技术与工程交接文档
-├── calibration/                # 标定产物（camera_calibration.npz / table_homography.npz）
+├── calibration/                # 相机内参在库；table_homography.npz 须在实台标定后生成
 ├── 冰壶仿真/                   # 桌面仿真 GUI、GUI 配置与 PLC 通信模块
-└── tests/                      # 自动化测试套件（143 项，无需 pytest）
+└── tests/                      # 自动化测试套件（154 项，无需 pytest）
 ```
 
 ---
@@ -179,16 +183,16 @@ Graduation/
 ## 🎯 课题研究进展与展望
 
 ### 已完成工作
-* [x] 高帧率多后端相机采集框架与 Jetson 硬件解码调优
+* [x] GStreamer-only 相机采集与阶段诊断接口（待 Jetson 实机验证）
 * [x] 颜色 + 几何约束检测算法与动态局部 ROI 加速
 * [x] 原始像素单目标常速追踪与漏检维持
 * [x] **卡尔曼滤波状态估计层**（常量速度模型，抑制视觉抖动）
 * [x] 单目内参标定与点级去畸变；**球台四点 Homography 透视校正**
 * [x] 视觉、仿真、AI 三端统一的微步物理轨迹预测核心（`PredictionState`）
-* [x] **轨迹规划与控制适配层**（`ControlCommand` + PLC 非阻塞输出闭环）
+* [x] 独立 `ControlCommand` 轨迹规划与目标坐标直达 PLC 的非阻塞软件输出链（实机执行机构尚未联调）
 * [x] 仿真测试环境、多组实验评估与统一格式运行日志
 * [x] 西门子 S7 PLC 通信底层封装
-* [x] 143 项自动化功能回归测试套件
+* [x] 154 项自动化功能回归测试套件
 
 ### 后续展望与改进方向
 * [ ] **实台物理参数辨识**：在真实气浮台采集滑行/碰撞数据，回归摩擦与恢复系数。

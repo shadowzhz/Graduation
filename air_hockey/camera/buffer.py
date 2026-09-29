@@ -17,7 +17,10 @@ class FrameBuffer:
             frame = Frame(frame, timestamp=timestamp)
         with self._condition:
             self._sequence += 1
-            stored = Frame(frame.image, frame.timestamp, self._sequence)
+            stored = Frame(
+                frame.image, frame.timestamp, self._sequence,
+                frame.capture_read_ms, frame.color_convert_ms, frame.gst_pts_ns,
+            )
             self._latest = stored       # 替换最新帧
             self._condition.notify_all()
             return stored

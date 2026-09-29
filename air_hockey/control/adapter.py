@@ -1,24 +1,13 @@
-"""AI 决策到 PLC 的最小控制适配层。
-
-    AIDecision(target_x, target_y)
-        -> ControlCommand(planning.TrajectoryPlanner)
-        -> PlcWriteRequest
-        -> PLCInterface.write_game_state(**request.as_kwargs())
-
-只做坐标范围检查、输出限幅与字段映射，不修改 AI、Predictor 或 PLCInterface。
-"""
+"""AI 目标到 PLC 载荷的控制适配层：坐标限幅与字段映射。"""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from .. import core_config as core
-from ..planning import ControlCommand, TrajectoryPlanner
 from game_state import CurlingState
-
-_EPSILON = 1e-9
 
 
 @dataclass
@@ -63,59 +52,49 @@ class PlcWriteRequest:
 
 
 class PlcControlAdapter:
-    """把 AI 决策转成控制指令，再打包成 PLC 写入请求。"""
+    """把 AI 决策目标限幅后打包成 PLC 写入请求。"""
 
     def __init__(
         self,
-        max_speed: float = 600.0,
-        speed_gain: float = 1.0,
-        min_travel_time: float = 0.1,
         bounds: Optional[Sequence[float]] = None,
         margin: Optional[float] = None,
         max_target_jump: Optional[float] = None,
     ) -> None:
-        self.planner = TrajectoryPlanner(
-            max_speed=max_speed,
-            speed_gain=speed_gain,
-            min_travel_time=min_travel_time,
-            bounds=bounds,
-            margin=margin,
+        self.bounds = tuple(float(value) for value in bounds) if bounds is not None else (
+            core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM
         )
-        self.bounds = self.planner.bounds
-        self.margin = self.planner.margin
-        if max_target_jump is not None and max_target_jump <= 0.0:
+        self.margin = core.MALLET_RADIUS if margin is None else float(margin)
+        if len(self.bounds) != 4 or not all(math.isfinite(value) for value in self.bounds):
+            raise ValueError("bounds must contain four finite coordinates")
+        left, right, top, bottom = self.bounds
+        if left >= right or top >= bottom:
+            raise ValueError("bounds must enclose a positive area")
+        if not math.isfinite(self.margin) or self.margin < 0:
+            raise ValueError("margin must be finite and non-negative")
+        # 自定义范围不能放宽 PLC 可达的物理场地边界。
+        x_min = max(left + self.margin, core.RINK_LEFT + core.MALLET_RADIUS)
+        x_max = min(right - self.margin, core.RINK_RIGHT - core.MALLET_RADIUS)
+        y_min = max(top + self.margin, core.RINK_TOP + core.MALLET_RADIUS)
+        y_max = min(bottom - self.margin, core.RINK_BOTTOM - core.MALLET_RADIUS)
+        if x_min > x_max or y_min > y_max:
+            raise ValueError("no reachable target within rink bounds")
+        self._limits = (x_min, x_max, y_min, y_max)
+        if max_target_jump is not None and (not math.isfinite(max_target_jump) or max_target_jump <= 0.0):
             raise ValueError("max_target_jump must be positive when provided")
         self.max_target_jump = max_target_jump
         self._last_target: Optional[tuple[float, float]] = None
 
     def clamp_target(self, target_x: float, target_y: float) -> tuple[float, float]:
-        """坐标范围检查 + 输出限幅：把目标收进场内可达范围。"""
+        """检查非有限坐标，将目标限制在自定义范围和实际场地内。"""
+        target_x, target_y = float(target_x), float(target_y)
         if not (math.isfinite(target_x) and math.isfinite(target_y)):
             raise ValueError("target must be finite")
-        return self.planner.clamp_target((target_x, target_y))
+        x_min, x_max, y_min, y_max = self._limits
+        return min(max(target_x, x_min), x_max), min(max(target_y, y_min), y_max)
 
-    def build_command(
+    def build_request(
         self,
         decision,
-        curling_state: CurlingState,
-        prediction,
-        *,
-        timestamp: float = 0.0,
-    ) -> ControlCommand:
-        """AIDecision -> ControlCommand。
-
-        decision 只需提供 target_x / target_y；预测时长用于换算所需速度。
-        """
-        target = self.clamp_target(float(decision.target_x), float(decision.target_y))
-        command = self.planner.plan(curling_state, prediction, target)
-        limited = self._limit_jump(command.target_position)
-        if limited != command.target_position:
-            command = replace(command, target_position=limited)
-        return command
-
-    def to_write_request(
-        self,
-        command: ControlCommand,
         *,
         ai_position: Sequence[float],
         curling_state: CurlingState,
@@ -123,8 +102,9 @@ class PlcControlAdapter:
         player_score: int = 0,
         ai_score: int = 0,
     ) -> PlcWriteRequest:
-        """ControlCommand -> PLC 写入请求（再次限幅，保证下发坐标合法）。"""
-        target_x, target_y = self.clamp_target(*command.target_position)
+        """AI 决策 -> PLC 写入请求；下发前再次收进实际场地边界。"""
+        target = self.clamp_target(decision.target_x, decision.target_y)
+        target_x, target_y = self.clamp_target(*self._limit_jump(target))
         return PlcWriteRequest(
             ai_target_x=float(target_x),
             ai_target_y=float(target_y),

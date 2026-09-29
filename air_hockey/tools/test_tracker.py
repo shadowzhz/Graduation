@@ -19,7 +19,6 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Test StoneDetector and StoneTracker with a camera."
     )
-    parser.add_argument("--backend", default="auto")
     parser.add_argument("--device", default=None)
     parser.add_argument(
         "--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
@@ -102,8 +101,6 @@ def main():
             width=1280,
             height=720,
             requested_fps=200.0,
-            pixel_format="MJPG",
-            backend=args.backend,
         )
     )
 
@@ -137,6 +134,8 @@ def main():
 
     try:
         while True:
+            if camera.error is not None:
+                raise RuntimeError(f"摄像头采集失败：{camera.error}") from camera.error
             frame = camera.get_latest_frame()
             if frame is None:
                 time.sleep(0.001)

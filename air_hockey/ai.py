@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from . import core_config as core
 from .physics import clamp
 from game_state import GameState
-from .prediction import TrajectoryPredictor
+from .prediction import PredictionState, TrajectoryPredictor
 
 AI_SERVE_SETUP_GAP = 6.0
 
@@ -27,17 +27,17 @@ class AirHockeyAI:
         self.predictor = predictor or TrajectoryPredictor()
         self._random = random.Random()
 
-    def update(self, state: GameState, dt: float) -> AIDecision:
+    def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
         """按难度反应延迟刷新目标。"""
         if state.awaiting_serve and state.current_server == "ai":
-            return replace(self.choose_target(state), reaction_timer=state.reaction_timer)
+            return replace(self.choose_target(state, prediction=prediction), reaction_timer=state.reaction_timer)
         reaction_timer = state.reaction_timer - dt
         if reaction_timer <= 0:
             reaction_timer += state.difficulty.reaction_delay
-            return replace(self.choose_target(state), reaction_timer=reaction_timer)
+            return replace(self.choose_target(state, prediction=prediction), reaction_timer=reaction_timer)
         return AIDecision(state.target_x, state.target_y, state.stalled_stone_phase, reaction_timer)
 
-    def choose_target(self, state: GameState) -> AIDecision:
+    def choose_target(self, state: GameState, *, prediction: PredictionState | None = None) -> AIDecision:
         if state.awaiting_serve:
             return self._choose_serve_target(state)
 
@@ -69,7 +69,7 @@ class AirHockeyAI:
                 )
             if stone_threatening_goal:
                 # 防守只横向封堵，不主动凑近冰壶
-                predicted_x = self._predict_stone_x(state, state.ai_home_y)
+                predicted_x = self._predict_stone_x(state, state.ai_home_y, prediction)
                 target_x = clamp(predicted_x + error * 0.5, safe_left, safe_right)
             else:
                 target_x = clamp(core.RINK_CENTER_X + error * 0.25, safe_left, safe_right)
@@ -92,7 +92,7 @@ class AirHockeyAI:
             )
 
         if stone_threatening_goal:
-            predicted_x = self._predict_stone_x(state, state.ai_home_y)
+            predicted_x = self._predict_stone_x(state, state.ai_home_y, prediction)
             blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
             target_x = clamp(blended_x + error, safe_left, safe_right)
         else:
@@ -138,9 +138,11 @@ class AirHockeyAI:
             phase,
         )
 
-    def _predict_stone_x(self, state: GameState, target_y: float) -> float:
+    def _predict_stone_x(
+        self, state: GameState, target_y: float, prediction: PredictionState | None = None
+    ) -> float:
         """从共享 TrajectoryPredictor 的 PredictionState 中获取冰壶到达 target_y 横线附近时的横坐标。"""
-        trajectory = self.predictor.predict(state.stone).trajectory
+        trajectory = (prediction if prediction is not None else self.predictor.predict(state.stone)).trajectory
         if not trajectory:
             return state.stone.x
         if len(trajectory) == 1:

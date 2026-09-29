@@ -1,7 +1,9 @@
 """测量 GStreamer appsink 到 NumPy 的传输开销。
 
-mode 区分三个阶段：map=只映射缓冲区；bgrx-copy=完整四通道复制；
-bgr-copy=裁成三通道 BGR 再复制（和 Camera 层行为一致）。
+独立 GStreamer 管道对比 map（只映射）、bgrx-copy（四通道复制）、
+bgr-copy（三通道裁剪复制）。这里不经过 CameraManager 的采集线程，
+也不执行实际 GStreamerBackend.read() 的颜色转换与错误处理；
+其 FPS 不是应用采集 FPS，不能用于计算曝光到应用的延迟。
 """
 
 
@@ -69,6 +71,7 @@ def run(args):
             print(f"GStreamer 管道状态异常: {state.value_nick}", file=sys.stderr)
             return 1
         print(f"传输基准开始：mode={args.mode}，时长={args.duration:g} 秒")
+        print("独立管道传输诊断；实际采集路径使用 CameraManager + GStreamerBackend.read()，颜色转换及线程统计不同。")
         started_at = time.perf_counter()
         deadline = started_at + args.duration
         while time.perf_counter() < deadline:

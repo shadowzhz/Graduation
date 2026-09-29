@@ -41,7 +41,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="球台四点 Homography 标定（undistorted -> table）")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--output", default="calibration/table_homography.npz", help="输出单应矩阵文件")
-    parser.add_argument("--backend", default="auto", choices=("auto", "gstreamer", "v4l2"))
     parser.add_argument("--device", default=None, help="摄像头设备，例如 /dev/video0")
     parser.add_argument("--image", default=None, help="改用静态图片而非相机")
     return parser.parse_args()
@@ -62,7 +61,7 @@ def grab_frame(args) -> np.ndarray:
             raise SystemExit(f"无法读取图片: {args.image}")
         return image
 
-    camera = CameraManager(CameraConfig(device=args.device, backend=args.backend))
+    camera = CameraManager(CameraConfig(device=args.device))
     try:
         camera.start(timeout=3.0)
     except Exception as exc:
@@ -73,6 +72,8 @@ def grab_frame(args) -> np.ndarray:
             frame = camera.get_latest_frame()
             if frame is not None:
                 return frame.image.copy()
+            if camera.error is not None:
+                raise SystemExit(f"摄像头采集失败：{camera.error}")
             time.sleep(0.01)
         raise SystemExit("未能在超时前获取相机帧")
     finally:
