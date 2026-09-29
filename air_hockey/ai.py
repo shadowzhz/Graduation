@@ -1,5 +1,7 @@
 """电脑球槌的目标决策。"""
 
+from __future__ import annotations
+
 import math
 import random
 from dataclasses import dataclass, replace
