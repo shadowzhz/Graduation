@@ -80,17 +80,11 @@ class GStreamerBackend:
         if self.info is not None:
             return
         structure = sample.get_caps().get_structure(0)
-        fps = structure.get_value("framerate")
-        if hasattr(fps, "num") and hasattr(fps, "denom"):
-            numerator, denominator = fps.num, fps.denom
-        else:
-            # GI installations may expose Gst.Fraction as a pair.
-            try:
-                numerator, denominator = fps
-            except (TypeError, ValueError):
-                raise RuntimeError(f"GStreamer caps 中帧率无效: {fps!r}") from None
-        if not numerator or not denominator:
-            raise RuntimeError(f"GStreamer caps 中帧率无效: {fps!r}")
+        # get_value() on GstFraction can fail with "unknown type GstFraction"
+        # when the gst-python override is unavailable on Jetson.
+        valid_fps, numerator, denominator = structure.get_fraction("framerate")
+        if not valid_fps or numerator <= 0 or denominator <= 0:
+            raise RuntimeError("GStreamer caps 中帧率无效")
         if structure.get_value("format") != "BGRx":
             raise RuntimeError("GStreamer appsink 未协商 BGRx 输出")
         self.info = CameraInfo(
