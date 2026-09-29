@@ -116,6 +116,8 @@ python3 main.py --plc 192.168.0.1 --plc-rate 30   # 启用 AI->PLC 非阻塞输�
 
 Jetson 的 Python 3.8 运行时需使用已包含延迟类型注解修复的最新代码，并确保该解释器安装了 `numpy`、`cv2`、`gi` 等运行依赖；无标定开关只跳过标定，不会跳过摄像头和 GStreamer 依赖。
 
+Jetson 上若看到 `unknown type GstFraction`，需更新到通过 `Gst.Structure.get_fraction("framerate")` 读取协商帧率的版本。`/dev/video*` 中可能有非采集设备；用 `v4l2-ctl --device=/dev/video0 --list-formats-ext` 核对 MJPEG 分辨率/帧率，再用 `python3 air_hockey/tools/test_camera.py --device /dev/video0 --benchmark --duration 10` 单独诊断该采集节点。
+
 采集诊断：`python3 air_hockey/tools/test_camera.py --benchmark --duration 10` 给出设备、请求与真实 caps 协商模式、采集线程实测 FPS、独立取样的 read/convert 耗时分布（read 总耗时包含取样等待和转换，不与 convert 相加）；`python3 air_hockey/tools/test_gstreamer_transfer.py --mode bgr-cvt --duration 10` 在独立管道比较与实际后端相同的 OpenCV BGRx→BGR 转换，`--mode bgr-copy` 则只测 NumPy 三通道裁剪复制。后者不是实际转换路径，独立管道的 FPS 也不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/协商 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的读取/转换完成时刻，Gst PTS 是未映射的管道时钟域原值，二者均不是曝光时间；不能据此声称曝光到显示或 PLC 端到端延迟。本机无 Jetson，尚未取得本次变更的实机测量数据。
 
 预览链路先将原始帧缩到 640 像素宽，再按相同比例绘制 ROI、观测、轨迹和 AI 目标；`render()` 全分辨率输出仍保持原有行为。此路径不再为预览复制、绘制整张原始分辨率图像。本机 1280×720 合成画面、各预热 3 次后各测 50 次的单次对比：预览编码耗时 p50 从约 1.97 ms 降为约 0.96 ms；这不是 Jetson 或真实相机的性能结论。GStreamer 后端仍保留 cv2 的 BGRx→BGR 转换，不在缺少 Jetson 实测时改动硬件协商管道。
@@ -180,7 +182,7 @@ Graduation/
 │   └── 交接文档.md             # 面向开发者的详细技术与工程交接文档
 ├── calibration/                # 相机内参在库；table_homography.npz 须在实台标定后生成
 ├── 冰壶仿真/                   # 桌面仿真 GUI、GUI 配置与 PLC 通信模块
-└── tests/                      # 自动化测试套件（154 项，无需 pytest）
+└── tests/                      # 自动化测试套件（155 项，无需 pytest）
 ```
 
 ---
@@ -197,7 +199,7 @@ Graduation/
 * [x] 独立 `ControlCommand` 轨迹规划与目标坐标直达 PLC 的非阻塞软件输出链（实机执行机构尚未联调）
 * [x] 仿真测试环境、多组实验评估与统一格式运行日志
 * [x] 西门子 S7 PLC 通信底层封装
-* [x] 154 项自动化功能回归测试套件
+* [x] 155 项自动化功能回归测试套件
 
 ### 后续展望与改进方向
 * [ ] **实台物理参数辨识**：在真实气浮台采集滑行/碰撞数据，回归摩擦与恢复系数。

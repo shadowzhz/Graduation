@@ -152,10 +152,15 @@ def test_gst_sample_caps_diagnostics_and_pixel_ownership():
     from air_hockey.camera.gst_backend import GStreamerBackend
 
     raw = bytearray([3, 7, 11, 0, 13, 17, 19, 0])
-    structure = SimpleNamespace(get_value=lambda key: {
-        "width": 2, "height": 1, "framerate": SimpleNamespace(num=30, denom=1),
-        "format": "BGRx",
-    }[key])
+    def get_value(key):
+        if key == "framerate":
+            raise TypeError("unknown type GstFraction")
+        return {"width": 2, "height": 1, "format": "BGRx"}[key]
+
+    structure = SimpleNamespace(
+        get_value=get_value,
+        get_fraction=lambda key: (True, 30, 1) if key == "framerate" else (False, 0, 0),
+    )
     caps = SimpleNamespace(get_size=lambda: 1, get_structure=lambda index: structure)
 
     class Buffer:
@@ -187,13 +192,31 @@ def test_gst_sample_caps_diagnostics_and_pixel_ownership():
     assert image[0, 0, 0] == 3  # frame owns pixels beyond GstBuffer unmap
 
 
+def test_gst_rejects_invalid_negotiated_framerate():
+    from air_hockey.camera.gst_backend import GStreamerBackend
+
+    for fraction in ((False, 0, 0), (True, 30, 0), (True, -1, 1)):
+        structure = SimpleNamespace(
+            get_fraction=lambda key: fraction,
+            get_value=lambda key: "BGRx",
+        )
+        sample = SimpleNamespace(get_caps=lambda: SimpleNamespace(get_structure=lambda index: structure))
+        backend = GStreamerBackend(CameraConfig())
+        try:
+            backend._record_info(sample, 1280, 720)
+        except RuntimeError as exc:
+            assert "帧率无效" in str(exc)
+        else:
+            raise AssertionError("invalid negotiated FPS must not be reported as camera info")
+
+
 def test_gst_rejects_unknown_padded_stride():
     from air_hockey.camera.gst_backend import GStreamerBackend
 
-    structure = SimpleNamespace(get_value=lambda key: {
-        "width": 2, "height": 1, "framerate": SimpleNamespace(num=30, denom=1),
-        "format": "BGRx",
-    }[key])
+    structure = SimpleNamespace(
+        get_value=lambda key: {"width": 2, "height": 1, "format": "BGRx"}[key],
+        get_fraction=lambda key: (True, 30, 1),
+    )
     caps = SimpleNamespace(get_size=lambda: 1, get_structure=lambda index: structure)
     buffer = SimpleNamespace(
         pts=0, map=lambda flags: (True, SimpleNamespace(data=b"\0" * 12)),
