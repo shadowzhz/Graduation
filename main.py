@@ -109,7 +109,13 @@ class VisionWindow:
         self.label = tk.Label(self.root, bg="black")
         self.label.pack()
         self.status = tk.StringVar(value="等待画面")
-        tk.Label(self.root, textvariable=self.status, anchor="w").pack(fill="x")
+        status_panel = tk.Frame(self.root, width=DISPLAY_WIDTH, height=64)
+        status_panel.pack(fill="x")
+        status_panel.pack_propagate(False)
+        tk.Label(
+            status_panel, textvariable=self.status, anchor="nw", justify="left",
+            wraplength=DISPLAY_WIDTH - 12,
+        ).pack(fill="both", expand=True)
         self._photo = None
         self._seen_seq = -1
         self._lock = None
