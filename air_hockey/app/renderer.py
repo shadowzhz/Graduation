@@ -16,35 +16,55 @@ def render(result: VisionResult, table_roi: Sequence[int], camera_geometry) -> n
     全程统一使用 raw pixel，无需人工添加任何偏移。
     接收 VisionResult、table_roi 与 camera_geometry，返回标注后的图像副本，不修改原图。
     """
-    output = result.frame.image.copy()
+    return _draw_annotations(result.frame.image.copy(), result, table_roi, camera_geometry, 1.0, 1.0)
+
+
+def render_preview(result: VisionResult, table_roi: Sequence[int], camera_geometry, width: int) -> np.ndarray:
+    """先缩小原始画面，再在预览分辨率绘制标注；不复制全分辨率画面。"""
+    image = result.frame.image
+    source_height, source_width = image.shape[:2]
+    height = max(1, round(source_height * width / source_width))
+    output = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+    return _draw_annotations(output, result, table_roi, camera_geometry, width / source_width, height / source_height)
+
+
+def _draw_annotations(
+    output: np.ndarray, result: VisionResult, table_roi: Sequence[int], camera_geometry,
+    scale_x: float, scale_y: float,
+) -> np.ndarray:
+    """把 raw 像素标注投影到目标画布；render 与预览使用相同的几何数据。"""
+    scale = min(scale_x, scale_y)
+
+    def point(x, y):
+        return round(x * scale_x), round(y * scale_y)
+
+    def size(value):
+        return max(1, round(value * scale))
 
     rx, ry, rw, rh = table_roi
-    cv2.rectangle(output, (int(rx), int(ry)), (int(rx + rw), int(ry + rh)), (0, 255, 255), 2)
+    cv2.rectangle(output, point(rx, ry), point(rx + rw, ry + rh), (0, 255, 255), size(2))
 
     if result.detection is not None:
-        center = (round(result.detection.center_x), round(result.detection.center_y))
-        cv2.circle(output, center, max(1, round(result.detection.radius)), (0, 255, 0), 2)
-        cv2.circle(output, center, 3, (0, 255, 0), -1)
+        center = point(result.detection.center_x, result.detection.center_y)
+        cv2.circle(output, center, size(result.detection.radius), (0, 255, 0), size(2))
+        cv2.circle(output, center, size(3), (0, 255, 0), -1)
 
     if result.track is not None:
-        center = (round(result.track.center_x), round(result.track.center_y))
-        end = (
-            round(result.track.center_x + result.track.vx * 0.1),
-            round(result.track.center_y + result.track.vy * 0.1),
-        )
-        cv2.arrowedLine(output, center, end, (0, 0, 255), 2, tipLength=0.2)
+        center = point(result.track.center_x, result.track.center_y)
+        end = point(result.track.center_x + result.track.vx * 0.1, result.track.center_y + result.track.vy * 0.1)
+        cv2.arrowedLine(output, center, end, (0, 0, 255), size(2), tipLength=0.2)
 
     if result.trajectory and len(result.trajectory) > 1:
         pixel_trajectory = [camera_geometry.table_to_raw(px, py) for px, py in result.trajectory]
         for i in range(len(pixel_trajectory) - 1):
-            pt1 = (round(pixel_trajectory[i][0]), round(pixel_trajectory[i][1]))
-            pt2 = (round(pixel_trajectory[i + 1][0]), round(pixel_trajectory[i + 1][1]))
+            pt1 = point(*pixel_trajectory[i])
+            pt2 = point(*pixel_trajectory[i + 1])
             fade = max(50, 255 - i * 6)
             line_color = (fade, int(fade * 0.75), 50)
-            cv2.line(output, pt1, pt2, line_color, 2, cv2.LINE_AA)
+            cv2.line(output, pt1, pt2, line_color, size(2), cv2.LINE_AA)
         for i, (px, py) in enumerate(pixel_trajectory):
             alpha = max(60, 255 - i * 6)
-            cv2.circle(output, (round(px), round(py)), 2, (alpha, 170, 70), -1)
+            cv2.circle(output, point(px, py), size(2), (alpha, 170, 70), -1)
 
     # 轨迹调试：在预测终点画一个三角标记，与 AI 目标十字区分
     if result.trajectory_debug is not None:
@@ -52,25 +72,26 @@ def render(result: VisionResult, table_roi: Sequence[int], camera_geometry) -> n
         end_px, end_py = camera_geometry.table_to_raw(ex, ey)
         cv2.drawMarker(
             output,
-            (round(end_px), round(end_py)),
+            point(end_px, end_py),
             (0, 165, 255),
             cv2.MARKER_TRIANGLE_UP,
-            18,
-            2,
+            size(18),
+            size(2),
         )
 
     if result.ai_target is not None:
         tx, ty = camera_geometry.table_to_raw(result.ai_target[0], result.ai_target[1])
         cv2.drawMarker(
             output,
-            (round(tx), round(ty)),
+            point(tx, ty),
             (255, 0, 255),
             cv2.MARKER_CROSS,
-            28,
-            3,
+            size(28),
+            size(3),
         )
 
-    cv2.putText(output, f"FPS {result.fps:.1f}", (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(output, f"FPS {result.fps:.1f}", point(14, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7 * scale, (255, 255, 255), size(2))
     return output
 
 

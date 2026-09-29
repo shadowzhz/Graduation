@@ -1,8 +1,8 @@
 """测量 GStreamer appsink 到 NumPy 的传输开销。
 
 独立 GStreamer 管道对比 map（只映射）、bgrx-copy（四通道复制）、
-bgr-copy（三通道裁剪复制）。这里不经过 CameraManager 的采集线程，
-也不执行实际 GStreamerBackend.read() 的颜色转换与错误处理；
+bgr-copy（三通道裁剪复制）和 bgr-cvt（与后端相同的 OpenCV 转换）。
+这里不经过 CameraManager 的采集线程或 GStreamerBackend.read() 的错误处理；
 其 FPS 不是应用采集 FPS，不能用于计算曝光到应用的延迟。
 """
 
@@ -11,6 +11,7 @@ import argparse
 import sys
 import time
 
+import cv2
 import numpy as np
 
 
@@ -23,9 +24,9 @@ def build_parser():
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument(
         "--mode",
-        choices=("map", "bgrx-copy", "bgr-copy"),
+        choices=("map", "bgrx-copy", "bgr-copy", "bgr-cvt"),
         default="bgr-copy",
-        help="map=仅映射；bgrx-copy=完整四通道复制；bgr-copy=复制为三通道 BGR",
+        help="map=仅映射；bgrx-copy=四通道复制；bgr-copy=三通道裁剪复制；bgr-cvt=实际 OpenCV 转换",
     )
     return parser
 
@@ -71,7 +72,7 @@ def run(args):
             print(f"GStreamer 管道状态异常: {state.value_nick}", file=sys.stderr)
             return 1
         print(f"传输基准开始：mode={args.mode}，时长={args.duration:g} 秒")
-        print("独立管道传输诊断；实际采集路径使用 CameraManager + GStreamerBackend.read()，颜色转换及线程统计不同。")
+        print("独立管道传输诊断；bgr-cvt 与后端转换方式相同，但不含 CameraManager 线程和故障处理。")
         started_at = time.perf_counter()
         deadline = started_at + args.duration
         while time.perf_counter() < deadline:
@@ -88,7 +89,11 @@ def run(args):
                     if args.mode == "bgrx-copy":
                         image = raw.copy()
                     else:
-                        image = raw.reshape((args.height, args.width, 4))[:, :, :3].copy()
+                        pixels = raw.reshape((args.height, args.width, 4))
+                        if args.mode == "bgr-cvt":
+                            image = cv2.cvtColor(pixels, cv2.COLOR_BGRA2BGR)
+                        else:
+                            image = pixels[:, :, :3].copy()
                     # 防止复制被优化掉
                     if image.size == 0:
                         raise RuntimeError("空图像")

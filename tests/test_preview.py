@@ -1,15 +1,10 @@
-"""针对预览编码路径的单元测试。
+"""预览的缩放、坐标标注和 RGB 像素输出回归。"""
 
-处理线程只保存最新 VisionResult，render 标注移到按预览帧率限速的编码线程。
-这里锁定编码线程的输出顺序：render -> resize -> BGR->RGB -> PPM。
-"""
-
-import cv2
 import numpy as np
 
-from air_hockey.app.renderer import render
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
+from air_hockey.vision.types import Detection
 from main import DISPLAY_WIDTH, encode_preview_ppm
 
 TABLE_ROI = (350, 0, 580, 650)
@@ -32,31 +27,30 @@ def make_result(fps):
     return VisionResult(frame=Frame(image=img, timestamp=1.0, sequence=1), fps=fps)
 
 
-def test_encode_preview_ppm_matches_render_then_resize():
-    """PPM 必须等于 render 后再 resize、BGR->RGB 的像素，保证显示效果不变。"""
+def test_encode_preview_ppm_draws_in_scaled_raw_pixel_coordinates():
     result = make_result(42.0)
-    geometry = MockGeometry()
+    result.frame.image[:] = (10, 20, 30)
+    result.detection = Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0)
+    result.ai_target = (1000.0, 400.0)
+    result.trajectory = [(1050.0, 500.0), (1150.0, 600.0)]
 
-    ppm = encode_preview_ppm(result, TABLE_ROI, geometry)
+    width, height, maxval, pixels = split_ppm(encode_preview_ppm(result, TABLE_ROI, MockGeometry()))
+    rgb = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
 
-    width, height, maxval, pixels = split_ppm(ppm)
-
-    marked = render(result, TABLE_ROI, geometry)
-    scale = DISPLAY_WIDTH / marked.shape[1]
-    expected = cv2.resize(
-        marked, (DISPLAY_WIDTH, round(marked.shape[0] * scale)), interpolation=cv2.INTER_AREA
-    )
-    expected = cv2.cvtColor(expected, cv2.COLOR_BGR2RGB)
-
-    assert (width, height) == (expected.shape[1], expected.shape[0])
-    assert maxval == 255
-    assert len(pixels) == width * height * 3
-    assert pixels == expected.tobytes()
+    assert (width, height, maxval) == (DISPLAY_WIDTH, 360, 255)
+    assert tuple(rgb[330, 500]) == (30, 20, 10)  # BGR 输入被转换为 RGB，不在标注区
+    assert tuple(rgb[120, 175]) == (255, 255, 0)  # 球台 ROI 左边框缩放到一半
+    assert tuple(rgb[150, 250]) == (0, 255, 0)  # 冰壶观测中心
+    assert tuple(rgb[200, 500]) == (255, 0, 255)  # table->raw 后的 AI 十字中心
+    assert tuple(rgb[275, 550]) != (30, 20, 10)  # 预测轨迹连线
+    assert np.all(result.frame.image == (10, 20, 30))  # 绘制不污染处理帧
 
 
-def test_encode_preview_ppm_includes_render_annotations():
-    """render 的标注（ROI 框、FPS 文字）必须出现在最终 PPM 中，而不是未标注的原始帧。"""
-    result = make_result(99.0)
-    ppm = encode_preview_ppm(result, TABLE_ROI, MockGeometry())
-    _, _, _, pixels = split_ppm(ppm)
-    assert any(pixels)
+def test_encode_preview_ppm_preserves_non_default_aspect_ratio():
+    result = make_result(60.0)
+    result.frame.image = np.zeros((400, 800, 3), dtype=np.uint8)
+    result.detection = Detection(center_x=400.0, center_y=200.0, radius=15.0, area=700.0, timestamp=1.0)
+    width, height, _, pixels = split_ppm(encode_preview_ppm(result, TABLE_ROI, MockGeometry()))
+    rgb = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
+    assert (width, height) == (640, 320)
+    assert tuple(rgb[160, 320]) == (0, 255, 0)
