@@ -113,7 +113,9 @@ python3 main.py --plc 192.168.0.1 --plc-rate 30   # 启用 AI->PLC 非阻塞输�
 
 常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
 
-P0 诊断：`python3 air_hockey/tools/test_camera.py --benchmark --duration 10` 给出设备、请求与真实 caps 协商模式、采集线程实测 FPS、独立取样的 read/convert 耗时分布（read 总耗时包含取样等待和转换，不与 convert 相加）；`python3 air_hockey/tools/test_gstreamer_transfer.py --mode bgr-copy --duration 10` 仅比较独立管道映射/复制，不是实际转换路径。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/协商 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的读取/转换完成时刻，Gst PTS 是未映射的管道时钟域原值，二者均不是曝光时间；不能据此声称曝光到显示或 PLC 端到端延迟。本机无 Jetson，尚未取得本次变更的实机测量数据。
+采集诊断：`python3 air_hockey/tools/test_camera.py --benchmark --duration 10` 给出设备、请求与真实 caps 协商模式、采集线程实测 FPS、独立取样的 read/convert 耗时分布（read 总耗时包含取样等待和转换，不与 convert 相加）；`python3 air_hockey/tools/test_gstreamer_transfer.py --mode bgr-cvt --duration 10` 在独立管道比较与实际后端相同的 OpenCV BGRx→BGR 转换，`--mode bgr-copy` 则只测 NumPy 三通道裁剪复制。后者不是实际转换路径，独立管道的 FPS 也不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/协商 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的读取/转换完成时刻，Gst PTS 是未映射的管道时钟域原值，二者均不是曝光时间；不能据此声称曝光到显示或 PLC 端到端延迟。本机无 Jetson，尚未取得本次变更的实机测量数据。
+
+预览链路先将原始帧缩到 640 像素宽，再按相同比例绘制 ROI、观测、轨迹和 AI 目标；`render()` 全分辨率输出仍保持原有行为。此路径不再为预览复制、绘制整张原始分辨率图像。本机 1280×720 合成画面、各预热 3 次后各测 50 次的单次对比：预览编码耗时 p50 从约 1.97 ms 降为约 0.96 ms；这不是 Jetson 或真实相机的性能结论。GStreamer 后端仍保留 cv2 的 BGRx→BGR 转换，不在缺少 Jetson 实测时改动硬件协商管道。
 
 辅助工具：
 

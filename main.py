@@ -28,7 +28,7 @@ SIM_ROOT = PROJECT_ROOT / "冰壶仿真"             # 仿真代码（仅 --sim 
 import cv2
 import tkinter as tk
 
-from air_hockey.app.renderer import format_status, render
+from air_hockey.app.renderer import format_status, render_preview
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera import CameraManager
 from air_hockey.control import PlcControlAdapter, PlcOutputWorker
@@ -90,9 +90,7 @@ def load_plc_interface():
 
 def encode_preview_ppm(result, table_roi, camera_geometry):
     """将最新 VisionResult 渲染并编码为 Tk 可显示的 PPM 原始像素。"""
-    marked = render(result, table_roi, camera_geometry)
-    scale = DISPLAY_WIDTH / marked.shape[1]
-    small = cv2.resize(marked, (DISPLAY_WIDTH, round(marked.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+    small = render_preview(result, table_roi, camera_geometry, DISPLAY_WIDTH)
     rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
     h, w = rgb.shape[:2]
     return f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
