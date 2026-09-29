@@ -1,5 +1,7 @@
 """视觉和游戏之间共享的状态定义。"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 from math import hypot
