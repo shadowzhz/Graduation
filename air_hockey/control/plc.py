@@ -189,6 +189,7 @@ class PLCInterface:
     def reset_tracking(self):
         self._last_phys_x = None
         self._last_phys_y = None
+        return True
 
     def _write_bool(self, db, offset, bit, value):
         self.round_trips += 2
