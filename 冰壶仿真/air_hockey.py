@@ -63,7 +63,7 @@ from air_hockey.prediction import TrajectoryPredictor
 
 
 class AirHockeyGame:
-    def __init__(self, root: tk.Tk, plc_ip: str = None, ui_scale: float = None) -> None:
+    def __init__(self, root: tk.Tk, plc_ip: str = None, ui_scale: float = None, plc_rate: float = 30.0) -> None:
         self.root = root
         self.ui_scale = float(ui_scale if ui_scale is not None else gui_config.UI_SCALE)
         self.predictor = TrajectoryPredictor()
@@ -87,7 +87,7 @@ class AirHockeyGame:
         self.axis_status_text = ""
         self.plc_axis_alarm = False
         self.plc_feedback_ready = False
-        self.plc = PLCLink(plc_ip, zone=(RINK_LEFT, RINK_RIGHT, RINK_TOP, RINK_CENTER_Y)) if plc_ip else None
+        self.plc = PLCLink(plc_ip, period=1.0 / plc_rate, zone=(RINK_LEFT, RINK_RIGHT, RINK_TOP, RINK_CENTER_Y)) if plc_ip else None
         self.difficulty = DIFFICULTIES["普通"]
         self.prediction_cache = []
         self.prediction_display_points = []
@@ -833,7 +833,10 @@ class AirHockeyGame:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--plc", metavar="IP", help="连接 S7-1500 PLC，例如 192.168.0.1")
+    parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     args = parser.parse_args()
+    if args.plc and (not math.isfinite(args.plc_rate) or args.plc_rate <= 0.0):
+        parser.error("--plc-rate 必须为有限正数")
 
     if not os.environ.get("DISPLAY") and os.path.exists("/tmp/.X11-unix/X0"):
         os.environ["DISPLAY"] = ":0"
@@ -842,7 +845,7 @@ def main():
             os.environ["XAUTHORITY"] = xauthority
     root = tk.Tk()
     gui_config.configure_responsive_layout(root)
-    AirHockeyGame(root, plc_ip=args.plc)
+    AirHockeyGame(root, plc_ip=args.plc, plc_rate=args.plc_rate)
     gui_config.center_window(root)
     root.mainloop()
 

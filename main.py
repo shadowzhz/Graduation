@@ -69,11 +69,11 @@ class LatencySamples:
             return {key: self.distribution(values) for key, values in self._values.items()}
 
 
-def run_game(plc_ip=None):
+def run_game(plc_ip=None, plc_rate=30.0):
     """启动仿真子进程，显式设置 cwd 避免相对路径资源加载报错。"""
     command = [sys.executable, str(SIM_ROOT / "air_hockey.py")]
     if plc_ip:
-        command.extend(("--plc", plc_ip))
+        command.extend(("--plc", plc_ip, "--plc-rate", str(plc_rate)))
     subprocess.run(command, cwd=str(SIM_ROOT))
 
 
@@ -500,7 +500,7 @@ def main():
         )
 
     if args.sim:
-        run_game(args.plc)
+        run_game(args.plc, args.plc_rate)
     else:
         run_vision(args)
 
