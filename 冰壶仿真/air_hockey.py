@@ -58,7 +58,7 @@ from air_hockey.physics import (
     stone_inside_goal_mouth,
 )
 from game_state import GameState, StoneState, TrackingState
-from plc_interface import PLCInterface
+from air_hockey.control.plc import PLCLink
 from air_hockey.prediction import TrajectoryPredictor
 
 
@@ -81,6 +81,13 @@ class AirHockeyGame:
         self.status_text = initial_message
         self.status_header_var = tk.StringVar(value=initial_message)
         self.last_rendered_status = initial_message
+        self.transient_status = ""
+        self.transient_status_until = 0.0
+        self.plc_warning = ""
+        self.axis_status_text = ""
+        self.plc_axis_alarm = False
+        self.plc_feedback_ready = False
+        self.plc = PLCLink(plc_ip, zone=(RINK_LEFT, RINK_RIGHT, RINK_TOP, RINK_CENTER_Y)) if plc_ip else None
         self.difficulty = DIFFICULTIES["普通"]
         self.prediction_cache = []
         self.prediction_display_points = []
@@ -96,15 +103,11 @@ class AirHockeyGame:
         self._build_ui()
         self._bind_controls()
         self._reset_round(initial_message, "player")
+        if self.plc:
+            self.plc.start()
+            self._sync_plc()
         self._render()
         self.last_frame_time = time.perf_counter()
-
-        # PLC 连接
-        self.plc = None
-        if plc_ip:
-            self.plc = PLCInterface(plc_ip)
-            self.plc.connect()
-
         self._schedule_game_loop()
 
     def _schedule_game_loop(self) -> None:
@@ -128,7 +131,7 @@ class AirHockeyGame:
         style.map("Difficulty.TRadiobutton", background=[("active", "#174469")], foreground=[("active", "#ffffff")])
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self.root, bg="#0b2239", height=154)
+        header = tk.Frame(self.root, bg="#0b2239", height=188 if self.plc else 154)
         header.pack(fill="x", padx=16, pady=(12, 7))
         header.pack_propagate(False)
         title_row = tk.Frame(header, bg="#0b2239")
@@ -154,10 +157,15 @@ class AirHockeyGame:
         button_box.pack(side="right")
         tk.Button(button_box, textvariable=self.start_button_var, command=self.toggle_pause, width=10, relief="flat", bd=0, bg="#18a7d6", activebackground="#36b9e3", fg="#ffffff", activeforeground="#ffffff", font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2").pack(side="left", padx=(0, 8))
         tk.Button(button_box, text="重新开局", command=self.reset_match, width=9, relief="flat", bd=0, bg="#274c69", activebackground="#356685", fg="#ffffff", activeforeground="#ffffff", font=("Microsoft YaHei UI", 10), cursor="hand2").pack(side="left")
+        if self.plc:
+            axis_buttons = tk.Frame(header, bg="#0b2239")
+            axis_buttons.pack(anchor="e", pady=(4, 0))
+            for text, command in (("轴使能 E", self._enable_axes), ("轴回零 H", self._home_axes), ("轴复位 C", self._reset_axes)):
+                tk.Button(axis_buttons, text=text, command=command, relief="flat", bd=0, bg="#3b5a2e", activebackground="#4e7440", fg="#ffffff", activeforeground="#ffffff", font=("Microsoft YaHei UI", 9), cursor="hand2").pack(side="left", padx=(6, 0))
         self.canvas = tk.Canvas(self.root, width=gui_config.CANVAS_WIDTH, height=gui_config.CANVAS_HEIGHT, bg="#dff4fc", highlightthickness=0, cursor="arrow")
         self.canvas.pack(padx=20, pady=(0, 7))
         self._draw_rink()
-        tk.Label(self.root, text="按住左键拖动：控制球槌    预测线：预测轨迹    空格：开始/暂停    R：重新开局", bg="#0b2239", fg="#86adc5", font=("Microsoft YaHei UI", 9), wraplength=gui_config.CANVAS_WIDTH).pack(pady=(0, 12))
+        tk.Label(self.root, text="按住左键拖动：控制球槌    空格：开始/暂停    R：重新开局" + ("    E/H/C：轴使能/回零/复位" if self.plc else ""), bg="#0b2239", fg="#86adc5", font=("Microsoft YaHei UI", 9), wraplength=gui_config.CANVAS_WIDTH).pack(pady=(0, 12))
 
     def _draw_rink(self) -> None:
         c = self.canvas
@@ -191,6 +199,9 @@ class AirHockeyGame:
         self.stone_item = c.create_oval(0, 0, 0, 0, fill="#172b3b", outline="#07121b", width=max(1, round(3 * scale)))
         self.player_glint = c.create_oval(0, 0, 0, 0, fill="#76d1ee", outline="")
         self.ai_glint = c.create_oval(0, 0, 0, 0, fill="#ff9ca5", outline="")
+        if self.plc:
+            self.plc_status_item = c.create_text(10 * scale, (gui_config.BASE_CANVAS_HEIGHT - 20) * scale, text="", anchor="w", fill="#173e55", font=("Microsoft YaHei UI", max(8, round(10 * scale)), "bold"))
+            self.plc_debug_item = c.create_text(10 * scale, (gui_config.BASE_CANVAS_HEIGHT - 38) * scale, text="", anchor="w", fill="#4a6b80", font=("Microsoft YaHei UI", max(8, round(9 * scale))))
 
     def _bind_controls(self) -> None:
         self.canvas.bind("<ButtonPress-1>", self._mouse_pressed)
@@ -202,6 +213,10 @@ class AirHockeyGame:
         self.root.bind("1", lambda _event: self._set_difficulty("简单"))
         self.root.bind("2", lambda _event: self._set_difficulty("普通"))
         self.root.bind("3", lambda _event: self._set_difficulty("困难"))
+        if self.plc:
+            for key, command in (("e", self._enable_axes), ("h", self._home_axes), ("c", self._reset_axes)):
+                self.root.bind(key, lambda _event, action=command: action())
+                self.root.bind(key.upper(), lambda _event, action=command: action())
 
     def _update_mouse_target(self, event) -> None:
         self.mouse_target_x = float(event.x) / self.ui_scale
@@ -242,6 +257,11 @@ class AirHockeyGame:
         return self.mouse_target_x, self.mouse_target_y
 
     def toggle_pause(self) -> None:
+        if not self.running and self.plc:
+            self._sync_plc()
+            if not self.plc_feedback_ready or self.plc_warning:
+                self._flash_status(self.plc_warning or "PLC 反馈未就绪，不能启动实机模式", seconds=6.0)
+                return
         self.running = not self.running
         self.started = True
         self.last_frame_time = time.perf_counter()
@@ -253,8 +273,12 @@ class AirHockeyGame:
             self._stop_player_control()
             self.start_button_var.set("继续")
             self.status_text = "已暂停"
+            if self.plc:
+                self.plc.clear_target()
 
     def reset_match(self) -> None:
+        if self.plc:
+            self.plc.clear_target()
         self.player_score = self.ai_score = 0
         self.running = False
         self.started = False
@@ -298,9 +322,10 @@ class AirHockeyGame:
             self.mouse_target_y = self.player_y
         else:
             self.mouse_target_x, self.mouse_target_y = previous_mouse_target
-        self.ai_x = RINK_CENTER_X
-        self.ai_y = self.ai_home_y
-        self.ai_vx = self.ai_vy = 0.0
+        if not self.plc or not self.plc_feedback_ready:
+            self.ai_x = RINK_CENTER_X
+            self.ai_y = self.ai_home_y
+            self.ai_vx = self.ai_vy = 0.0
         self.ai_target_x = RINK_CENTER_X
         self.ai_target_y = self.ai_home_y
         self.ai_reaction_timer = 0.0
@@ -316,12 +341,16 @@ class AirHockeyGame:
         self.prediction_cache_origin = (RINK_CENTER_X, RINK_CENTER_Y)
         self.prediction_cache_velocity = (0.0, 0.0, 0.0, 0.0)
         self.prediction_cache_response_active = False
+        if self.plc:
+            self.plc.clear_target()
+            self.plc.reset_tracking()
         self._sync_player_mouse_control()
 
     def _game_loop(self) -> None:
         self.game_loop_id = None
         if self.closed:
             return
+        self._sync_plc()
         now = time.perf_counter()
         elapsed = now - self.last_frame_time
         self.last_frame_time = now
@@ -344,7 +373,11 @@ class AirHockeyGame:
                     break
         if self.closed:
             return
-        self._write_plc_data()
+        if self.plc:
+            if self.running and self.plc_feedback_ready and not self.plc_warning:
+                self.plc.set_target(self.ai_target_x, self.ai_target_y)
+            else:
+                self.plc.clear_target()
         self._render()
         self._schedule_game_loop()
 
@@ -371,11 +404,13 @@ class AirHockeyGame:
         ai_max_y = RINK_CENTER_Y - MALLET_RADIUS
         if self.awaiting_serve and self.current_server == "player":
             ai_max_y = RINK_CENTER_Y - MALLET_RADIUS - STONE_RADIUS - 8.0
-            self.ai_y = min(self.ai_y, ai_max_y)
+            if not self.plc:
+                self.ai_y = min(self.ai_y, ai_max_y)
         self.ai_target_y = clamp(self.ai_target_y, ai_min_y, ai_max_y)
-        self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._move_towards(self.ai_x, self.ai_y, self.ai_target_x, self.ai_target_y, difficulty.ai_speed, dt)
-        self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._resolve_mallet_goal_posts(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
-        self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._keep_mallet_clear_of_outer_corners(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
+        if not self.plc:
+            self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._move_towards(self.ai_x, self.ai_y, self.ai_target_x, self.ai_target_y, difficulty.ai_speed, dt)
+            self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._resolve_mallet_goal_posts(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
+            self.ai_x, self.ai_y, self.ai_vx, self.ai_vy = self._keep_mallet_clear_of_outer_corners(self.ai_x, self.ai_y, self.ai_vx, self.ai_vy)
         self.ai_serve_phase = self.ai_controller.advance_serve_phase(self._game_state(), dt)
 
     def _game_state(self):
@@ -407,23 +442,74 @@ class AirHockeyGame:
         self.ai_stalled_stone_phase = decision.stalled_stone_phase
         self.ai_reaction_timer = decision.reaction_timer
 
-    def _write_plc_data(self) -> None:
-        """把当前帧的 AI 数据写入 PLC。"""
-        if not self.plc or not self.plc.connected:
+    def _sync_plc(self) -> None:
+        """主线程只读取工作线程的反馈快照，绝不直接访问 PLC 网络。"""
+        if not self.plc:
             return
-        stone_vx, stone_vy = self.stone.collision_velocity()
-        self.plc.write_game_state(
-            ai_target_x=self.ai_target_x,
-            ai_target_y=self.ai_target_y,
-            ai_x=self.ai_x,
-            ai_y=self.ai_y,
-            stone_x=self.stone.x,
-            stone_y=self.stone.y,
-            stone_vx=stone_vx,
-            stone_vy=stone_vy,
-            player_score=self.player_score,
-            ai_score=self.ai_score,
-        )
+        for message in self.plc.drain_messages():
+            self._flash_status(message)
+
+        feedback = self.plc.feedback
+        # PLC 暂时连着但反馈停止更新时，上一笔位置同样不再可信。
+        fresh = feedback.valid and 0 <= time.monotonic() - feedback.stamp < 0.25
+        online = bool(self.plc.connected and fresh)
+        self.plc_feedback_ready = online and feedback.plc_echo_ok
+        self.plc_axis_alarm = bool(online and (feedback.kinematics_error or feedback.x_err or feedback.y_err))
+        if not online:
+            self.plc_warning = "⚠️ PLC 未连接或位置反馈失效，实机不可启动；请检查连接"
+            self.axis_status_text = ""
+            self.ai_vx = self.ai_vy = 0.0
+        else:
+            if self.plc_feedback_ready:
+                self.ai_x = clamp(feedback.x, 0.0, core.BASE_CANVAS_WIDTH)
+                self.ai_y = clamp(feedback.y, 0.0, core.BASE_CANVAS_HEIGHT)
+                self.ai_vx, self.ai_vy = feedback.vx, feedback.vy
+            else:
+                self.ai_vx = self.ai_vy = 0.0
+            self.axis_status_text = (
+                f"X轴{'✓' if feedback.x_en else '✗'}  Y轴{'✓' if feedback.y_en else '✗'}"
+                f"{'  轴已就绪' if feedback.axes_ready else '  请按 E 使能 / H 回零'}"
+                f"{'  运动中' if feedback.busy else ''}"
+            )
+            if feedback.kinematics_error:
+                self.plc_warning = f"⚠️ XY轴报警 {feedback.kinematics_error} 未清除；请按 C 复位后再开始"
+            elif feedback.x_err or feedback.y_err:
+                self.plc_warning = "⚠️ X/Y 轴报警未清除；请按 C 复位后再开始"
+            elif not feedback.plc_echo_ok:
+                self.plc_warning = "⚠️ PLC 心跳无回显，CPU 可能处于 STOP；位置不可用"
+            elif feedback.group_stop:
+                self.plc_warning = "⚠️ PLC 停止所有运动触发置位；请先解除停止状态"
+            elif feedback.comm_lost or feedback.comm_lost_latch:
+                self.plc_warning = "⚠️ PLC 判定通信丢失；请检查连接并复位"
+            elif not self.plc.armed:
+                self.plc_warning = "⚠️ 实机未授权运动；请按 E 重新授权运动后手动开始"
+            elif not feedback.axes_ready or not feedback.x_en or not feedback.y_en:
+                self.plc_warning = "⚠️ 轴未就绪；先按 E 使能，必要时按 H 回零"
+            else:
+                self.plc_warning = ""
+
+        if self.running and self.plc_warning:
+            self.running = False
+            self._stop_player_control()
+            self.start_button_var.set("继续")
+            self.plc.clear_target()
+            self._flash_status("实机状态不安全，游戏已暂停；排除告警后手动继续", seconds=6.0)
+
+    def _flash_status(self, message: str, seconds: float = 3.0) -> None:
+        self.transient_status = message
+        self.transient_status_until = time.monotonic() + seconds
+
+    def _enable_axes(self) -> None:
+        if self.plc:
+            self._flash_status("轴使能指令已排队" if self.plc.enable_axes() else "PLC 未连接，使能指令未发送")
+
+    def _home_axes(self) -> None:
+        if self.plc:
+            self._flash_status("轴回零指令已排队" if self.plc.home_axes() else "PLC 未连接，回零指令未发送")
+
+    def _reset_axes(self) -> None:
+        if self.plc:
+            self._flash_status("轴复位指令已排队" if self.plc.axes_reset() else "PLC 未连接，复位指令未发送")
 
     @staticmethod
     def _resolve_mallet_goal_posts(mallet_x, mallet_y, mallet_vx, mallet_vy):
@@ -624,10 +710,30 @@ class AirHockeyGame:
         self._position_circle(self.stone_item, stone.x, stone.y, STONE_RADIUS)
         self._position_circle(self.player_glint, self.player_x - glint_offset, self.player_y - glint_offset, glint_radius)
         self._position_circle(self.ai_glint, self.ai_x - glint_offset, self.ai_y - glint_offset, glint_radius)
-        if self.running and self.awaiting_serve:
+        if self.plc:
+            # 反馈丢失时隐藏旧球槌，不能把最后一个采样位置伪装成实机当前位置。
+            ai_state = "normal" if self.plc_feedback_ready else "hidden"
+            self.canvas.itemconfigure(self.ai_item, state=ai_state)
+            self.canvas.itemconfigure(self.ai_glint, state=ai_state)
+            self.canvas.itemconfigure(self.plc_status_item, text=self.plc_warning or self.axis_status_text)
+            self.canvas.itemconfigure(
+                self.plc_debug_item,
+                text=(f"目标({self.ai_target_x:.0f},{self.ai_target_y:.0f}) "
+                      f"实际({self.ai_x:.0f},{self.ai_y:.0f})  "
+                      f"{'运行中' if self.running else '目标已清除'}") if self.plc_feedback_ready else "反馈不可用",
+            )
+        if self.plc and self.plc_axis_alarm:
+            self.status_text = self.plc_warning
+        elif time.monotonic() < self.transient_status_until:
+            self.status_text = self.transient_status
+        elif self.plc and self.plc_warning:
+            self.status_text = self.plc_warning
+        elif self.running and self.awaiting_serve:
             self.status_text = self.round_message
         elif self.running:
             self.status_text = ""
+        elif self.started:
+            self.status_text = "已暂停"
         elif not self.started:
             self.status_text = self._serve_instruction("player")
         if self.status_text != self.last_rendered_status:
@@ -693,6 +799,8 @@ class AirHockeyGame:
         if self.closed:
             return
         self.closed = True
+        if self.plc:
+            self.plc.clear_target()
         if self.game_loop_id is not None:
             try:
                 self.root.after_cancel(self.game_loop_id)
@@ -700,12 +808,27 @@ class AirHockeyGame:
                 pass
             finally:
                 self.game_loop_id = None
-            if self.plc:
-                self.plc.disconnect()
-            try:
-                self.root.destroy()
-            except tk.TclError:
-                pass
+        if self.plc:
+            self.status_header_var.set("正在撤使能并断开 PLC，请稍候…")
+            self.root.update_idletasks()
+            if not self.plc.stop():
+                # 工作线程仍在等一次网络请求返回；不能提前退出进程，
+                # 否则守护线程可能来不及撤销轴使能。
+                self.root.after(100, self._finish_close)
+                return
+        self._destroy_window()
+
+    def _finish_close(self) -> None:
+        if self.plc and not self.plc.stop(timeout=0):
+            self.root.after(100, self._finish_close)
+            return
+        self._destroy_window()
+
+    def _destroy_window(self) -> None:
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 def main():
     parser = argparse.ArgumentParser()

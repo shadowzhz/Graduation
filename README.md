@@ -17,7 +17,7 @@
 
 ### 1. 端到端数据链路
 
-实时链路使用 `CurlingState` / `PredictionState` / `PlcWriteRequest` 单向贯通；离线轨迹规划仍保留独立的 `ControlCommand`，但现有 PLC DB 不消费其方向和速度：
+实时链路使用 `CurlingState` / `PredictionState` / `PlcTarget` 与实际轴位置反馈闭环；离线轨迹规划仍保留独立的 `ControlCommand`，PLC 只接收目标位置：
 
 ```text
 Camera (仅 GStreamer appsink，线程安全最新帧缓存)
@@ -41,13 +41,12 @@ TrajectoryPredictor      微步物理：摩擦减速 + 弹墙 + 门柱 + 进球
 AirHockeyAI              守门 / 前压 / 回防决策
   │  AIDecision(target_x, target_y, ...)
   ▼
-PlcControlAdapter        目标坐标检查 + 输出限幅 + 时间戳
-  │  PlcWriteRequest
+PlcControlAdapter        AI 半场限幅 + 时间戳
+  │  PlcTarget（固定 600×760 场地逻辑坐标）
   ▼
-PlcOutputWorker(非阻塞)   新请求唤醒 + 限频 + 覆盖式最新请求 → 后台写入
-  │
-  ▼
-PLCInterface             S7-1500 DB1 写入（可选，--plc）
+PLCLink(后台周期线程)      反馈/心跳/安全互锁/触发脉冲 → DB1.20 LREAL 运动目标
+  │  DB1/DB18 状态位置反馈（mm → 场地逻辑坐标）
+  └─────────────────────────────────────────────────→ VisionRuntime / AirHockeyAI
 ```
 
 ### 2. 模块依赖方向
@@ -65,7 +64,7 @@ Camera -> VisionRuntime
             -> PlcControlAdapter (可选)
 ```
 
-> 仿真端（`冰壶仿真/`）复用同一 `physics` / `ai` / `prediction` / `game_state`，仅保留仿真 GUI、GUI 配置与 PLC 通信模块。
+> 仿真端（`冰壶仿真/`）复用同一 `physics` / `ai` / `prediction` / `game_state` 和 `air_hockey/control/plc.py`，仅保留 GUI 与 GUI 配置。
 
 ### 3. 统一数据契约（`game_state.py`）
 
@@ -88,9 +87,9 @@ Camera -> VisionRuntime
 5. **单目去畸变与坐标系几何映射**：`raw → undistorted → table` 三层解耦；`undistorted → table` 支持**球台四点 Homography**（透视校正），也保留 ROI 线性映射回退；速度用空间微元有限差分换算。
 6. **统一微步物理轨迹预测核心**：`TrajectoryPredictor` 涵盖摩擦阻尼、边墙弹性碰撞、门柱圆弧反弹与进球穿透判定；视觉、仿真、AI **共用同一物理核心**。
 7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距，覆盖前压击球、死球处理与自动回中状态机；独立仿真调用仍可自行预测。
-8. **轨迹规划与控制适配层**：独立 `TrajectoryPlanner` 可生成 `ControlCommand`；实时 `PlcControlAdapter` 按现有 DB 协议直接将 AI 目标与状态封装成 `PlcWriteRequest`，`PlcOutputWorker` 在新请求到达时唤醒并限频写入。
+8. **轨迹规划与控制适配层**：独立 `TrajectoryPlanner` 可生成 `ControlCommand`；实时 `PlcControlAdapter` 限制 AI 半场目标，`PLCLink` 周期读取轴状态及位置，安全状态成立才下发运动目标。
 9. **仿真 / 评估 / 记录工具链**：无摄像头运动仿真（真实轨迹→观测→Kalman→预测）、多组实验误差评估（JSON + 控制台报告）、真实/仿真统一格式运行日志（含 CurlingState / PredictionState / AIDecision / PLC request）。
-10. **西门子 PLC 工业通信**：`PLCInterface` 通过 snap7 将 AI 目标、球槌位置、冰壶状态与比分写入 S7 DB 块。
+10. **西门子 PLC 工业通信**：按 S7-1500T/TO_Kinematics 联调版的 DB1/DB18 协议收发；只下发 `[X,0,Y,0]` 运动学位置和触发脉冲，冰壶状态与比分不再写入 PLC。
 
 ---
 
@@ -109,8 +108,13 @@ python3 main.py --headless            # 无显示性能基准测试
 python3 main.py --headless --benchmark-seconds 30 --perf-json benchmark.json  # 有标定文件时的分段耗时报告
 python3 main.py --sim                 # 虚拟仿真对战（也可写作 --game）
 python3 main.py --record run.json     # 记录运行数据（统一 JSON 日志）
-python3 main.py --plc 192.168.0.1 --plc-rate 30   # 启用 AI->PLC 非阻塞输出
+python3 main.py --plc 192.168.0.64 --plc-rate 30  # 仅适用已配置对应 DB1/DB18 的 S7-1500T
+python3 main.py --sim --plc 192.168.0.64          # 仿真游戏/实机轴反馈联动
 ```
+
+**实机使用前提**：确认设备区域安全、硬件急停有效、TIA DB 布局匹配，完成相机内参与球台四点标定；不要用 `--disable-homography` / `--disable-undistort` 驱动实机。连接本身不使能轴；图形界面 E/「轴使能」、H/「轴回零」、C/「轴复位」由现场操作员操作。按 H 或 C 时停止游戏目标；操作完成、轴状态恢复后需重新按 E 授权，仿真游戏还需手动继续。PLC 响应异常、轴未就绪、心跳超时和反馈失效时禁止下发；断线重连也需重新人工使能。机械限位和急停仍由 PLC/硬件负责，软件限幅不能替代。`--headless --plc` 无现场轴使能按钮，不用于首次联调。
+
+**现场安全边界**：视觉计划性抽帧仍可预测目标；一次实际检测漏检后立即停止刷新 PLC 目标，重新检测到冰壶才恢复。学弟版协议把上位机心跳 `DB18.0.0` 与 PLC 状态位放在同一字节，把直线/圆弧触发位放在 `DB1.56` 同一字节；Snap7 的整字节写入不能保证与 PLC/HMI 的并发位更新原子合并。正式运行前需由 PLC 工程师和上位机**同步修改 DB 映射与代码偏移**，分配独立写入字节或由 PLC 侧统一处理并确认互锁；同时确认 PLC 侧独立的失联停止。软件暂停只清除后续目标，不能撤销已经进入网络发送过程的运动指令，**不得作为急停使用**。
 
 常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
 
@@ -139,17 +143,18 @@ python3 tests/run_tests.py                          # 全量自动化测试
 
 `--record <path>` 输出统一格式的版本化 JSON 运行日志，真实运行与仿真格式一致，每帧包含：
 
+`plc_request` 记录本帧经 AI 半场限幅的目标（场地逻辑坐标），并非 PLC 接收或电机到位确认；`version=3` 不兼容旧 36 字节载荷的记录解析。
+
 ```json
 {
-  "format": "curling_recording", "version": 2, "source": "runtime", "meta": {...},
+  "format": "curling_recording", "version": 3, "source": "runtime", "meta": {...},
   "frames": [
     {
       "index": 0, "timestamp": 1.0, "fps": 59.8,
       "curling_state": {"x":0,"y":0,"vx":0,"vy":0,"timestamp":0,"confidence":0,"radius":0},
       "prediction": {"trajectory":[[x,y],...],"endpoint":[x,y],"duration":0,"source_state":{...}},
       "ai_decision": {"target_x":0,"target_y":0,"stalled_stone_phase":"idle","reaction_timer":0},
-      "plc_request": {"ai_target_x":0,"ai_target_y":0,"ai_x":0,"ai_y":0,"stone_x":0,"stone_y":0,
-                       "stone_vx":0,"stone_vy":0,"player_score":0,"ai_score":0,"timestamp":0}
+      "plc_request": {"target_x":0,"target_y":0,"timestamp":0}
     }
   ]
 }
@@ -174,7 +179,7 @@ Graduation/
 │   ├── estimation/             # KalmanFilter 状态估计层
 │   ├── prediction/             # PredictionState + TrajectoryPredictor（统一物理核心）
 │   ├── planning/               # ControlCommand + TrajectoryPlanner
-│   ├── control/                # PlcControlAdapter + PlcOutputWorker（AI->PLC 适配）
+│   ├── control/                # PlcControlAdapter + PLCLink（AI/轴反馈闭环）
 │   ├── recording/              # 统一运行日志（JSON schema + RuntimeRecorder）
 │   ├── simulation/             # 无摄像头运动仿真测试环境
 │   ├── evaluation/             # 多组实验误差评估与报告
@@ -183,8 +188,8 @@ Graduation/
 │   ├── tools/                  # 标定 / 检测 / 追踪 / 预测 等诊断脚本
 │   └── 交接文档.md             # 面向开发者的详细技术与工程交接文档
 ├── calibration/                # 相机内参在库；table_homography.npz 须在实台标定后生成
-├── 冰壶仿真/                   # 桌面仿真 GUI、GUI 配置与 PLC 通信模块
-└── tests/                      # 自动化测试套件（155 项，无需 pytest）
+├── 冰壶仿真/                   # 桌面仿真 GUI 与 GUI 配置
+└── tests/                      # 自动化测试套件
 ```
 
 ---
@@ -198,14 +203,14 @@ Graduation/
 * [x] **卡尔曼滤波状态估计层**（常量速度模型，抑制视觉抖动）
 * [x] 单目内参标定与点级去畸变；**球台四点 Homography 透视校正**
 * [x] 视觉、仿真、AI 三端统一的微步物理轨迹预测核心（`PredictionState`）
-* [x] 独立 `ControlCommand` 轨迹规划与目标坐标直达 PLC 的非阻塞软件输出链（实机执行机构尚未联调）
+* [x] 独立 `ControlCommand` 轨迹规划与 DB1/DB18 目标/实际位置闭环软件链（当前项目的视觉→实机路径仍须现场验证）
 * [x] 仿真测试环境、多组实验评估与统一格式运行日志
 * [x] 西门子 S7 PLC 通信底层封装
-* [x] 155 项自动化功能回归测试套件
+* [x] 自动化功能回归测试套件
 
 ### 后续展望与改进方向
 * [ ] **实台物理参数辨识**：在真实气浮台采集滑行/碰撞数据，回归摩擦与恢复系数。
-* [ ] **实机 AI → PLC 联调**：接入真实击球机构，补充端到端时延测量与前瞻补偿。
+* [ ] **视觉 AI → PLC 实机复核**：结合机械联调成果，逐项确认 DB 偏移、坐标方向、保护状态和端到端执行延迟。
 * [ ] **多目标跟踪**：扩展为多冰壶/球槌协同跟踪与状态机。
 * [ ] **自动化 CI**：配置 GitHub Actions 执行 `compileall` 与全部单元测试。
 

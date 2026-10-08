@@ -15,7 +15,7 @@ from game_state import CurlingState
 from ..prediction import PredictionState
 
 RECORDING_FORMAT = "curling_recording"
-RECORDING_VERSION = 2
+RECORDING_VERSION = 3
 
 
 def curling_state_to_dict(state: CurlingState) -> dict:
@@ -55,7 +55,7 @@ def ai_decision_to_dict(decision) -> Optional[dict]:
 
 
 def plc_request_to_dict(request) -> Optional[dict]:
-    """PlcWriteRequest -> 帧级字典（含 timestamp）；None 时返回 None。"""
+    """PLC 半场目标 -> 帧级字典（含 timestamp）；None 时返回 None。"""
     if request is None:
         return None
     return request.to_dict()
