@@ -1,6 +1,6 @@
-"""控制适配层：AI 目标 -> 安全限幅的 PlcWriteRequest -> PLCInterface。"""
+"""控制适配层：AI 半场目标 -> S7-1500T 运动学闭环。"""
 
-from .adapter import PlcControlAdapter, PlcWriteRequest
-from .output import PlcOutputWorker
+from .adapter import PlcControlAdapter, PlcTarget
+from .plc import PLCLink, PLCFeedback
 
-__all__ = ["PlcControlAdapter", "PlcOutputWorker", "PlcWriteRequest"]
+__all__ = ["PlcControlAdapter", "PlcTarget", "PLCLink", "PLCFeedback"]

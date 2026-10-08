@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 from typing import Optional
 
@@ -45,6 +46,7 @@ class VisionResult:
     frame: Frame
     detection: Optional[Detection] = None
     track: Optional[Track] = None
+    track_confirmed: bool = False
     curling_state: Optional[CurlingState] = None
     prediction: Optional[PredictionState] = None
     trajectory: Optional[list[tuple[float, float]]] = None
@@ -128,6 +130,16 @@ class VisionRuntime:
         self.reaction_timer = 0.0
         self.stalled_phase = "idle"
         self.ai_current_pos = [core.RINK_CENTER_X, self.ai_home_y]
+        self._ai_feedback_position = None
+
+    def set_ai_feedback(self, feedback) -> None:
+        """只接受新鲜的轴位置；反馈丢失时不把旧位置当作实机当前位置。"""
+        self._ai_feedback_position = None
+        if feedback is None or not feedback.valid:
+            return
+        age = time.monotonic() - feedback.stamp
+        if 0.0 <= age <= 0.25 and all(math.isfinite(value) for value in (feedback.x, feedback.y)):
+            self._ai_feedback_position = (feedback.x, feedback.y)
 
     def process_frame(self, frame: Frame) -> VisionResult:
         """处理单帧：检测/追踪预测 -> 坐标转换 -> 状态估计 -> 轨迹预测 -> AI 决策。"""
@@ -223,6 +235,9 @@ class VisionRuntime:
                 predicted_endpoint=prediction_state.endpoint,
             )
 
+            if self._ai_feedback_position is not None:
+                self.ai_current_pos[:] = self._ai_feedback_position
+
             state = GameState(
                 ai_x=self.ai_current_pos[0],
                 ai_y=self.ai_current_pos[1],
@@ -249,9 +264,10 @@ class VisionRuntime:
             self.reaction_timer = decision.reaction_timer
             self.stalled_phase = decision.stalled_stone_phase
 
-            smooth_alpha = min(1.0, dt * 12.0)
-            self.ai_current_pos[0] += (self.target[0] - self.ai_current_pos[0]) * smooth_alpha
-            self.ai_current_pos[1] += (self.target[1] - self.ai_current_pos[1]) * smooth_alpha
+            if self._ai_feedback_position is None:
+                smooth_alpha = min(1.0, dt * 12.0)
+                self.ai_current_pos[0] += (self.target[0] - self.ai_current_pos[0]) * smooth_alpha
+                self.ai_current_pos[1] += (self.target[1] - self.ai_current_pos[1]) * smooth_alpha
 
             ai_target = (decision.target_x, decision.target_y)
         else:
@@ -264,6 +280,8 @@ class VisionRuntime:
             frame=processed_frame,
             detection=detection,
             track=track,
+            track_confirmed=bool(track is not None and self.tracker.track is not None
+                                 and self.tracker.track.state == TrackState.ACTIVE),
             curling_state=curling,
             prediction=prediction_state,
             trajectory=table_trajectory,

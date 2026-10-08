@@ -31,7 +31,7 @@ import tkinter as tk
 from air_hockey.app.renderer import format_status, render_preview
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera import CameraManager
-from air_hockey.control import PlcControlAdapter, PlcOutputWorker
+from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.recording import RuntimeRecorder
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
@@ -69,23 +69,12 @@ class LatencySamples:
             return {key: self.distribution(values) for key, values in self._values.items()}
 
 
-def run_game():
+def run_game(plc_ip=None):
     """启动仿真子进程，显式设置 cwd 避免相对路径资源加载报错。"""
-    subprocess.run([sys.executable, str(SIM_ROOT / "air_hockey.py")], cwd=str(SIM_ROOT))
-
-
-def load_plc_interface():
-    """按文件路径加载仿真目录中的 PLCInterface。
-
-    不把 冰壶仿真/ 加入 sys.path：该目录含 air_hockey.py，会把 air_hockey 包遮盖掉。
-    """
-    import importlib.util
-
-    path = SIM_ROOT / "plc_interface.py"
-    spec = importlib.util.spec_from_file_location("air_hockey_plc_interface", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.PLCInterface
+    command = [sys.executable, str(SIM_ROOT / "air_hockey.py")]
+    if plc_ip:
+        command.extend(("--plc", plc_ip))
+    subprocess.run(command, cwd=str(SIM_ROOT))
 
 
 def encode_preview_ppm(result, table_roi, camera_geometry):
@@ -105,6 +94,7 @@ class VisionWindow:
         self.root.title("冰壶视觉演示：检测 -> 追踪 -> AI")
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.bind("q", lambda _event: self._close())
+        self.root.bind("Q", lambda _event: self._close())
         self.root.bind("<Escape>", lambda _event: self._close())
         self.label = tk.Label(self.root, bg="black")
         self.label.pack()
@@ -120,6 +110,18 @@ class VisionWindow:
         self._seen_seq = -1
         self._lock = None
         self._shared = None
+
+    def attach_plc(self, link):
+        """轴命令由现场操作员主动触发；连接成功不自动使能。"""
+        controls = tk.Frame(self.root)
+        controls.pack(fill="x")
+        for label, command in (("E 轴使能", link.enable_axes),
+                               ("H 轴回零", link.home_axes),
+                               ("C 轴复位", link.axes_reset)):
+            tk.Button(controls, text=label, command=command).pack(side="left", expand=True)
+        for key, command in (("e", link.enable_axes), ("h", link.home_axes),
+                             ("c", link.axes_reset)):
+            self.root.bind(key, lambda _event, callback=command: callback())
 
     def start(self, lock, shared):
         self._lock = lock
@@ -218,21 +220,13 @@ def run_vision(args):
         raise SystemExit(f"摄像头启动失败：{exc}")
 
     plc = None
-    plc_worker = None
     plc_adapter = PlcControlAdapter() if args.plc else None
     if args.plc:
-        try:
-            plc = load_plc_interface()(args.plc)
-        except Exception as exc:
-            print(f"[PLC] 初始化失败，跳过 PLC 输出：{exc!r}")
-            plc = None
-        if plc is not None:
-            if plc.connect():
-                plc_worker = PlcOutputWorker(plc, interval=1.0 / args.plc_rate)
-                plc_worker.start()
-                print(f"PLC 输出已启用：{args.plc} @ {args.plc_rate:g} Hz")
-            else:
-                print("[PLC] 连接失败，跳过 PLC 输出")
+        plc = PLCLink(args.plc, period=1.0 / args.plc_rate)
+        plc.start()
+        if window is not None:
+            window.attach_plc(plc)
+        print(f"PLC 状态读取与运动控制已启动：{args.plc} @ {args.plc_rate:g} Hz；轴需现场主动使能")
 
     mode_label = "headless 性能测试" if headless else "实时视觉演示"
     print(f"{mode_label}开始{'，Ctrl+C 退出' if headless else '，Q / ESC 或关闭窗口退出'}")
@@ -274,6 +268,11 @@ def run_vision(args):
                 skipped_frames[0] += max(0, frame.sequence - (last_sequence if last_sequence >= 0 else 0) - 1)
                 last_sequence = frame.sequence
 
+                feedback = plc.feedback if plc is not None else None
+                if plc is not None:
+                    for message in plc.drain_messages():
+                        print(f"[PLC] {message}")
+                runtime.set_ai_feedback(feedback)
                 process_start = time.perf_counter() if samples is not None else 0.0
                 result = runtime.process_frame(frame)
                 if samples is not None:
@@ -287,24 +286,22 @@ def run_vision(args):
                     if frame.gst_pts_ns is not None:
                         gst_pts_count[0] += 1
 
-                # 本帧 AI 原始决策供记录与 PLC 共用；PLC DB 仅下发目标与状态。
+                # PLC 只接收 AI 半场目标；轴反馈在本帧 AI 计算前更新。
                 decision = result.ai_decision
                 plc_request = None
-                if plc_worker is not None and decision is not None and result.curling_state is not None:
+                if (plc is not None and result.track_confirmed
+                        and decision is not None and result.curling_state is not None):
                     plc_prepare_start = time.perf_counter() if samples is not None else 0.0
                     try:
-                        plc_request = plc_adapter.build_request(
-                            decision,
-                            ai_position=runtime.ai_current_pos,
-                            curling_state=result.curling_state,
-                            timestamp=result.frame.timestamp,
-                        )
-                        # 非阻塞：只投递最新请求，实际写入在后台线程完成
-                        plc_worker.submit(plc_request)
+                        plc_request = plc_adapter.build_target(decision, timestamp=result.frame.timestamp)
+                        plc.set_target(plc_request.target_x, plc_request.target_y)
                     except ValueError:
-                        plc_request = None  # 目标非法(非有限值)时跳过本帧 PLC 输出
+                        plc.clear_target()
+                        plc_request = None
                     if samples is not None:
                         samples.add("plc_prepare_submit_ms", (time.perf_counter() - plc_prepare_start) * 1000.0)
+                elif plc is not None:
+                    plc.clear_target()
 
                 if recorder is not None:
                     recorder.record(result, ai_decision=decision, plc_request=plc_request)
@@ -314,6 +311,22 @@ def run_vision(args):
                         result,
                         runtime.camera_geometry.enabled and runtime.camera_geometry.camera_matrix is not None,
                     )
+                    if plc is not None:
+                        if (not plc.connected or feedback is None or not feedback.valid
+                                or time.monotonic() - feedback.stamp > 0.25):
+                            status_text += " | PLC 未连接/反馈失效：禁止运动"
+                        elif feedback.comm_lost_latch:
+                            status_text += " | PLC 通信丢失锁存：请现场检查并复位"
+                        elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
+                            status_text += f" | PLC 轴报警 {feedback.kinematics_error} / 停止位 {feedback.group_stop}：禁止运动"
+                        elif not feedback.axes_ready or not feedback.plc_echo_ok or feedback.comm_lost:
+                            status_text += " | PLC 轴未就绪或心跳异常：禁止运动"
+                        elif not result.track_confirmed:
+                            status_text += " | 冰壶追踪丢失：PLC 目标已清除"
+                        elif not plc.armed:
+                            status_text += " | PLC 未授权：请现场按 E 使能"
+                        else:
+                            status_text += f" | PLC 实际位置 ({feedback.x:.0f},{feedback.y:.0f})"
                     with preview_lock:
                         shared["result"] = result
                         shared["result_seq"] = result.frame.sequence
@@ -392,26 +405,23 @@ def run_vision(args):
         pass
     finally:
         stop.set()
+        if plc is not None:
+            plc.clear_target()
+            if not plc.stop():
+                print("[PLC] 仍在等待通信线程撤销使能；请留意实机，必要时使用硬件急停")
+                while not plc.stop(timeout=1.0):
+                    pass
+            for message in plc.drain_messages():
+                print(f"[PLC] {message}")
         camera.stop()
         processing_thread.join()
         if recorder is not None:
             recorded_path = recorder.close()
             if recorded_path is not None:
                 print(f"运行数据已记录 {recorder.frame_count} 帧 -> {recorded_path}")
-        if plc_worker is not None:
-            plc_worker.stop()
-            print(f"PLC 输出已停止（写入 {plc_worker.write_count} 次，失败 {plc_worker.error_count} 次）")
-        if plc is not None:
-            plc.disconnect()
         if samples is not None:
             capture = camera.get_stats()
             stages = samples.snapshot()
-            if plc_worker is not None:
-                write_ms, frame_to_write_ms = plc_worker.timing_samples()
-                if write_ms:
-                    stages["plc_write_ms"] = samples.distribution(write_ms)
-                if frame_to_write_ms:
-                    stages["post_read_to_plc_write_ms"] = samples.distribution(frame_to_write_ms)
             info = camera.info
             report = {
                 "time_reference": "Host perf_counter: frame timestamp is after GStreamer pull/map/convert, not sensor exposure; raw Gst PTS has a different clock domain",
@@ -458,8 +468,8 @@ def main():
     parser.add_argument("--benchmark-seconds", type=float, default=0.0, metavar="SEC", help="headless 模式自动停止时间；默认持续运行")
     parser.add_argument("--perf-json", default=None, metavar="PATH", help="退出时保存最近 4096 样本的阶段耗时分布")
     parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
-    parser.add_argument("--plc", default=None, metavar="IP", help="启用 AI->PLC 输出并连接该 S7 PLC（例如 192.168.0.1）")
-    parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 写入频率上限（Hz）")
+    parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
+    parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
@@ -474,6 +484,9 @@ def main():
     if args.plc and (not math.isfinite(args.plc_rate) or args.plc_rate <= 0.0):
         parser.error("--plc-rate 必须为有限正数")
 
+    if args.plc and not args.sim and (args.disable_undistort or args.disable_homography):
+        parser.error("实机 --plc 必须启用相机内参及球台 Homography 标定")
+
     if not math.isfinite(args.benchmark_seconds) or args.benchmark_seconds < 0 or (args.benchmark_seconds and not args.headless):
         parser.error("--benchmark-seconds 必须为非负数，且只适用于 --headless")
 
@@ -487,7 +500,7 @@ def main():
         )
 
     if args.sim:
-        run_game()
+        run_game(args.plc)
     else:
         run_vision(args)
 

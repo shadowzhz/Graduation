@@ -5,6 +5,8 @@ frame -> detection -> track -> table StoneState -> predictor -> AI
 """
 
 from pathlib import Path
+from types import SimpleNamespace
+import time
 import numpy as np
 
 from air_hockey import core_config as core
@@ -193,6 +195,56 @@ def test_vision_runtime_supports_custom_ai_without_prediction_parameter():
     assert result.ai_target == (225.0, 155.0)
     assert runtime.stalled_phase == "striking"
     assert runtime.reaction_timer == 0.35
+
+
+def test_vision_runtime_ai_uses_fresh_axis_feedback_not_software_position():
+    class CapturingAI:
+        def __init__(self):
+            self.positions = []
+
+        def update(self, state, dt):
+            self.positions.append((state.ai_x, state.ai_y))
+            return AIDecision(400.0, 200.0, "idle", 0.0)
+
+    ai = CapturingAI()
+    runtime = VisionRuntime(
+        table_calibration_file=None,
+        disable_undistort=True,
+        detector=MockDetector([Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0)]),
+        ai=ai,
+    )
+    frame = lambda sequence, timestamp: Frame(
+        image=np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=timestamp, sequence=sequence
+    )
+    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.monotonic(), x=210.0, y=160.0))
+    runtime.process_frame(frame(1, 1.0))
+    assert ai.positions[0] == (210.0, 160.0)
+    assert runtime.ai_current_pos == [210.0, 160.0]
+
+    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.monotonic() - 1, x=999.0, y=999.0))
+    runtime.process_frame(frame(2, 1.05))
+    assert ai.positions[1] == (210.0, 160.0)
+    assert runtime.ai_current_pos != [999.0, 999.0]
+
+
+def test_plc_track_confirmation_stops_on_missed_detection_and_recovers():
+    detector = MockDetector([
+        Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0),
+        None,
+        Detection(center_x=501.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.15),
+    ])
+    runtime = VisionRuntime(
+        calibration_file=str(CALIB_FILE), table_calibration_file=None,
+        disable_undistort=True, detector=detector,
+    )
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    results = [runtime.process_frame(Frame(image=image, timestamp=1 + (i - 1) * 0.03, sequence=i))
+               for i in range(1, 7)]
+    assert results[0].track_confirmed
+    assert results[1].track_confirmed  # 正常抽帧预测不等于漏检
+    assert results[2].ai_decision is not None and not results[2].track_confirmed
+    assert not results[3].track_confirmed and not results[4].track_confirmed
+    assert results[5].track_confirmed
 
 
 def test_vision_runtime_without_detection():

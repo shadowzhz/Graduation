@@ -15,7 +15,7 @@ import numpy as np
 from air_hockey.ai import AIDecision
 from air_hockey.camera.types import Frame
 from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
-from air_hockey.control import PlcWriteRequest
+from air_hockey.control import PlcTarget
 from air_hockey.prediction import PredictionState
 from air_hockey.recording import (
     RECORDING_FORMAT,
@@ -75,11 +75,7 @@ def _decision():
 
 
 def _plc_request():
-    return PlcWriteRequest(
-        ai_target_x=120.0, ai_target_y=340.0, ai_x=300.0, ai_y=600.0,
-        stone_x=100.0, stone_y=200.0, stone_vx=10.0, stone_vy=-20.0,
-        player_score=1, ai_score=2, timestamp=3.5,
-    )
+    return PlcTarget(target_x=120.0, target_y=340.0, timestamp=3.5)
 
 
 def test_ai_decision_to_dict_fields():
@@ -93,8 +89,8 @@ def test_ai_decision_to_dict_fields():
 
 def test_plc_request_to_dict_includes_timestamp():
     payload = plc_request_to_dict(_plc_request())
-    assert payload["ai_target_x"] == 120.0
-    assert payload["ai_target_y"] == 340.0
+    assert payload["target_x"] == 120.0
+    assert payload["target_y"] == 340.0
     assert payload["timestamp"] == 3.5
     assert plc_request_to_dict(None) is None
 
@@ -114,7 +110,7 @@ def test_recorder_records_control_outputs_and_defaults_to_none():
     frames = recorder.to_dict()["frames"]
     assert set(frames[0].keys()) == FRAME_KEYS
     assert frames[0]["ai_decision"]["stalled_stone_phase"] == "idle"
-    assert frames[0]["plc_request"]["ai_target_y"] == 340.0
+    assert frames[0]["plc_request"]["target_y"] == 340.0
     assert frames[1]["ai_decision"] is None
     assert frames[1]["plc_request"] is None
 
@@ -130,7 +126,7 @@ def test_recorder_record_accepts_control_outputs():
     recorder.record(result, ai_decision=_decision(), plc_request=_plc_request())
     frame = recorder.to_dict()["frames"][0]
     assert frame["ai_decision"]["target_y"] == 340.0
-    assert frame["plc_request"]["ai_x"] == 300.0
+    assert frame["plc_request"]["target_x"] == 120.0
 
 
 def test_build_frame_shape_with_empty_values():
