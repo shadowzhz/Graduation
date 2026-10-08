@@ -77,6 +77,28 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
     plc.disconnect()
 
 
+def test_reset_tracking_reissues_same_target_without_reporting_failure():
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        link.set_target(300, 180)
+        assert until(lambda: len(client.transport.moves) == 1)
+        link.clear_target()
+        link.drain_messages()
+
+        assert link.reset_tracking()
+        assert until(lambda: client._last_phys_x is None)
+        assert not link.drain_messages()
+
+        link.set_target(300, 180)
+        assert until(lambda: len(client.transport.moves) == 2)
+    finally:
+        assert link.stop(timeout=2.0)
+
+
 def test_real_motion_requires_manual_arm_and_revokes_on_801_alarm():
     client = MemoryPLC()
     link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
