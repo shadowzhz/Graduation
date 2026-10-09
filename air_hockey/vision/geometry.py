@@ -28,6 +28,7 @@ class CameraGeometry:
         camera_matrix: Optional[np.ndarray] = None,
         dist_coeffs: Optional[np.ndarray] = None,
         image_size: Optional[Tuple[int, int]] = None,
+        calibration_image_size: Optional[Tuple[int, int]] = None,
         table_roi: Optional[Tuple[float, float, float, float]] = None,
         homography_matrix: Optional[np.ndarray] = None,
         homography_image_size: Optional[Tuple[int, int]] = None,
@@ -43,6 +44,9 @@ class CameraGeometry:
         self.enabled = bool(enabled)
         self.camera_matrix = np.asarray(camera_matrix, dtype=np.float64) if camera_matrix is not None else None
         self.dist_coeffs = np.asarray(dist_coeffs, dtype=np.float64) if dist_coeffs is not None else None
+        self.calibration_image_size = (
+            tuple(int(v) for v in calibration_image_size) if calibration_image_size is not None else None
+        )
         self.image_size = None
         self.new_camera_matrix = None
         self.table_roi = None
@@ -102,14 +106,24 @@ class CameraGeometry:
         with np.load(path) as data:
             camera_matrix = data["camera_matrix"]
             dist_coeffs = data["dist_coeffs"]
-            raw_size = data.get("image_size")
-            image_size = tuple(int(v) for v in raw_size) if raw_size is not None else None
+            if "image_size" not in data.files:
+                raise ValueError(
+                    f"camera calibration file {calibration_file} is missing required 'image_size'; "
+                    "rerun air_hockey/tools/calibrate_camera.py"
+                )
+            raw_size = np.asarray(data["image_size"]).ravel()
+            if len(raw_size) != 2:
+                raise ValueError(f"camera calibration image_size must contain width and height, got {raw_size}")
+            image_size = tuple(int(v) for v in raw_size)
+            if any(value <= 0 for value in image_size):
+                raise ValueError(f"camera calibration image_size must be positive, got {raw_size}")
 
         return cls(
             rink_bounds=rink_bounds,
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs,
             image_size=image_size,
+            calibration_image_size=image_size,
             table_roi=table_roi,
             homography_matrix=homography_matrix,
             homography_image_size=homography_image_size,
@@ -187,6 +201,14 @@ class CameraGeometry:
         width, height = int(image_size[0]), int(image_size[1])
         if width <= 0 or height <= 0:
             raise ValueError(f"invalid image_size: {image_size}")
+        if (self.enabled and self.camera_matrix is not None
+                and self.calibration_image_size is not None
+                and (width, height) != self.calibration_image_size):
+            calibrated_width, calibrated_height = self.calibration_image_size
+            raise ValueError(
+                f"Camera calibration resolution mismatch: calibrated for "
+                f"{calibrated_width}x{calibrated_height}, runtime frame is {width}x{height}"
+            )
         self.image_size = (width, height)
 
         if self.camera_matrix is not None and self.dist_coeffs is not None:

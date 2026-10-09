@@ -10,7 +10,9 @@
 import math
 
 from air_hockey import core_config as core
+from air_hockey.evaluation import Experiment, ExperimentConfig
 from air_hockey.estimation import KalmanFilter
+from air_hockey.physics import StoneMotion, goal_scorer
 from air_hockey.prediction import PredictionState
 from air_hockey.simulation import (
     MotionSimulator,
@@ -49,10 +51,40 @@ def test_true_trajectory_shape_and_start():
     assert trajectory[-1][1] < trajectory[0][1]
 
 
+def test_motion_simulator_true_trajectory_matches_repeated_stone_steps():
+    config = SimulationConfig(
+        initial_x=300.0, initial_y=400.0, initial_vx=180.0, initial_vy=-120.0,
+        dt=1 / 60, steps=50, position_noise=0.0,
+    )
+    trajectory = MotionSimulator(config).true_trajectory()
+    stone = StoneMotion(x=config.initial_x, y=config.initial_y,
+                        vx=config.initial_vx, vy=config.initial_vy)
+    stone.set_immediate_velocity(stone.vx, stone.vy)
+    expected = [(stone.x, stone.y)]
+    scored = goal_scorer(stone) is not None
+    for _ in range(config.steps):
+        if not scored:
+            stone.step(config.dt)
+            scored = goal_scorer(stone) is not None
+        expected.append((stone.x, stone.y))
+
+    assert trajectory == expected
+
+
 def test_zero_noise_observation_matches_true():
     simulator = MotionSimulator.default(position_noise=0.0)
     result = simulator.simulate()
     assert result.observed_trajectory == result.true_trajectory
+
+
+def test_physical_endpoint_continues_beyond_recorded_horizon():
+    simulator = MotionSimulator(
+        SimulationConfig(100.0, 400.0, 0.0, -150.0, steps=20, position_noise=0.0)
+    )
+    result = simulator.simulate(predict_step=0)
+
+    assert result.true_trajectory[-1][1] > result.true_endpoint[1]
+    assert result.true_velocity_trajectory[-1][1] < -core.STONE_STOP_SPEED
 
 
 def test_scored_true_trajectory_holds_position_and_timestamps():
@@ -96,6 +128,8 @@ def test_chain_lengths_and_timestamps_aligned():
     assert len(result.timestamps) == size
     assert result.timestamps[0] == 0.0
     assert all(b > a for a, b in zip(result.timestamps, result.timestamps[1:]))
+    assert len(result.true_velocity_trajectory) == size
+    assert len(result.filtered_velocity_trajectory) == size
 
 
 def test_filtering_reduces_position_error():
@@ -121,10 +155,24 @@ def test_prediction_state_and_source_state():
     assert isinstance(pred, PredictionState)
     assert pred.endpoint == result.predicted_endpoint
     assert pred.source_state is result.filtered_state
+    assert result.prediction_frame == 10
+    assert (pred.source_state.x, pred.source_state.y) == result.filtered_trajectory[10]
+    assert (pred.source_state.vx, pred.source_state.vy) == result.filtered_velocity_trajectory[10]
+    assert pred.source_state.timestamp == result.timestamps[10]
     assert isinstance(result.filtered_state, CurlingState)
     # 早期预测仍应是有限的轨迹
     assert len(pred.trajectory) >= 1
     assert all(math.isfinite(value) for value in result.predicted_endpoint)
+
+
+def test_zero_noise_diagnostic_frames_keep_position_and_velocity_states_aligned():
+    result = MotionSimulator.random(seed=42, steps=220, position_noise=0.0).simulate(predict_step=20)
+
+    assert result.observed_trajectory == result.true_trajectory
+    for index in (0, 1, 2, 5, 10, 20, 220):
+        assert math.isfinite(result.true_velocity_trajectory[index][0])
+        assert math.isfinite(result.filtered_velocity_trajectory[index][1])
+        assert result.timestamps[index] == index * result.timestamps[1]
 
 
 def test_simulation_is_deterministic_with_seed():
@@ -136,6 +184,26 @@ def test_simulation_is_deterministic_with_seed():
 
     other = MotionSimulator.default(seed=1).simulate()
     assert other.observed_trajectory != first.observed_trajectory
+
+
+def test_friction_model_uses_same_observations_as_cv():
+    simulator = MotionSimulator.random(seed=42, steps=80, position_noise=3.0)
+    results = simulator.simulate_estimators(("constant_velocity", "friction", "collision_aware"), predict_step=20)
+    cv = results["constant_velocity"]
+    friction = results["friction"]
+
+
+    assert cv.observed_trajectory == friction.observed_trajectory
+    assert cv.true_trajectory == friction.true_trajectory
+    assert cv.true_velocity_trajectory == friction.true_velocity_trajectory
+    assert cv.timestamps == friction.timestamps
+    assert cv.physical_endpoint == friction.physical_endpoint
+    collision = results["collision_aware"]
+    assert cv.observed_trajectory == collision.observed_trajectory
+    assert cv.true_trajectory == collision.true_trajectory
+    assert cv.true_velocity_trajectory == collision.true_velocity_trajectory
+    assert cv.timestamps == collision.timestamps
+    assert cv.physical_endpoint == collision.physical_endpoint
 
 
 def test_random_generator_respects_floor_bounds():
@@ -167,3 +235,82 @@ def test_simulator_uses_injected_kalman_compatible_predictor():
     for timestamp, (ox, oy) in zip(result.timestamps, result.observed_trajectory):
         expected.append(kalman.update(ox, oy, timestamp))
     assert [(state.x, state.y) for state in expected] == result.filtered_trajectory
+
+
+def _oracle_report(initial_state, *, steps=700):
+    dt = core.PREDICTION_SUBSTEP
+    simulation_config = SimulationConfig(
+        *initial_state,
+        dt=dt,
+        steps=steps,
+        position_noise=0.0,
+        seed=19,
+    )
+    experiment_config = ExperimentConfig(
+        runs=1,
+        seed=19,
+        prediction_fraction=0.0,
+        steps=steps,
+        dt=dt,
+        position_noise=0.0,
+        random_initial=False,
+    )
+    return Experiment(
+        experiment_config,
+        simulator_factory=lambda _seed: MotionSimulator(simulation_config),
+    ).run()
+
+
+def test_oracle_endpoint_error_is_near_zero_without_noise():
+    report = _oracle_report((300.0, 400.0, 40.0, -100.0))
+    result = report.runs[0]
+
+    assert result.motion_events == ("no_bounce",)
+    assert report.motion_event_errors["no_bounce"].count == 1
+    assert result.oracle_endpoint_error < 0.1
+    assert result.estimated_endpoint_error > result.oracle_endpoint_error
+
+
+def test_oracle_prediction_matches_wall_bounce_truth():
+    report = _oracle_report((core.RINK_RIGHT - core.STONE_RADIUS - 1.0, core.RINK_CENTER_Y, 120.0, 0.0))
+    result = report.runs[0]
+
+    assert "wall_bounce" in result.motion_events
+    assert report.motion_event_errors["wall_bounce"].count == 1
+    assert result.oracle_endpoint_error < 0.1
+
+
+def test_oracle_prediction_matches_goal_post_truth():
+    report = _oracle_report((core.GOAL_LEFT + core.STONE_RADIUS + 1.0, 80.0, 0.0, -150.0))
+    result = report.runs[0]
+
+    assert "goal_post_bounce" in result.motion_events
+    assert report.motion_event_errors["goal_post_bounce"].count == 1
+    assert result.oracle_endpoint_error < 0.1
+
+
+def test_scored_endpoint_uses_first_held_goal_position():
+    report = _oracle_report((core.RINK_CENTER_X, 80.0, 0.0, -150.0))
+    result = report.runs[0]
+    simulation = MotionSimulator(
+        SimulationConfig(
+            core.RINK_CENTER_X,
+            80.0,
+            0.0,
+            -150.0,
+            dt=core.PREDICTION_SUBSTEP,
+            steps=700,
+            position_noise=0.0,
+        )
+    ).simulate(predict_step=0)
+    score_frame = next(
+        index
+        for index, (_, y) in enumerate(simulation.true_trajectory)
+        if y + core.STONE_RADIUS < core.RINK_TOP
+    )
+
+    assert "goal" in result.motion_events
+    assert report.motion_event_errors["goal"].count == 1
+    assert result.oracle_endpoint_error < 0.1
+    assert simulation.true_endpoint == simulation.true_trajectory[score_frame]
+    assert all(point == simulation.true_endpoint for point in simulation.true_trajectory[score_frame:])

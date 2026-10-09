@@ -53,6 +53,37 @@ def resolve_output(path: str) -> Path:
     return output
 
 
+def validate_corner_points(points, image_size) -> float:
+    """验证 raw pixel 四角按 TL -> TR -> BR -> BL 排列且覆盖有效球台区域。"""
+    quad = np.asarray(points, dtype=np.float64)
+    if quad.shape != (4, 2):
+        raise ValueError(f"需要恰好 4 个二维角点，收到形状 {quad.shape}")
+    if not np.isfinite(quad).all():
+        raise ValueError("角点必须全部是有限坐标")
+    width, height = (int(value) for value in image_size)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"图像宽高必须为正数，收到 {image_size}")
+    if (np.any(quad[:, 0] < 0) or np.any(quad[:, 0] >= width)
+            or np.any(quad[:, 1] < 0) or np.any(quad[:, 1] >= height)):
+        raise ValueError(f"角点必须位于图像范围内 0..{width - 1}, 0..{height - 1}")
+    if any(np.linalg.norm(quad[i] - quad[j]) < 5.0 for i in range(4) for j in range(i + 1, 4)):
+        raise ValueError("角点重复或距离过近（小于 5 像素）")
+
+    tl, tr, br, bl = quad
+    if not (tl[0] < tr[0] and bl[0] < br[0] and tl[1] < bl[1] and tr[1] < br[1]):
+        raise ValueError("角点顺序错误；必须按 TL -> TR -> BR -> BL 点击")
+
+    edges = np.roll(quad, -1, axis=0) - quad
+    crosses = edges[:, 0] * np.roll(edges[:, 1], -1) - edges[:, 1] * np.roll(edges[:, 0], -1)
+    if not (np.all(crosses > 0) or np.all(crosses < 0)):
+        raise ValueError("四角必须组成无自交的凸四边形")
+    area = abs(float(np.dot(quad[:, 0], np.roll(quad[:, 1], -1))
+                     - np.dot(quad[:, 1], np.roll(quad[:, 0], -1)))) / 2.0
+    if area < width * height * 0.05:
+        raise ValueError(f"四边形面积过小：{area:.1f} 像素，至少需要图像面积的 5%")
+    return area
+
+
 def grab_frame(args) -> np.ndarray:
     """获取一帧原始 BGR 图像。"""
     if args.image:
@@ -114,13 +145,23 @@ def save_homography(geometry: CameraGeometry, raw_points, image_size, output: Pa
     if image_size is None:
         raise SystemExit("缺少标定图像分辨率，无法保存 Homography")
     raw = np.asarray(raw_points, dtype=np.float64)
+    area = validate_corner_points(raw, image_size)
     undistorted = np.array(
         [geometry.raw_to_undistorted(px, py) for px, py in raw],
         dtype=np.float32,
     )
+    if not np.isfinite(undistorted).all():
+        raise ValueError("去畸变后的四角包含 NaN 或 Inf，无法保存 Homography")
     homography = cv2.getPerspectiveTransform(undistorted, RINK_CORNERS)
     if not np.isfinite(homography).all():
-        raise SystemExit("四点退化，无法求解 Homography，请重新点击四角")
+        raise ValueError("四点退化，无法求解 Homography，请重新点击四角")
+    condition = float(np.linalg.cond(homography))
+    if not np.isfinite(condition) or condition > 1e12:
+        raise ValueError(f"Homography 矩阵退化（condition number={condition:.3g}），请重新点击四角")
+    projected = cv2.perspectiveTransform(undistorted.reshape(1, 4, 2), homography)[0]
+    reprojection_error = float(np.max(np.linalg.norm(projected - RINK_CORNERS, axis=1)))
+    if not np.isfinite(reprojection_error) or reprojection_error > 1e-2:
+        raise ValueError(f"Homography 重投影误差异常：{reprojection_error:.3g}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -132,6 +173,12 @@ def save_homography(geometry: CameraGeometry, raw_points, image_size, output: Pa
     )
     print(f"已保存: {output}")
     print(f"标定分辨率: {int(image_size[0])}x{int(image_size[1])}")
+    print("raw 四角坐标 (TL, TR, BR, BL):")
+    print(raw)
+    print("undistorted 四角坐标 (TL, TR, BR, BL):")
+    print(undistorted)
+    print(f"四边形面积: {area:.1f} 像素")
+    print(f"condition number: {condition:.3g}")
     print("homography_matrix (undistorted -> table):")
     print(homography)
 
@@ -146,7 +193,14 @@ def main():
         rink_bounds=(core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM),
         enabled=True,
     )
-    geometry.set_image_size((width, height))
+    try:
+        geometry.set_image_size((width, height))
+    except ValueError as exc:
+        calibrated_width, calibrated_height = geometry.calibration_image_size
+        raise SystemExit(
+            f"当前图像：{width}x{height}\ncamera calibration：{calibrated_width}x{calibrated_height}\n"
+            "要求重新使用相机标定分辨率采集标定图像。"
+        ) from exc
 
     output = resolve_output(args.output)
     collector = CornerCollector(image)
@@ -166,7 +220,11 @@ def main():
             if len(collector.points) != len(CORNER_LABELS):
                 print(f"还需要点击 {len(CORNER_LABELS) - len(collector.points)} 个角点")
                 continue
-            save_homography(geometry, collector.points, geometry.image_size, output)
+            try:
+                save_homography(geometry, collector.points, geometry.image_size, output)
+            except ValueError as exc:
+                print(f"标定点无效：{exc}")
+                continue
             break
         if cv2.getWindowProperty(collector.window, cv2.WND_PROP_VISIBLE) < 1:
             break

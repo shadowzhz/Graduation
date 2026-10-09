@@ -30,8 +30,11 @@ import tkinter as tk
 
 from air_hockey.app.renderer import format_status, render_preview
 from air_hockey.app.vision_runtime import VisionRuntime
+from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
 from air_hockey.camera import CameraConfig, CameraManager
 from air_hockey.control import PLCLink, PlcControlAdapter
+from air_hockey.control.adapter import PlcTarget
+from air_hockey.control.plc import TARGET_MAX_AGE
 from air_hockey.recording import RuntimeRecorder
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
@@ -167,6 +170,31 @@ class VisionWindow:
             pass
 
 
+def submit_rally_target(result, adapter, plc, *, dry_run=False):
+    """READY 不依赖冰壶；动态拦截保留 confirmed/AI/state 资格。"""
+    rally = result.rally
+    if (rally is None or rally.target is None or
+            (rally.state == RallyState.DEFENDING and
+             (not result.track_confirmed or result.ai_decision is None or result.curling_state is None))):
+        if plc is not None:
+            plc.clear_target()
+        return None
+    try:
+        request = adapter.build_target(PlcTarget(*rally.target, result.frame.timestamp),
+                                       timestamp=result.frame.timestamp)
+    except ValueError:
+        if plc is not None:
+            plc.clear_target()
+        raise
+    if plc is not None:
+        if dry_run:
+            plc.clear_target()
+        elif not plc.set_target(request.target_x, request.target_y):
+            plc.clear_target()
+            return None
+    return request
+
+
 def run_vision(args):
     headless = args.headless
 
@@ -214,7 +242,9 @@ def run_vision(args):
             recorder = RuntimeRecorder(
                 args.record,
                 source="runtime",
-                meta={"mode": "headless" if headless else "display"},
+                meta={"mode": "headless" if headless else "display", "control": "single_rally",
+                      "plc_mode": "dry_run" if args.dry_run else "live" if args.plc else "no_plc",
+                      "mallet_speed_estimate": args.mallet_speed},
             )
     except Exception as exc:
         try:
@@ -225,11 +255,12 @@ def run_vision(args):
         raise SystemExit(f"实时运行启动失败：{exc}") from exc
 
     plc = None
-    plc_adapter = PlcControlAdapter() if args.plc else None
+    plc_adapter = PlcControlAdapter()
+    rally = RallyController(mallet_speed=args.mallet_speed, hardware=bool(args.plc and not args.dry_run))
     if args.plc:
         plc = PLCLink(args.plc, period=1.0 / args.plc_rate)
         plc.start()
-        if window is not None:
+        if window is not None and not args.dry_run:
             window.attach_plc(plc)
         print(f"PLC 状态读取与运动控制已启动：{args.plc} @ {args.plc_rate:g} Hz；轴需现场主动使能")
 
@@ -243,6 +274,9 @@ def run_vision(args):
             "实际采集速度以帧计数为准"
         )
     print(f"视觉管线：最新帧 + 每 {runtime.detection_interval} 帧检测，其余帧使用 tracker 预测")
+    print(f"Rally: READY={READY_POSITION}, mallet-speed estimate={args.mallet_speed:g} table units/s; "
+          f"{'DRY-RUN：仅观察，不发送运动/使能/回零/复位' if args.dry_run else '轴运动仍需人工 E 授权'}")
+    print("无 PLC 时球槌为 software fallback；--mallet-speed 不是 PLC 速度设置，需现场实测。")
     print("视觉校正:")
     print(f"  camera calibration: {args.calibration}")
     print(f"  undistort: {'OFF' if args.disable_undistort else 'ON'}")
@@ -293,45 +327,43 @@ def run_vision(args):
 
                 # PLC 只接收 AI 半场目标；轴反馈在本帧 AI 计算前更新。
                 decision = result.ai_decision
-                plc_request = None
-                if (plc is not None and result.track_confirmed
-                        and decision is not None and result.curling_state is not None):
-                    plc_prepare_start = time.perf_counter() if samples is not None else 0.0
-                    try:
-                        plc_request = plc_adapter.build_target(decision, timestamp=result.frame.timestamp)
-                        plc.set_target(plc_request.target_x, plc_request.target_y)
-                    except ValueError:
-                        plc.clear_target()
-                        plc_request = None
-                    if samples is not None:
-                        samples.add("plc_prepare_submit_ms", (time.perf_counter() - plc_prepare_start) * 1000.0)
-                elif plc is not None:
-                    plc.clear_target()
+                result.rally = rally.update(result, now=time.perf_counter(), feedback=feedback)
+                plc_prepare_start = time.perf_counter() if samples is not None else 0.0
+                plc_request = submit_rally_target(result, plc_adapter, plc, dry_run=args.dry_run)
+                if samples is not None:
+                    samples.add("plc_prepare_submit_ms", (time.perf_counter() - plc_prepare_start) * 1000.0)
+                for transition in result.rally.transitions:
+                    print(f"[rally] {transition} | target={result.rally.target} "
+                          f"| intercept ETA lower bound={result.rally.time_to_intercept} | {rally.counters}")
 
                 if recorder is not None:
                     recorder.record(result, ai_decision=decision, plc_request=plc_request)
 
+                status_text = format_status(
+                    result,
+                    runtime.camera_geometry.enabled and runtime.camera_geometry.camera_matrix is not None,
+                )
+                if args.dry_run:
+                    status_text += " | DRY-RUN: motion blocked"
+                if plc is not None:
+                    safe = (feedback is not None and PLCLink._motion_safe(feedback)
+                            and 0 <= time.monotonic() - feedback.stamp <= TARGET_MAX_AGE
+                            and plc.connected)
+                    status_text += f" | PLC armed={plc.armed} safe={safe}"
+                    if (not plc.connected or feedback is None or not feedback.valid
+                            or time.monotonic() - feedback.stamp > TARGET_MAX_AGE):
+                        status_text += " | PLC 未连接/反馈失效：禁止运动"
+                    elif feedback.comm_lost_latch:
+                        status_text += " | PLC 通信丢失锁存：请现场检查并复位"
+                    elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
+                        status_text += f" | PLC 轴报警 {feedback.kinematics_error} / 停止位 {feedback.group_stop}：禁止运动"
+                    elif not feedback.axes_ready or not feedback.plc_echo_ok or feedback.comm_lost:
+                        status_text += " | PLC 轴未就绪或心跳异常：禁止运动"
+                    elif not plc.armed:
+                        status_text += " | PLC 未授权：请现场按 E 使能"
+                    else:
+                        status_text += f" | PLC 实际位置 ({feedback.x:.0f},{feedback.y:.0f})"
                 if not headless:
-                    status_text = format_status(
-                        result,
-                        runtime.camera_geometry.enabled and runtime.camera_geometry.camera_matrix is not None,
-                    )
-                    if plc is not None:
-                        if (not plc.connected or feedback is None or not feedback.valid
-                                or time.monotonic() - feedback.stamp > 0.25):
-                            status_text += " | PLC 未连接/反馈失效：禁止运动"
-                        elif feedback.comm_lost_latch:
-                            status_text += " | PLC 通信丢失锁存：请现场检查并复位"
-                        elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
-                            status_text += f" | PLC 轴报警 {feedback.kinematics_error} / 停止位 {feedback.group_stop}：禁止运动"
-                        elif not feedback.axes_ready or not feedback.plc_echo_ok or feedback.comm_lost:
-                            status_text += " | PLC 轴未就绪或心跳异常：禁止运动"
-                        elif not result.track_confirmed:
-                            status_text += " | 冰壶追踪丢失：PLC 目标已清除"
-                        elif not plc.armed:
-                            status_text += " | PLC 未授权：请现场按 E 使能"
-                        else:
-                            status_text += f" | PLC 实际位置 ({feedback.x:.0f},{feedback.y:.0f})"
                     with preview_lock:
                         shared["result"] = result
                         shared["result_seq"] = result.frame.sequence
@@ -340,6 +372,7 @@ def run_vision(args):
                 stats_interval = 1.0 if headless else STATS_INTERVAL
                 if time.perf_counter() - stats_timer >= stats_interval:
                     stats_timer = time.perf_counter()
+                    print(f"[rally] {status_text} | counters={rally.counters}")
                     capture = camera.get_stats()
                     track_state = result.track.state.value if result.track else "none"
                     if headless:
@@ -420,6 +453,7 @@ def run_vision(args):
         pass
     finally:
         stop.set()
+        print(f"[rally] session counters (observed/requested, not contact-sensor proof): {rally.counters}")
         if plc is not None:
             plc.clear_target()
             if not plc.stop():
@@ -483,6 +517,8 @@ def main():
     parser.add_argument("--benchmark-seconds", type=float, default=0.0, metavar="SEC", help="headless 模式自动停止时间；默认持续运行")
     parser.add_argument("--perf-json", default=None, metavar="PATH", help="退出时保存最近 4096 样本的阶段耗时分布")
     parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
+    parser.add_argument("--dry-run", action="store_true", help="完整回合影子运行：显示/记录请求目标，不发送 PLC 运动或现场轴命令")
+    parser.add_argument("--mallet-speed", type=float, default=500.0, metavar="PX_PER_SEC", help="球槌可达性速度估计（场地逻辑单位/秒；默认 500，非 PLC 轴速度设置）")
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
@@ -496,6 +532,11 @@ def main():
     parser.add_argument("--upper", type=int, nargs=3, default=(10, 255, 255), metavar=("C1", "C2", "C3"))
 
     args = parser.parse_args()
+
+    if not math.isfinite(args.mallet_speed) or args.mallet_speed <= 0:
+        parser.error("--mallet-speed 必须为有限正数（场地逻辑单位/秒）")
+    if args.sim and args.dry_run:
+        parser.error("--dry-run 只适用于实时视觉回合；仿真不接受该安全开关")
 
     if args.plc and (not math.isfinite(args.plc_rate) or args.plc_rate <= 0.0):
         parser.error("--plc-rate 必须为有限正数")

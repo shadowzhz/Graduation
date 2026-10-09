@@ -1,15 +1,19 @@
 """卡尔曼滤波状态估计层。
 
 用常量速度（CV）模型平滑 Detector/Tracker 给出的位置观测，估计更稳定的位置与速度，
-输出统一的 CurlingState，降低视觉抖动。滤波与坐标系无关，由调用方决定在哪个空间运行。
+默认模型输出统一的 CurlingState，降低视觉抖动；friction 用于自由滑动 EKF，collision_aware 增加已知球台坐标下的墙法向反弹。三种模型都不处理门柱碰撞，实时默认仍为 CV。
 
 状态向量 x = [px, py, vx, vy]^T，观测 z = [px, py]^T。
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
+from .. import core_config as core
+from ..physics import apply_friction_velocity, resolve_wall_axis, stone_inside_goal_mouth
 from game_state import CurlingState
 
 _STATE_DIM = 4
@@ -19,13 +23,14 @@ _MAX_DT = 0.5
 
 
 class KalmanFilter:
-    """常量速度模型的线性卡尔曼滤波。"""
+    """默认常速度 Kalman；可选 friction / collision_aware EKF。"""
 
     def __init__(
         self,
         measurement_noise: float = 4.0,
         acceleration_noise: float = 200.0,
         initial_velocity_variance: float = 1_000_000.0,
+        motion_model: str = "constant_velocity",
     ) -> None:
         if measurement_noise <= 0.0:
             raise ValueError("measurement_noise must be positive")
@@ -33,9 +38,12 @@ class KalmanFilter:
             raise ValueError("acceleration_noise must be non-negative")
         if initial_velocity_variance <= 0.0:
             raise ValueError("initial_velocity_variance must be positive")
+        if motion_model not in ("constant_velocity", "friction", "collision_aware"):
+            raise ValueError("motion_model must be 'constant_velocity', 'friction' or 'collision_aware'")
         self.measurement_noise = float(measurement_noise)
         self.acceleration_noise = float(acceleration_noise)
         self.initial_velocity_variance = float(initial_velocity_variance)
+        self.motion_model = motion_model
         self.reset()
 
     def reset(self) -> None:
@@ -44,6 +52,7 @@ class KalmanFilter:
         self._P = np.eye(_STATE_DIM)
         self._last_timestamp = None
         self._initialized = False
+        self._friction_started = False
         self._confidence = 0.0
         self._radius = 0.0
 
@@ -120,6 +129,28 @@ class KalmanFilter:
         return min(max(timestamp - self._last_timestamp, 0.0), _MAX_DT)
 
     def _advance(self, dt: float) -> None:
+        if self.motion_model == "collision_aware" and self._friction_started and dt > 0.0:
+            self._advance_walls(dt)
+            return
+        if self.motion_model in ("friction", "collision_aware") and self._friction_started:
+            vx, vy = float(self._x[2]), float(self._x[3])
+            jacobian = self._friction_velocity_jacobian(vx, vy, dt)
+            next_vx, next_vy = apply_friction_velocity(vx, vy, dt)
+            transition = np.array(
+                [
+                    [1.0, 0.0, dt, 0.0],
+                    [0.0, 1.0, 0.0, dt],
+                    [0.0, 0.0, jacobian[0, 0], jacobian[0, 1]],
+                    [0.0, 0.0, jacobian[1, 0], jacobian[1, 1]],
+                ]
+            )
+            self._x[0] += vx * dt
+            self._x[1] += vy * dt
+            self._x[2] = next_vx
+            self._x[3] = next_vy
+            self._P = transition @ self._P @ transition.T + self._process_noise(dt)
+            return
+
         transition = np.array(
             [
                 [1.0, 0.0, dt, 0.0],
@@ -130,6 +161,54 @@ class KalmanFilter:
         )
         self._x = transition @ self._x
         self._P = transition @ self._P @ transition.T + self._process_noise(dt)
+        if self.motion_model in ("friction", "collision_aware") and dt > 0.0:
+            # 首个位置差用来估算未知初速度，再启用摩擦模型。
+            self._friction_started = True
+
+    def _advance_walls(self, dt: float) -> None:
+        """Position, wall-normal reflection, friction; never use measurement/truth collision flags."""
+        # Only normal wall contacts are modeled, not corner-ejection impulses or goal posts.
+        vx, vy = float(self._x[2]), float(self._x[3])
+        x, y = self._x[0] + vx * dt, self._x[1] + vy * dt
+        next_x, vx, hit_x = resolve_wall_axis(
+            x, vx, core.RINK_LEFT + core.STONE_RADIUS, core.RINK_RIGHT - core.STONE_RADIUS
+        )
+        next_y, hit_y = y, False
+        if not stone_inside_goal_mouth(next_x):
+            next_y, vy, hit_y = resolve_wall_axis(
+                y, vy, core.RINK_TOP + core.STONE_RADIUS, core.RINK_BOTTOM - core.STONE_RADIUS
+            )
+        transition = np.array(
+            [[1.0, 0.0, dt, 0.0], [0.0, 1.0, 0.0, dt],
+             [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+        if hit_x or next_x != x:
+            transition[0, :] = 0.0
+        if hit_y or next_y != y:
+            transition[1, :] = 0.0
+        if hit_x:
+            transition[2, 2] = -core.WALL_RESTITUTION
+        if hit_y:
+            transition[3, 3] = -core.WALL_RESTITUTION
+        transition[2:, :] = self._friction_velocity_jacobian(vx, vy, dt) @ transition[2:, :]
+        next_vx, next_vy = apply_friction_velocity(vx, vy, dt)
+        self._x[:] = next_x, next_y, next_vx, next_vy
+        self._P = transition @ self._P @ transition.T + self._process_noise(dt)
+
+    @staticmethod
+    def _friction_velocity_jacobian(vx: float, vy: float, dt: float) -> np.ndarray:
+        speed = math.hypot(vx, vy)
+        deceleration = core.STONE_FRICTION_DECELERATION * dt
+        if speed <= 1e-9 or speed - deceleration <= 1e-9:
+            return np.zeros((2, 2))
+        scale = 1.0 - deceleration / speed
+        radial = deceleration / (speed * speed * speed)
+        return np.array(
+            [
+                [scale + radial * vx * vx, radial * vx * vy],
+                [radial * vx * vy, scale + radial * vy * vy],
+            ]
+        )
 
     def _process_noise(self, dt: float) -> np.ndarray:
         variance = self.acceleration_noise**2

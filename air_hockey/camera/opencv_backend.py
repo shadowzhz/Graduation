@@ -38,6 +38,7 @@ class OpenCVBackend:
         try:
             if not capture.isOpened():
                 raise RuntimeError(f"DirectShow 无法打开摄像头 {index}；检查设备编号和占用情况")
+            # This camera needs MJPG for its high-speed capture mode.
             capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)

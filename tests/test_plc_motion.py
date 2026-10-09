@@ -222,15 +222,70 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
                 assert len(client.transport.moves) == before + 1
                 assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == expected_mode
         client.clear_trigger()
-        assert client.send_linear_move(1e9, 1e9)
-        assert struct.unpack_from(">dddd", client.transport.moves[-1]) == (
-            protocol.PHYSICAL_X_MAX, 0.0, protocol.PHYSICAL_Y_MAX, 0.0)
         before = len(client.transport.moves)
-        assert not client.send_linear_move(float("nan"), 0)
+        before_operations = len(client.transport.operations)
+        previous_target = (client._last_phys_x, client._last_phys_y)
+        assert not client.send_linear_move(1e9, 1e9)
         assert client.last_send_state == "invalid"
         assert len(client.transport.moves) == before
+        assert not any(operation[0] == "payload"
+                       for operation in client.transport.operations[before_operations:])
+        assert (client._last_phys_x, client._last_phys_y) == previous_target
+        assert not client.transport.db[1][56] & 1
+        for invalid in (float("nan"), float("inf"), -float("inf")):
+            assert not client.send_linear_move(invalid, 0)
+            assert client.last_send_state == "invalid"
+            assert len(client.transport.moves) == before
     finally:
         client.disconnect()
+
+
+@memory_binding()
+def test_plc_game_zone_edges_and_epsilon_tolerance():
+    client = MemoryPLC()
+    try:
+        assert client.connect()
+        left, right, top, bottom = protocol.DEFAULT_ZONE
+        for game_point, physical_point in (
+            ((left, top), (protocol.PHYSICAL_X_MIN, protocol.PHYSICAL_Y_MIN)),
+            ((right, bottom), (protocol.PHYSICAL_X_MAX, protocol.PHYSICAL_Y_MAX)),
+        ):
+            client.reset_tracking()
+            client.clear_trigger()
+            assert client.send_linear_move(*game_point)
+            move = client.transport.moves[-1]
+            assert struct.unpack_from(">dddd", move) == (physical_point[0], 0.0, physical_point[1], 0.0)
+
+        client.reset_tracking()
+        client.clear_trigger()
+        assert client.send_linear_move(left - protocol.COORD_EPSILON / 2,
+                                       top - protocol.COORD_EPSILON / 2)
+        move = client.transport.moves[-1]
+        assert struct.unpack_from(">dddd", move) == (
+            protocol.PHYSICAL_X_MIN, 0.0, protocol.PHYSICAL_Y_MIN, 0.0,
+        )
+
+        before = len(client.transport.moves)
+        client.clear_trigger()
+        assert not client.send_linear_move(left - protocol.COORD_EPSILON * 2, top)
+        assert client.last_send_state == "invalid"
+        assert len(client.transport.moves) == before
+        assert not client.transport.db[1][56] & 1
+    finally:
+        client.disconnect()
+
+
+def test_plc_link_rejects_out_of_zone_targets_without_replacing_target():
+    client = MemoryPLC()
+    link = PLCLink("memory", client_factory=lambda *args: client)
+    left, _right, top, _bottom = link.zone
+    assert link.set_target(left, top)
+    previous_target = link._target
+    assert not link.set_target(1e9, 1e9)
+    assert link._target == previous_target
+    assert not link.set_target(float("nan"), 0)
+    assert not client.transport.moves
+    assert not client.transport.db[1][56] & 1
 
 
 @memory_binding()

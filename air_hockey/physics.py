@@ -10,8 +10,37 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def apply_friction_velocity(vx: float, vy: float, dt: float) -> tuple[float, float]:
+    """按现有自由滑动规则衰减速度，不处理响应加速度、碰撞或速度上限。"""
+    speed = math.hypot(vx, vy)
+    new_speed = max(0.0, speed - core.STONE_FRICTION_DECELERATION * dt)
+    if speed <= 1e-9 or new_speed <= 1e-9:
+        return 0.0, 0.0
+    scale = new_speed / speed
+    return vx * scale, vy * scale
+
+
 def stone_inside_goal_mouth(x):
     return core.GOAL_LEFT + core.STONE_RADIUS < x < core.GOAL_RIGHT - core.STONE_RADIUS
+
+
+def resolve_wall_axis(position, velocity, lower, upper):
+    """Clamp one wall axis and reflect only an outward normal velocity."""
+    if position < lower - core.COLLISION_EPSILON:
+        position = lower
+        bounced = velocity < -core.COLLISION_EPSILON
+    elif position > upper + core.COLLISION_EPSILON:
+        position = upper
+        bounced = velocity > core.COLLISION_EPSILON
+    elif position <= lower + core.COLLISION_EPSILON and velocity < -core.COLLISION_EPSILON:
+        position = lower
+        bounced = True
+    elif position >= upper - core.COLLISION_EPSILON and velocity > core.COLLISION_EPSILON:
+        position = upper
+        bounced = True
+    else:
+        bounced = False
+    return position, -velocity * core.WALL_RESTITUTION if bounced else velocity, bounced
 
 
 def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
@@ -96,15 +125,33 @@ class StoneMotion:
                 scale = velocity_step / delta_speed
                 self.vx += delta_x * scale
                 self.vy += delta_y * scale
-        speed = math.hypot(self.vx, self.vy)
-        new_speed = max(0.0, speed - core.STONE_FRICTION_DECELERATION * dt)
-        if speed <= 1e-9 or new_speed <= 1e-9:
-            self.vx = self.vy = 0.0
-        else:
-            scale = new_speed / speed
-            self.vx *= scale
-            self.vy *= scale
+        self.vx, self.vy = apply_friction_velocity(self.vx, self.vy, dt)
         self.vx, self.vy = self._limited_velocity(self.vx, self.vy)
+
+    def advance_position(self, dt):
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+
+    def step(self, dt: float) -> bool:
+        """Advance one free-motion step: position, walls/posts, then response and friction.
+
+        Returns whether this step produced a wall or goal-post bounce.
+        Goal scoring remains the caller's responsibility.
+        """
+        try:
+            dt = float(dt)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("dt must be finite and non-negative") from exc
+        if not math.isfinite(dt) or dt < 0.0:
+            raise ValueError("dt must be finite and non-negative")
+        if dt == 0.0:
+            return False
+
+        self.advance_position(dt)
+        bounced = self.resolve_walls()
+        bounced = self.resolve_goal_posts() or bounced
+        self.advance_velocity(dt)
+        return bounced
 
     def resolve_walls(self):
         left_limit = core.RINK_LEFT + core.STONE_RADIUS
@@ -115,61 +162,15 @@ class StoneMotion:
         target_vx, target_vy = self.target_vx, self.target_vy
         reflected_vx, reflected_vy = vx, vy
         reflected_target_vx, reflected_target_vy = target_vx, target_vy
-        bounced = False
-        if self.x < left_limit - core.COLLISION_EPSILON:
-            self.x = left_limit
-            if vx < -core.COLLISION_EPSILON:
-                reflected_vx = abs(vx) * core.WALL_RESTITUTION
-                if target_vx < -core.COLLISION_EPSILON:
-                    reflected_target_vx = abs(target_vx) * core.WALL_RESTITUTION
-                bounced = True
-        elif self.x > right_limit + core.COLLISION_EPSILON:
-            self.x = right_limit
-            if vx > core.COLLISION_EPSILON:
-                reflected_vx = -abs(vx) * core.WALL_RESTITUTION
-                if target_vx > core.COLLISION_EPSILON:
-                    reflected_target_vx = -abs(target_vx) * core.WALL_RESTITUTION
-                bounced = True
-        elif self.x <= left_limit + core.COLLISION_EPSILON and vx < -core.COLLISION_EPSILON:
-            self.x = left_limit
-            reflected_vx = abs(vx) * core.WALL_RESTITUTION
-            if target_vx < -core.COLLISION_EPSILON:
-                reflected_target_vx = abs(target_vx) * core.WALL_RESTITUTION
-            bounced = True
-        elif self.x >= right_limit - core.COLLISION_EPSILON and vx > core.COLLISION_EPSILON:
-            self.x = right_limit
-            reflected_vx = -abs(vx) * core.WALL_RESTITUTION
-            if target_vx > core.COLLISION_EPSILON:
-                reflected_target_vx = -abs(target_vx) * core.WALL_RESTITUTION
-            bounced = True
+        self.x, reflected_vx, bounced = resolve_wall_axis(self.x, vx, left_limit, right_limit)
+        if bounced:
+            _, reflected_target_vx, _ = resolve_wall_axis(self.x, target_vx, left_limit, right_limit)
         # 球门口不封上下边，让球能进洞
         if not stone_inside_goal_mouth(self.x):
-            if self.y < top_limit - core.COLLISION_EPSILON:
-                self.y = top_limit
-                if vy < -core.COLLISION_EPSILON:
-                    reflected_vy = abs(vy) * core.WALL_RESTITUTION
-                    if target_vy < -core.COLLISION_EPSILON:
-                        reflected_target_vy = abs(target_vy) * core.WALL_RESTITUTION
-                    bounced = True
-            elif self.y > bottom_limit + core.COLLISION_EPSILON:
-                self.y = bottom_limit
-                if vy > core.COLLISION_EPSILON:
-                    reflected_vy = -abs(vy) * core.WALL_RESTITUTION
-                    if target_vy > core.COLLISION_EPSILON:
-                        reflected_target_vy = -abs(target_vy) * core.WALL_RESTITUTION
-                    bounced = True
-            elif self.y <= top_limit + core.COLLISION_EPSILON and vy < -core.COLLISION_EPSILON:
-                self.y = top_limit
-                reflected_vy = abs(vy) * core.WALL_RESTITUTION
-                if target_vy < -core.COLLISION_EPSILON:
-                    reflected_target_vy = abs(target_vy) * core.WALL_RESTITUTION
-                bounced = True
-            elif self.y >= bottom_limit - core.COLLISION_EPSILON and vy > core.COLLISION_EPSILON:
-                self.y = bottom_limit
-                reflected_vy = -abs(vy) * core.WALL_RESTITUTION
-                if target_vy > core.COLLISION_EPSILON:
-                    reflected_target_vy = -abs(target_vy) * core.WALL_RESTITUTION
-                bounced = True
+            self.y, reflected_vy, y_bounced = resolve_wall_axis(self.y, vy, top_limit, bottom_limit)
+            if y_bounced:
+                _, reflected_target_vy, _ = resolve_wall_axis(self.y, target_vy, top_limit, bottom_limit)
+            bounced = bounced or y_bounced
         # 卡在角落出不来时给一个最小弹出速度
         at_left_or_right = self.x <= left_limit + core.COLLISION_EPSILON or self.x >= right_limit - core.COLLISION_EPSILON
         at_top_or_bottom = self.y <= top_limit + core.COLLISION_EPSILON or self.y >= bottom_limit - core.COLLISION_EPSILON

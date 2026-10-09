@@ -32,7 +32,7 @@ StoneTracker             常速关联 + 漏检维持（仅服务关联与 ROI）
 CameraGeometry           raw → undistorted → table（支持四点 Homography）
   │  table 坐标
   ▼
-KalmanFilter             常量速度模型状态估计，抑制视觉抖动
+KalmanFilter             实时默认常量速度；离线可选摩擦 / 墙碰撞感知 EKF
   │  CurlingState / StoneState(table)
   ▼
 TrajectoryPredictor      微步物理：摩擦减速 + 弹墙 + 门柱 + 进球
@@ -41,12 +41,15 @@ TrajectoryPredictor      微步物理：摩擦减速 + 弹墙 + 门柱 + 进球
 AirHockeyAI              守门 / 前压 / 回防决策
   │  AIDecision(target_x, target_y, ...)
   ▼
+RallyController         实时单回合：WAITING / DEFENDING / RETURNED / RECOVERING
+  │  固定防守线拦截 / READY（保留原 AI 内部计算，不下发主动进攻目标）
+  ▼
 PlcControlAdapter        AI 半场限幅 + 时间戳
   │  PlcTarget（固定 600×760 场地逻辑坐标）
   ▼
 PLCLink(后台周期线程)      反馈/心跳/安全互锁/触发脉冲 → DB1.20 LREAL 运动目标
   │  DB1/DB18 状态位置反馈（mm → 场地逻辑坐标）
-  └─────────────────────────────────────────────────→ VisionRuntime / AirHockeyAI
+  └─────────────────────────────────────────────────→ VisionRuntime / AirHockeyAI / RallyController
 ```
 
 ### 2. 模块依赖方向
@@ -83,10 +86,10 @@ Camera -> VisionRuntime
 1. **图像采集**：GStreamer 原生 appsink 解码 + 线程安全单帧覆盖缓存；实际采集 FPS 和阶段耗时需在目标设备实测，不以请求/协商 FPS 替代。
 2. **目标检测与动态局部 ROI**：HSV 颜色阈值 + 面积/半径/圆形度几何筛选，基于上一帧预测位置的动态 ROI 降低计算量，输出统一 `CurlingState`。
 3. **单目标追踪**：原始像素坐标下的常速关联与漏检维持，负责目标关联与动态 ROI 预测。
-4. **卡尔曼状态估计**：常量速度模型（`[px, py, vx, vy]`）融合观测序列，输出平滑的 `CurlingState`，显著降低检测抖动（观测误差 ≈3.8 → 滤波误差 ≈1.7）。
+4. **卡尔曼状态估计**：实时默认使用常量速度模型（`[px, py, vx, vy]`）；离线可选 `friction` 或 `collision_aware`（只处理墙法向反弹，不处理门柱），用 `--compare-estimators` 在同一组位置观测上比较三者。墙模型只用估计状态和已知球台几何，不接收真值碰撞事件；Q/R/P0 与摩擦 baseline 一致。
 5. **单目去畸变与坐标系几何映射**：`raw → undistorted → table` 三层解耦；`undistorted → table` 支持**球台四点 Homography**（透视校正），也保留 ROI 线性映射回退；速度用空间微元有限差分换算。
 6. **统一微步物理轨迹预测核心**：`TrajectoryPredictor` 涵盖摩擦阻尼、边墙弹性碰撞、门柱圆弧反弹与进球穿透判定；视觉、仿真、AI **共用同一物理核心**。
-7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距；身后冰壶按侧移、后退、对齐、击球分段回收，避免斜退穿球造成乌龙。进入球门侧安全退让线（当前逻辑 y≤91）的球不主动向自家球门推，不能保证救回已经越过可安全击球区域的快球；独立仿真调用仍可自行预测。
+7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距，实机视觉控制关闭随机瞄准误差，避免每次反应刷新都横向跳目标；仿真难度与误差不变。身后冰壶按侧移、后退、对齐、击球分段回收，避免斜退穿球造成乌龙。进入球门侧安全退让线（当前逻辑 y≤91）的球不主动向自家球门推，不能保证救回已经越过可安全击球区域的快球；独立仿真调用仍可自行预测。
 8. **轨迹规划与控制适配层**：独立 `TrajectoryPlanner` 可生成 `ControlCommand`；实时 `PlcControlAdapter` 限制 AI 半场目标，`PLCLink` 周期读取轴状态及位置，安全状态成立才下发运动目标。
 9. **仿真 / 评估 / 记录工具链**：无摄像头运动仿真（真实轨迹→观测→Kalman→预测）、多组实验误差评估（JSON + 控制台报告）、真实/仿真统一格式运行日志（含 CurlingState / PredictionState / AIDecision / PLC request）。
 10. **西门子 PLC 工业通信**：按 S7-1500T/TO_Kinematics 联调版的 DB1/DB18 协议收发；只下发 `[X,0,Y,0]` 运动学位置和触发脉冲，冰壶状态与比分不再写入 PLC。
@@ -102,7 +105,7 @@ Camera -> VisionRuntime
 统一通过根目录 [main.py](file:///run/media/shadowemperor/游戏/Ubuntu/Project/Python/Graduation/main.py) 启动：
 
 Windows 使用已经能运行 PLC 软件的同一个 Python 环境；若它缺视觉依赖，安装 `numpy` 和 `opencv-python`（`python -m pip install numpy opencv-python`），不要为此更换已有可用的 `python-snap7` 版本。
-默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。相机采集按系统选择：Linux / Jetson 用 V4L2 GStreamer（Jetson 有 NVIDIA 元件时硬解码，普通 Linux 软件解码）；Windows 用 OpenCV DirectShow，默认摄像头编号为 `0`，可用 `--camera-device 1` 切换。相机分辨率和帧率是请求值，运行状态会报告实际图像尺寸和驱动报告的帧率。将相机和已标定文件转到 Windows 时，分辨率必须与标定文件一致；默认请求 1280×720，实际尺寸不符时不能用原球台标定驱动 PLC。
+默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。相机采集按系统选择：Linux / Jetson 用 V4L2 GStreamer（Jetson 有 NVIDIA 元件时硬解码，普通 Linux 软件解码）；Windows 用 OpenCV DirectShow，默认摄像头编号为 `0`，可用 `--camera-device 1` 切换。Windows 请求 MJPG、1280×720 和配置帧率（默认 200 FPS）；启动状态报告实际尺寸、驱动报告帧率和格式，实测采集速度以帧计数为准。200 FPS 是否可达、视野是否完整取决于相机支持的模式。先确认完整球台都在画面内；视野变化后，即使尺寸仍为 1280×720，也必须重新做相机内参和球台标定，验证完成前不要接 PLC。
 
 ```bash
 python3 air_hockey/tools/calibrate_camera.py --cols 10 --rows 7 --square-size 25 --output calibration/camera_calibration.npz
@@ -117,7 +120,7 @@ python3 main.py --plc 192.168.0.64 --plc-rate 30  # 仅适用已配置对应 DB1
 python3 main.py --sim --plc 192.168.0.64          # 仿真游戏/实机轴反馈联动
 # Windows PowerShell：先验证相机画面；PLC 运行时用已安装 Snap7 的同一 Python 环境
 python main.py --camera-device 0
-# 确认预览和 1280×720 标定尺寸一致、球台范围正确后，才连接 PLC
+# 确认完整球台都在预览中，并在当前相机画面下完成标定后，才连接 PLC
 python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 ```
 
@@ -129,7 +132,35 @@ python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 
 **实机使用前提**：确认设备区域安全、硬件急停有效、TIA DB 布局匹配，完成相机内参与球台四点标定；不要用 `--disable-homography` / `--disable-undistort` 驱动实机。连接本身不使能轴；图形界面 E/「轴使能」、H/「轴回零」、C/「轴复位」由现场操作员操作。按 H 或 C 时停止游戏目标；操作完成、轴状态恢复后需重新按 E 授权，仿真游戏还需手动继续。PLC 响应异常、轴未就绪、心跳超时和反馈失效时禁止下发；断线重连也需重新人工使能。机械限位和急停仍由 PLC/硬件负责，软件限幅不能替代。`--headless --plc` 无现场轴使能按钮，不用于首次联调。
 
-**现场安全边界**：视觉计划性抽帧仍可预测目标；一次实际检测漏检后立即停止刷新 PLC 目标，重新检测到冰壶才恢复。所有上位机控制位采用同步 S7 BIT 写入，不再读改写整个共享字节，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`，成功后单独置 `DB1.56.0`；DB 地址不变。连接必须先成功初始化心跳位并清除直线触发位，才允许后续授权。单个位原子写入不等于整组命令原子完成，部分失败不能撤回 PLC 已接受的位；仍须现场验证 PLC 扫描、触发脉宽和独立失联停止。软件暂停只清除后续目标，不能撤销已经进入网络发送过程的运动指令，**不得作为急停使用**。
+**现场安全边界**：视觉计划性抽帧仍可预测目标；一次实际检测漏检后立即清除动态拦截目标并结束本回合，随后只请求固定 READY 回位。READY 不依赖冰壶确认，但仍必须满足 PLC 人工授权与全部安全互锁；动态拦截仍要求 confirmed track、有效状态和 AI 输出。所有上位机控制位采用同步 S7 BIT 写入，不再读改写整个共享字节，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`，成功后单独置 `DB1.56.0`；DB 地址不变。连接必须先成功初始化心跳位并清除直线触发位，才允许后续授权。单个位原子写入不等于整组命令原子完成，部分失败不能撤回 PLC 已接受的位；仍须现场验证 PLC 扫描、触发脉宽和独立失联停止。软件暂停只清除后续目标，不能撤销已经进入网络发送过程的运动指令，**不得作为急停使用**。
+
+### 单回合现场联调（先观察，再运动）
+
+实时模式现在只做基础挡球/回击：上半场是机器侧，`vy < -25` 为来球；READY 复用原 AI HOME `(300, 139.52)`。只有确认轨迹的真实检测、有效新鲜状态及 READY 到位才启动防守；慢速抖动、候选轨迹和 outgoing 不启动。用预测轨迹第一次向上的 `y=184.52` 前接触线交点确定横向位置，球槌保持 `y=139.52`，不追预测终点。到达时间采用路径长度/速度上界的保守估计（扣除状态年龄），不是采样点序号推算；新移动需比估计到达时间早 85 ms。已经覆盖拦截点则保持，不在接触前因时间裕量不足撤位。
+
+回球确认要求近期观测/观测线段靠近实际球槌（接触距离 45 + 容差 14），随后至少两次不同时间戳的真实检测持续 `vy > 25`，跨度至少 40 ms、向人方位移至少 7；predict 帧不计数，反向/低速硬检测会重置计数。确认前只保持已到位的拦截位置（未到位则清目标），不追 outgoing，也不因单帧符号变化撤位；RETURNED 才立即请求 READY。实机回位须新鲜实际反馈、非 busy、距 READY ≤14；反馈失效不会靠计时假装回位成功。5 秒未返回、丢失/换 ID 或穿过防守线判失败并回位；下次须旧轨迹失效、新确认 ID，或再次从人方半场入射。
+
+```bash
+# A：不放球；离线先查看映射，随后连接现场 PLC（IP 按设备替换）
+python3 air_hockey/tools/test_rally_points.py --dry-run
+python3 air_hockey/tools/test_rally_points.py --plc 192.168.0.64
+# 终端逐次输入 e / h / c / n / q 并回车；回零/复位后须重新 e。
+# 每个 n 只请求一处：READY → LEFT → CENTER → RIGHT → READY，ARRIVED 后再 n。
+
+# B：观察模式；PLC 只读反馈/心跳，不发运动，也不提供轴使能/回零/复位操作。
+python3 -u main.py --camera-device /dev/video2 --plc 192.168.0.64 --dry-run --record shadow.json
+
+# C–F：标定、坐标方向、速度与安全隔离确认后才运行。GUI E 人工使能，H 回零，C 复位。
+python3 -u main.py --camera-device /dev/video2 --plc 192.168.0.64 --mallet-speed 500 --record rally.json
+```
+
+Windows 用现场已有 Python 环境，将 `python3` 改为 `python`、相机改为 `--camera-device 0`。不得使用关闭标定的开关驱动实机。`--mallet-speed` 单位是场地逻辑单位/秒，只影响可达性，不设置 PLC 速度；500 是软件估计，不是实测机械保证。A 的相邻横向点相隔 132 单位，可结合输出的 host request-to-arrival 时间估计保守速度，再在 C 验证；该时间含通信/轮询，不是纯电机运动时间。没有 PLC 时使用标明为 software 的球槌位置，只能证明软件状态逻辑。
+
+B 连续观察 10 球；若要检查 RETURNED，在轴禁止运动并确认硬件安全后使用被动挡板/手动回球，不能把 dry-run 当作球槌已经击球。C 使用可靠隔离/接球装置防止实际接触，核对预测点、时间与实际位置；D 去除装置后只试一次真实接触；E 完成返回→回位→READY；F 不重启连续 10 次。每次转换打印原因，GUI/周期控制台显示 confirmed、方向、速度、拦截点、到达时间下界、球槌旅行时间、目标、实际位置及 PLC armed/safe。
+
+控制台/退出输出 `incoming_detected / defense_entered / intercept_attempted / successful_return / failed_intercept / recovered`；前两个是已接受的确认来球/防守次数，attempted 是可达请求，不是电机到位，returned 是视觉返回证据，不是碰撞传感器证明。`--record` 的 `plc_request` 也是请求而非执行确认，meta 标明 `dry_run / live / no_plc`。状态转换/计数保存在控制台，需持久保存可用终端日志或 Linux `| tee rally-console.log`。
+
+故障归类：无 track→Detection；tentative/lost→Tracker；速度方向不符→Direction；无交点/状态不匹配→Predictor/intercept；`reachable=False`→Unreachable；`armed=False`→PLC authorization；实际位置赶不上且旅行时间超过到达时间→Motion too slow；A 的方向/坐标不符→Mapping；5 秒未确认返回→Return detection/missed intercept；回位超过 5 秒或反馈失效→Recovery。先定位阶段，不调 estimator/物理参数；本版不保证回击角度、复杂进攻、高难度来球或门柱特殊碰撞。
 
 PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在 Windows 或实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
 
@@ -152,6 +183,7 @@ Jetson 上若看到 `unknown type GstFraction`，需更新到通过 `Gst.Structu
 ```bash
 python3 air_hockey/simulation/run_simulation.py     # 无摄像头轨迹仿真
 python3 air_hockey/evaluation/run_evaluation.py     # 算法评估报告（JSON + 控制台）
+python3 air_hockey/evaluation/run_evaluation.py --runs 20 --noise 0 --seed 42 --compare-estimators
 python3 air_hockey/tools/calibrate_table.py         # 球台四点 Homography 标定
 python3 tests/run_tests.py                          # 全量自动化测试
 ```

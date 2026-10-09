@@ -216,6 +216,40 @@ def test_enabled_calibration_missing_file_raises_error():
     assert geom.camera_matrix is None
 
 
+def test_camera_calibration_rejects_runtime_resolution_mismatch():
+    with np.load(CALIB_FILE) as calibration:
+        width, height = (int(value) for value in calibration["image_size"])
+    geom = CameraGeometry.from_calibration_file(CALIB_FILE, rink_bounds=RINK_BOUNDS)
+    assert geom.calibration_image_size == (width, height)
+
+    try:
+        geom.set_image_size((width + 1, height))
+        assert False, "Should have raised ValueError"
+    except ValueError as exc:
+        assert f"calibrated for {width}x{height}" in str(exc)
+        assert f"runtime frame is {width + 1}x{height}" in str(exc)
+
+
+def test_camera_calibration_requires_image_size():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "camera_without_image_size.npz"
+        np.savez(path, camera_matrix=np.eye(3), dist_coeffs=np.zeros(5))
+        try:
+            CameraGeometry.from_calibration_file(path, rink_bounds=RINK_BOUNDS, enabled=True)
+            assert False, "Should have raised ValueError"
+        except ValueError as exc:
+            assert "image_size" in str(exc)
+            assert "calibrate_camera.py" in str(exc)
+
+
+def test_disabled_calibration_does_not_require_image_size():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "camera_without_image_size.npz"
+        np.savez(path, camera_matrix=np.eye(3), dist_coeffs=np.zeros(5))
+        geom = CameraGeometry.from_calibration_file(path, rink_bounds=RINK_BOUNDS, enabled=False)
+        assert not geom.enabled and geom.camera_matrix is None
+
+
 def test_tracker_independent_of_calibration_roi():
     """测试 Tracker 坐标完全运行在 raw pixel，不受相机校正 ROI 影响。"""
     tracker1 = StoneTracker(max_distance=100.0)
@@ -479,22 +513,19 @@ def test_none_table_calibration_uses_linear_roi():
 def test_homography_resolution_mismatch_raises_error():
     """Homography 标定分辨率与运行分辨率不同时抛 ValueError，不自动缩放。"""
     homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "table_homography.npz"
-        _write_homography_file(path, homography, (1280, 720))
-        geom = CameraGeometry.from_calibration_file(
-            CALIB_FILE,
-            rink_bounds=RINK_BOUNDS,
-            table_calibration_file=path,
-            enabled=True,
-        )
-        assert geom.homography_image_size == (1280, 720)
-        try:
-            geom.set_image_size((1920, 1080))
-            assert False, "Should have raised ValueError"
-        except ValueError as exc:
-            assert "Homography calibrated for 1280x720" in str(exc)
-            assert "runtime image is 1920x1080" in str(exc)
+    geom = CameraGeometry(
+        rink_bounds=RINK_BOUNDS,
+        homography_matrix=homography,
+        homography_image_size=(1280, 720),
+        enabled=True,
+    )
+    assert geom.homography_image_size == (1280, 720)
+    try:
+        geom.set_image_size((1920, 1080))
+        assert False, "Should have raised ValueError"
+    except ValueError as exc:
+        assert "Homography calibrated for 1280x720" in str(exc)
+        assert "runtime image is 1920x1080" in str(exc)
 
 
 def test_disable_undistort_with_homography_rejected():

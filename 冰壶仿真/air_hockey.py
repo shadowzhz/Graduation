@@ -570,8 +570,8 @@ class AirHockeyGame:
     def _move_stone(self, dt, player_previous, ai_previous) -> bool:
         stone = self.stone
         stone_previous = (stone.x, stone.y)
-        stone.x += stone.vx * dt
-        stone.y += stone.vy * dt
+        # Swept mallet collisions must run before this frame's velocity response.
+        stone.advance_position(dt)
         stone.resolve_walls()
         stone.resolve_goal_posts()
         self._swept_collide_with_mallet(stone_previous, player_previous, self.player_x, self.player_y, self.player_vx * PLAYER_IMPACT_SPEED_SCALE, self.player_vy * PLAYER_IMPACT_SPEED_SCALE)

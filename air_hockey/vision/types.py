@@ -42,6 +42,7 @@ class Detection:
 
 
 class TrackState(Enum):
+    TENTATIVE = "tentative"
     ACTIVE = "active"
     LOST = "lost"
 
@@ -61,3 +62,4 @@ class Track:
     missed_frames: int = 0
     state: TrackState = TrackState.ACTIVE
     confidence: float = 0.0
+    hits: int = 1

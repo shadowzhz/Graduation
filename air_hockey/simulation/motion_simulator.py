@@ -18,7 +18,7 @@ from typing import Optional
 
 from .. import core_config as core
 from ..estimation import KalmanFilter
-from ..physics import StoneMotion, goal_scorer
+from ..physics import StoneMotion, goal_scorer, stone_inside_goal_mouth
 from ..prediction import PredictionState, TrajectoryPredictor
 from game_state import CurlingState
 
@@ -47,7 +47,7 @@ class SimulationConfig:
 
 @dataclass
 class SimulationResult:
-    """仿真结果：真实/观测/滤波轨迹与预测终点。"""
+    """轨迹样本、逐帧状态和与 Predictor 停止阈值一致的物理终点。"""
 
     true_trajectory: list[tuple[float, float]]
     observed_trajectory: list[tuple[float, float]]
@@ -56,10 +56,16 @@ class SimulationResult:
     prediction: PredictionState
     filtered_state: CurlingState
     timestamps: list[float]
+    true_velocity_trajectory: Optional[list[tuple[float, float]]] = None
+    filtered_velocity_trajectory: Optional[list[tuple[float, float]]] = None
+    physical_endpoint: Optional[tuple[float, float]] = None
+    motion_events: tuple[str, ...] = ()
+    prediction_frame: Optional[int] = None
 
     @property
     def true_endpoint(self) -> tuple[float, float]:
-        return self.true_trajectory[-1]
+        """物理终点；未提供终态时兼容旧结果并回退到采样末帧。"""
+        return self.physical_endpoint if self.physical_endpoint is not None else self.true_trajectory[-1]
 
     def _mean_error(self, sequence: list[tuple[float, float]]) -> float:
         if not sequence:
@@ -78,7 +84,7 @@ class SimulationResult:
         return self._mean_error(self.filtered_trajectory)
 
     def endpoint_error(self) -> float:
-        """预测终点与真实终点的距离。"""
+        """从所选滤波状态预测的端到端终点误差。"""
         return math.hypot(
             self.predicted_endpoint[0] - self.true_endpoint[0],
             self.predicted_endpoint[1] - self.true_endpoint[1],
@@ -91,7 +97,7 @@ class SimulationResult:
             f"samples={len(self.true_trajectory)} | "
             f"true_endpoint=({truth_x:.1f}, {truth_y:.1f}) | "
             f"predicted_endpoint=({predict_x:.1f}, {predict_y:.1f}) | "
-            f"endpoint_error={self.endpoint_error():.2f} | "
+            f"estimated_endpoint_error={self.endpoint_error():.2f} | "
             f"obs_error={self.mean_observation_error():.2f} | "
             f"filtered_error={self.mean_filtered_error():.2f}"
         )
@@ -140,7 +146,12 @@ class MotionSimulator:
         return cls(config)
 
     def true_trajectory(self) -> list[tuple[float, float]]:
-        """共享墙壁、门柱和进球规则；得分后保持位置，保留 steps + 1 帧。"""
+        """返回采样轨迹；越过 Predictor 停止阈值或得分后保持位置。"""
+        return self._true_motion_trace()[0]
+
+    def _true_motion_trace(
+        self,
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]], tuple[float, float], tuple[str, ...]]:
         stone = StoneMotion(
             x=self.config.initial_x,
             y=self.config.initial_y,
@@ -149,17 +160,58 @@ class MotionSimulator:
         )
         stone.set_immediate_velocity(stone.vx, stone.vy)
         trajectory = [(stone.x, stone.y)]
+        velocities = [(stone.vx, stone.vy)]
+        events: set[str] = set()
         scored = goal_scorer(stone) is not None
+        if scored:
+            events.add("goal")
+            stone.set_immediate_velocity(0.0, 0.0)
+        stopped = math.hypot(stone.vx, stone.vy) <= core.STONE_STOP_SPEED
+        if stopped and not scored:
+            # Endpoint truth uses the same terminal-speed criterion as Predictor.
+            stone.set_immediate_velocity(0.0, 0.0)
+
+        def step_truth() -> None:
+            nonlocal scored, stopped
+            bounced = stone.step(self.config.dt)
+            if bounced:
+                # ponytail: infer event type from resolved coordinates; typed step events remove the simultaneous-contact ambiguity.
+                left = core.RINK_LEFT + core.STONE_RADIUS
+                right = core.RINK_RIGHT - core.STONE_RADIUS
+                top = core.RINK_TOP + core.STONE_RADIUS
+                bottom = core.RINK_BOTTOM - core.STONE_RADIUS
+                if abs(stone.x - left) <= 1e-6 or abs(stone.x - right) <= 1e-6:
+                    events.add("wall_bounce")
+                if not stone_inside_goal_mouth(stone.x) and (
+                    abs(stone.y - top) <= 1e-6 or abs(stone.y - bottom) <= 1e-6
+                ):
+                    events.add("wall_bounce")
+                post_distance = core.STONE_RADIUS + core.GOAL_POST_RADIUS
+                if any(
+                    abs(math.hypot(stone.x - post_x, stone.y - post_y) - post_distance) <= 1e-6
+                    for post_x, post_y in core.GOAL_POSTS
+                ):
+                    events.add("goal_post_bounce")
+            scored = goal_scorer(stone) is not None
+            if scored:
+                events.add("goal")
+                stone.set_immediate_velocity(0.0, 0.0)
+                stopped = True
+            elif math.hypot(stone.vx, stone.vy) <= core.STONE_STOP_SPEED:
+                stone.set_immediate_velocity(0.0, 0.0)
+                stopped = True
+
         for _ in range(self.config.steps):
-            if not scored:
-                stone.advance_velocity(self.config.dt)
-                stone.x += stone.vx * self.config.dt
-                stone.y += stone.vy * self.config.dt
-                stone.resolve_walls()
-                stone.resolve_goal_posts()
-                scored = goal_scorer(stone) is not None
+            if not scored and not stopped:
+                step_truth()
             trajectory.append((stone.x, stone.y))
-        return trajectory
+            velocities.append((stone.vx, stone.vy))
+        while not scored and not stopped:
+            step_truth()
+
+        if not events.intersection(("wall_bounce", "goal_post_bounce")):
+            events.add("no_bounce")
+        return trajectory, velocities, (stone.x, stone.y), tuple(sorted(events))
 
     def observe(
         self,
@@ -179,33 +231,42 @@ class MotionSimulator:
 
         predict_step 指定从第几个滤波状态发起预测；默认用最后一个状态。
         """
-        true_trajectory = self.true_trajectory()
+        return self.simulate_estimators(("constant_velocity",), predict_step)["constant_velocity"]
+
+    def simulate_estimators(
+        self,
+        motion_models: tuple[str, ...],
+        predict_step: Optional[int] = None,
+    ) -> dict[str, SimulationResult]:
+        """只生成一次真值和观测，再分别运行各状态估计模型。"""
+        true_trajectory, true_velocities, physical_endpoint, motion_events = self._true_motion_trace()
         rng = random.Random(self.config.seed)
         observed_trajectory = self.observe(true_trajectory, rng)
-
-        kalman = KalmanFilter()
-        states: list[CurlingState] = []
-        timestamps: list[float] = []
-        for index, (observed_x, observed_y) in enumerate(observed_trajectory):
-            timestamp = index * self.config.dt
-            state = kalman.update(observed_x, observed_y, timestamp)
-            states.append(state)
-            timestamps.append(timestamp)
-
-        filtered_trajectory = [(state.x, state.y) for state in states]
-        source_index = len(states) - 1 if predict_step is None else min(max(predict_step, 0), len(states) - 1)
-        filtered_state = states[source_index]
-        prediction = self.predictor.predict(filtered_state)
-
-        return SimulationResult(
-            true_trajectory=true_trajectory,
-            observed_trajectory=observed_trajectory,
-            filtered_trajectory=filtered_trajectory,
-            predicted_endpoint=prediction.endpoint,
-            prediction=prediction,
-            filtered_state=filtered_state,
-            timestamps=timestamps,
-        )
+        timestamps = [index * self.config.dt for index in range(len(observed_trajectory))]
+        results: dict[str, SimulationResult] = {}
+        for motion_model in motion_models:
+            kalman = KalmanFilter(motion_model=motion_model)
+            states = [kalman.update(x, y, timestamp) for (x, y), timestamp in zip(observed_trajectory, timestamps)]
+            filtered_trajectory = [(state.x, state.y) for state in states]
+            filtered_velocities = [(state.vx, state.vy) for state in states]
+            source_index = len(states) - 1 if predict_step is None else min(max(predict_step, 0), len(states) - 1)
+            filtered_state = states[source_index]
+            prediction = self.predictor.predict(filtered_state)
+            results[motion_model] = SimulationResult(
+                true_trajectory=true_trajectory,
+                observed_trajectory=observed_trajectory,
+                filtered_trajectory=filtered_trajectory,
+                predicted_endpoint=prediction.endpoint,
+                prediction=prediction,
+                filtered_state=filtered_state,
+                timestamps=timestamps,
+                true_velocity_trajectory=true_velocities,
+                filtered_velocity_trajectory=filtered_velocities,
+                physical_endpoint=physical_endpoint,
+                motion_events=motion_events,
+                prediction_frame=source_index,
+            )
+        return results
 
 
 def run_simulation(config: Optional[SimulationConfig] = None, predict_step: Optional[int] = None) -> SimulationResult:

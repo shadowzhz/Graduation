@@ -57,10 +57,15 @@ def run_benchmark(args):
     try:
         camera.start(timeout=3.0)
         info = camera.info
+        requested_mode = (
+            f"{config.width}x{config.height} @ {config.requested_fps:g} FPS，MJPG"
+            if sys.platform == "win32"
+            else f"{config.width}x{config.height} @ {config.requested_fps:g} FPS"
+        )
         print(
             f"基准测试开始：设备={info.device if info else config.device}，"
             f"后端={info.backend if info else '未知'}，"
-            f"请求模式={config.width}x{config.height} @ {config.requested_fps:g} FPS，"
+            f"请求模式={requested_mode}，"
             f"模式={info.width if info else '?'}x{info.height if info else '?'}，"
             f"驱动报告 FPS={info.negotiated_fps if info else 0:.2f}，"
             f"输入格式={info.source_format if info else '?'}"

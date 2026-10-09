@@ -26,6 +26,68 @@ def test_wall_bounce_reflects_velocity():
     assert abs(stone.vx - 300.0 * layout.WALL_RESTITUTION) < 1e-9
 
 
+def test_step_matches_position_then_velocity_order_without_collisions():
+    dt = 0.02
+    stone = StoneMotion(x=300.0, y=400.0, vx=120.0, vy=-80.0)
+    expected_x = stone.x + stone.vx * dt
+    expected_y = stone.y + stone.vy * dt
+    expected_velocity = StoneMotion(vx=stone.vx, vy=stone.vy)
+    expected_velocity.advance_velocity(dt)
+
+    assert not stone.step(dt)
+    assert (stone.x, stone.y) == (expected_x, expected_y)
+    assert (stone.vx, stone.vy) == (expected_velocity.vx, expected_velocity.vy)
+
+
+def test_step_resolves_wall_before_friction():
+    left_limit = layout.RINK_LEFT + layout.STONE_RADIUS
+    stone = StoneMotion(x=left_limit + 1.0, y=layout.RINK_CENTER_Y)
+    stone.set_immediate_velocity(-200.0, 0.0)
+
+    assert stone.step(0.01)
+    assert stone.x == left_limit
+    expected_speed = 200.0 * layout.WALL_RESTITUTION - layout.STONE_FRICTION_DECELERATION * 0.01
+    assert abs(stone.vx - expected_speed) < 1e-9
+
+
+def test_step_resolves_goal_post_before_velocity_update():
+    post_x, post_y = layout.GOAL_POSTS[0]
+    dt = 0.01
+    stone = StoneMotion(x=post_x + 14.1, y=post_y + 15.0, vx=0.0, vy=-200.0)
+    expected = StoneMotion(x=stone.x, y=stone.y, vx=stone.vx, vy=stone.vy)
+    expected.x += expected.vx * dt
+    expected.y += expected.vy * dt
+    expected.resolve_walls()
+    assert expected.resolve_goal_posts()
+    expected.advance_velocity(dt)
+
+    assert stone.step(dt)
+    assert (stone.x, stone.y, stone.vx, stone.vy) == (
+        expected.x, expected.y, expected.vx, expected.vy,
+    )
+
+
+def test_step_zero_dt_preserves_all_motion_state():
+    stone = StoneMotion(x=300.0, y=400.0, vx=12.0, vy=-8.0,
+                        target_vx=40.0, target_vy=-20.0, response_active=True)
+    before = (stone.x, stone.y, stone.vx, stone.vy, stone.target_vx, stone.target_vy,
+              stone.response_active)
+    assert not stone.step(0.0)
+    assert (stone.x, stone.y, stone.vx, stone.vy, stone.target_vx, stone.target_vy,
+            stone.response_active) == before
+
+
+def test_step_rejects_negative_and_nonfinite_dt_without_mutation():
+    for dt in (-1.0, math.nan, math.inf):
+        stone = StoneMotion(x=300.0, y=400.0, vx=12.0, vy=-8.0)
+        before = (stone.x, stone.y, stone.vx, stone.vy)
+        try:
+            stone.step(dt)
+            assert False, f"dt={dt} 应该抛 ValueError"
+        except ValueError:
+            assert (stone.x, stone.y, stone.vx, stone.vy) == before
+
+
 def test_friction_eventually_stops_stone():
     stone = StoneMotion()
     stone.set_immediate_velocity(100.0, 0.0)
@@ -283,6 +345,26 @@ def test_default_forecast_reaches_stop_after_multiple_bounces():
     assert prediction.duration > 1024 * step
     assert sum(x in (50.0, 550.0) for x, _ in prediction) > 2
     assert source.vx == layout.MAX_STONE_SPEED
+
+
+def test_predictor_matches_repeated_shared_motion_steps():
+    dt = layout.PREDICTION_SUBSTEP
+    source = StoneMotion(x=300.0, y=400.0, vx=180.0, vy=-120.0)
+    prediction = TrajectoryPredictor().predict(source)
+    truth = StoneMotion(x=source.x, y=source.y, vx=source.vx, vy=source.vy)
+    truth.set_immediate_velocity(truth.vx, truth.vy)
+    duration = 0.0
+
+    for _ in range(layout.PREDICTION_MAX_SIMULATION_STEPS):
+        truth.step(dt)
+        duration += dt
+        if goal_scorer(truth) or math.hypot(truth.vx, truth.vy) <= layout.STONE_STOP_SPEED:
+            break
+    else:
+        assert False, "Expected motion to reach a terminal state"
+
+    assert prediction.endpoint == (truth.x, truth.y)
+    assert prediction.duration == duration
 
 
 def test_overspeed_is_capped_before_first_position_step():
