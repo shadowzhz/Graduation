@@ -30,8 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="实时运行 Camera -> Detector -> Tracker -> GameState。"
     )
-    parser.add_argument("--device", default=None, help="例如 /dev/video0")
-    parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"), default=(350, 0, 580, 650))
+    parser.add_argument("--device", default=None, help="Linux 摄像头路径或 Windows 摄像头编号，例如 0")
+    parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"), default=(4, 10, 1216, 710))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80))
     parser.add_argument("--upper", type=int, nargs=3, default=(10, 255, 255))
     parser.add_argument("--min-area", type=float, default=500.0)

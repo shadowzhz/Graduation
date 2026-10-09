@@ -1,11 +1,13 @@
-"""GStreamer-only latest-frame capture with observable startup and runtime failures."""
+"""Latest-frame camera capture with observable startup and runtime failures."""
 
 import glob
+import sys
 import threading
 import time
 
 from .buffer import FrameBuffer
 from .gst_backend import GStreamerBackend
+from .opencv_backend import OpenCVBackend
 from .stats import FPSStats
 from .types import CameraConfig, Frame
 
@@ -43,6 +45,8 @@ class CameraManager:
     def _devices(self):
         if self.config.device:
             return [self.config.device]
+        if sys.platform == "win32":
+            return ["0"]
         devices = glob.glob("/dev/video*")
         return sorted(
             (device for device in devices if device.rsplit("video", 1)[-1].isdigit()),
@@ -80,8 +84,9 @@ class CameraManager:
 
             errors = []
             devices = self._devices()
+            backend_class = OpenCVBackend if sys.platform == "win32" else GStreamerBackend
             for device in devices:
-                backend = GStreamerBackend(self.config)
+                backend = backend_class(self.config)
                 try:
                     backend.open(device)
                 except Exception as exc:
@@ -115,8 +120,8 @@ class CameraManager:
                 self._stop_locked()
 
             failure = RuntimeError(
-                "GStreamer 摄像头启动失败；已尝试设备："
-                + ("; ".join(errors) if errors else "找不到 /dev/video* 设备")
+                "摄像头启动失败；已尝试设备："
+                + ("; ".join(errors) if errors else "找不到可用设备")
             )
             with self._lock:
                 self._error = failure
@@ -135,12 +140,12 @@ class CameraManager:
                     if time.perf_counter() - last_sample >= max(
                         5.0, 10.0 / max(1.0, self.config.requested_fps)
                     ):
-                        raise RuntimeError("GStreamer 长时间没有返回样本")
+                        raise RuntimeError("摄像头采集长时间没有返回图像")
                     continue
                 now = time.perf_counter()
                 last_sample = now
                 if not first_frame and backend.info is None:
-                    raise RuntimeError("GStreamer 首帧缺少实际协商 caps")
+                    raise RuntimeError("摄像头首帧缺少实际采集模式信息")
                 frame = self.frame_buffer.put(
                     Frame(
                         image, timestamp=now,

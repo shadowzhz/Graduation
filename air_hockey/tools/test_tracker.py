@@ -19,10 +19,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Test StoneDetector and StoneTracker with a camera."
     )
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--device", default=None, help="Linux 摄像头路径或 Windows 摄像头编号")
     parser.add_argument(
         "--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
-        default=(350, 0, 580, 650),
+        default=(4, 10, 1216, 710),
     )
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80))
     parser.add_argument("--upper", type=int, nargs=3, default=(10, 255, 255))

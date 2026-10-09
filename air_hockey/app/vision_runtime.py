@@ -70,7 +70,7 @@ class VisionRuntime:
 
     def __init__(
         self,
-        table_roi: tuple[int, int, int, int] = (350, 0, 580, 650),
+        table_roi: tuple[int, int, int, int] = (4, 10, 1216, 710),
         lower: tuple[int, int, int] = (170, 100, 80),
         upper: tuple[int, int, int] = (10, 255, 255),
         calibration_file: str = "calibration/camera_calibration.npz",
