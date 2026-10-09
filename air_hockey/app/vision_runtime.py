@@ -7,10 +7,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .. import core_config as core
 from ..ai import AIDecision, AirHockeyAI
@@ -21,6 +21,9 @@ from ..prediction import PredictionState, TrajectoryPredictor
 from ..vision import StoneDetector, VisionPipeline
 from ..vision.tracker import StoneTracker, TrackState
 from ..vision.types import Detection, ROI, Track
+
+if TYPE_CHECKING:
+    from .rally import RallyDecision
 
 DETECTION_INTERVAL = 3
 AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
@@ -54,6 +57,7 @@ class VisionResult:
     ai_target: Optional[tuple[float, float]] = None
     fps: float = 0.0
     ai_decision: Optional[AIDecision] = None
+    rally: Optional[RallyDecision] = None
 
     @property
     def stone_state(self) -> Optional[CurlingState]:
@@ -103,6 +107,8 @@ class VisionRuntime:
         self.predictor = predictor or TrajectoryPredictor()
         self._reuse_prediction_for_ai = ai is None
         self.ai = AirHockeyAI(predictor=self.predictor) if ai is None else ai
+        # Random aim noise is useful in simulation, but makes real PLC setpoints wander.
+        self._ai_difficulty = replace(core.DIFFICULTIES["普通"], aim_error=0.0)
 
         if vision_pipeline is not None:
             self.vision_pipeline = vision_pipeline
@@ -255,7 +261,7 @@ class VisionRuntime:
                 serve_phase="idle",
                 stalled_stone_phase=self.stalled_phase,
                 reaction_timer=self.reaction_timer,
-                difficulty=core.DIFFICULTIES["普通"],
+                difficulty=self._ai_difficulty,
             )
 
             ai_start = time.perf_counter() if self.profile else 0.0
@@ -286,8 +292,7 @@ class VisionRuntime:
             frame=processed_frame,
             detection=detection,
             track=track,
-            track_confirmed=bool(track is not None and self.tracker.track is not None
-                                 and self.tracker.track.state == TrackState.ACTIVE),
+            track_confirmed=bool(track is not None and track.state == TrackState.ACTIVE),
             curling_state=curling,
             prediction=prediction_state,
             trajectory=table_trajectory,

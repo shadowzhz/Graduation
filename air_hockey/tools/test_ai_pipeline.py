@@ -72,10 +72,7 @@ def reset_stone(stone):
 
 def simulate_stone_step(stone, dt):
     """推进仿真，穿过球门就重新发球。"""
-    stone.advance_velocity(dt)
-    stone.x += stone.vx * dt
-    stone.y += stone.vy * dt
-    stone.resolve_walls()
+    stone.step(dt)
 
     # StoneMotion 会允许球从球门口离场，真实游戏控制器随后会结算比分。
     # 离线脚本没有比分系统，因此在同一位置重新发球。

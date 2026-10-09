@@ -19,16 +19,21 @@ class StoneTracker:
     # max_distance      最大允许移动距离
     # max_missed_frames 最大允许漏检帧数
     # velocity_alpha    平滑系数
-    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2) -> None:
+    # min_confirmed_hits 最少硬检测命中次数
+    def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2,
+                 min_confirmed_hits=2) -> None:
         if max_distance <= 0.0:
             raise ValueError("最大允许移动距离必须有效")
         if max_missed_frames < 0:
             raise ValueError("最大允许漏检帧数必须是非负数")
         if not 0.0 < velocity_alpha <= 1.0:
             raise ValueError("平滑系数必须在 (0, 1]")
+        if int(min_confirmed_hits) < 1 or int(min_confirmed_hits) != min_confirmed_hits:
+            raise ValueError("目标确认命中次数必须是正整数")
         self.max_distance = float(max_distance)
         self.max_missed_frames = int(max_missed_frames)
         self.velocity_alpha = float(velocity_alpha)
+        self.min_confirmed_hits = int(min_confirmed_hits)
         self._track = None
         self._next_track_id = 1     # 准备分配下一个唯一的 ID,用于区分不同的目标，但是目前只考虑使用一个冰壶
 
@@ -92,6 +97,7 @@ class StoneTracker:
             vy=0.0,
             last_timestamp=detection.timestamp,
             confidence=_detection_confidence(detection),
+            state=(TrackState.ACTIVE if self.min_confirmed_hits == 1 else TrackState.TENTATIVE),
         )
         self._next_track_id += 1
         return track
@@ -112,11 +118,15 @@ class StoneTracker:
         track.confidence = _detection_confidence(detection)
         track.age += 1
         track.missed_frames = 0
-        track.state = TrackState.ACTIVE
+        track.hits += 1
+        track.state = (TrackState.ACTIVE if track.hits >= self.min_confirmed_hits
+                       else TrackState.TENTATIVE)
 
     def _handle_missing_detection(self):
         if self._track is None:
             return []
+        if self._track.state == TrackState.TENTATIVE:
+            self._track.hits = 0
         self._track.missed_frames += 1
         if self._track.missed_frames > self.max_missed_frames:
             self._track.state = TrackState.LOST

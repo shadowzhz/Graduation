@@ -62,6 +62,7 @@ COMM_Y_ERR_BIT = 0
 ECHO_TIMEOUT = 1.0
 PHYSICAL_X_MIN, PHYSICAL_X_MAX = -185.0, 195.0
 PHYSICAL_Y_MIN, PHYSICAL_Y_MAX = -120.0, 190.0
+COORD_EPSILON = 1e-6
 DEAD_ZONE_MM = 3.0
 # Measured on the machine: 50mm with BufferMode=5 stalled streaming motion.
 BUFFER_MODE_IMMEDIATE_MM = 10.0
@@ -92,12 +93,21 @@ def _finite_pair(x, y):
 
 
 def _game_to_physical(zone, x, y):
-    x, y = _finite_pair(x, y)
+    x, y = _validate_game_point(zone, x, y)
     left, right, top, bottom = zone
     px = PHYSICAL_X_MIN + (x - left) * (PHYSICAL_X_MAX - PHYSICAL_X_MIN) / (right - left)
     py = PHYSICAL_Y_MIN + (y - top) * (PHYSICAL_Y_MAX - PHYSICAL_Y_MIN) / (bottom - top)
     return (max(PHYSICAL_X_MIN, min(PHYSICAL_X_MAX, px)),
             max(PHYSICAL_Y_MIN, min(PHYSICAL_Y_MAX, py)))
+
+
+def _validate_game_point(zone, x, y):
+    x, y = _finite_pair(x, y)
+    left, right, top, bottom = zone
+    if (x < left - COORD_EPSILON or x > right + COORD_EPSILON
+            or y < top - COORD_EPSILON or y > bottom + COORD_EPSILON):
+        raise ValueError(f"PLC game coordinates ({x}, {y}) are outside zone {zone}")
+    return max(left, min(right, x)), max(top, min(bottom, y))
 
 
 def _physical_to_game(zone, x, y):
@@ -497,11 +507,16 @@ class PLCLink:
         return _physical_to_game(self.zone, x, y)
 
     def set_target(self, game_x, game_y):
-        x, y = _finite_pair(game_x, game_y)
+        try:
+            x, y = _validate_game_point(self.zone, game_x, game_y)
+        except (ValueError, OverflowError):
+            return False
         with self._lock:
-            if not self._stop_event.is_set():
-                self._target = x, y
-                self._target_at = time.monotonic()
+            if self._stop_event.is_set():
+                return False
+            self._target = x, y
+            self._target_at = time.monotonic()
+        return True
 
     def clear_target(self):
         with self._lock:

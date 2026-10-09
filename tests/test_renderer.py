@@ -2,7 +2,8 @@
 
 import numpy as np
 
-from air_hockey.app.renderer import format_status, render
+from air_hockey.app.rally import RallyDecision, RallyState
+from air_hockey.app.renderer import format_status, render, render_preview
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
 from air_hockey.vision.types import Detection, Track, TrackState
@@ -76,3 +77,54 @@ def test_format_status():
     status_empty = format_status(result_empty, correction_enabled=True)
     assert "未检测到冰壶" in status_empty
     assert "校正 ON" in status_empty
+
+
+def test_render_draws_requested_target_not_raw_ai_target():
+    for preview_width in (None, 300):
+        for rally_present, rally_target in ((False, None), (True, (150.0, 180.0)), (True, None)):
+            _assert_requested_target(preview_width, rally_present, rally_target)
+
+
+def _assert_requested_target(preview_width, rally_present, rally_target):
+    image = np.zeros((400, 600, 3), dtype=np.uint8)
+    result = VisionResult(
+        frame=Frame(image=image, timestamp=1.0, sequence=1),
+        ai_target=(350.0, 280.0),
+    )
+    if rally_present:
+        result.rally = RallyDecision(
+            state=RallyState.DEFENDING,
+            target=rally_target,
+            reason="incoming puck",
+            direction="incoming",
+            mallet_position=(300.0, 100.0),
+            mallet_source="software",
+            intercept=(150.0, 180.0),
+            time_to_intercept=0.5,
+            time_to_mallet=0.2,
+            reachable=True,
+        )
+    geometry = MockGeometry()
+    roi = (5, 50, 580, 340)
+    if preview_width is None:
+        output = render(result, roi, geometry)
+        scale = 1.0
+    else:
+        output = render_preview(result, roi, geometry, preview_width)
+        scale = preview_width / image.shape[1]
+
+    target = rally_target if rally_present else result.ai_target
+    if target is not None:
+        x = round((target[0] + geometry.offset_x) * scale)
+        y = round((target[1] + geometry.offset_y) * scale)
+        assert np.array_equal(output[y, x], [255, 0, 255])
+        assert geometry.calls == [target]
+    else:
+        assert geometry.calls == []
+        assert not np.any(np.all(output == [255, 0, 255], axis=2))
+
+    if rally_present:
+        old_x = round((result.ai_target[0] + geometry.offset_x) * scale)
+        old_y = round((result.ai_target[1] + geometry.offset_y) * scale)
+        assert np.array_equal(output[old_y, old_x], [0, 0, 0])
+    assert not np.any(image)

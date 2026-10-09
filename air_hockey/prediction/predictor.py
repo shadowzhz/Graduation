@@ -89,15 +89,12 @@ class TrajectoryPredictor:
 
         for _ in range(max_simulation_steps):
             duration += substep
-            motion.x += motion.vx * substep
-            motion.y += motion.vy * substep
+            bounced_this_step = motion.step(substep)
 
             if goal_scorer(motion):
                 trajectory.append((motion.x, motion.y))
                 break
 
-            bounced_this_step = motion.resolve_walls()
-            bounced_this_step = motion.resolve_goal_posts() or bounced_this_step
             if bounced_this_step:
                 if (motion.x, motion.y) != trajectory[-1]:
                     trajectory.append((motion.x, motion.y))
@@ -107,8 +104,6 @@ class TrajectoryPredictor:
                 if any((motion.x - ox) ** 2 + (motion.y - oy) ** 2 <= collision_distance_sq for ox, oy in obstacles):
                     trajectory.append((motion.x, motion.y))
                     break
-
-            motion.advance_velocity(substep)
 
             speed = math.hypot(motion.vx, motion.vy)
             if speed <= stop_speed and not motion.response_active:

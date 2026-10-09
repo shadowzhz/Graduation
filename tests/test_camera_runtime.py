@@ -325,6 +325,7 @@ def test_opencv_backend_uses_actual_directshow_frame_mode():
     }
     assert ok and frame is image
     assert (backend.info.width, backend.info.height, backend.info.negotiated_fps) == (640, 480, 30.0)
+    assert backend.info.requested_fps == 200.0
     assert backend.info.backend == "OpenCV/DirectShow"
     assert (backend.info.source_format, backend.info.output_format) == ("MJPG", "BGR")
     assert capture.released

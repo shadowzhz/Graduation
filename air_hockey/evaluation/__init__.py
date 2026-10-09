@@ -13,6 +13,7 @@ from .metrics import (
     endpoint_error,
     evaluate_result,
     position_errors,
+    velocity_errors,
 )
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "endpoint_error",
     "evaluate_result",
     "position_errors",
+    "velocity_errors",
     "run_experiment",
 ]

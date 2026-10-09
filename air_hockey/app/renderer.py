@@ -79,8 +79,9 @@ def _draw_annotations(
             size(2),
         )
 
-    if result.ai_target is not None:
-        tx, ty = camera_geometry.table_to_raw(result.ai_target[0], result.ai_target[1])
+    target = result.rally.target if result.rally is not None else result.ai_target
+    if target is not None:
+        tx, ty = camera_geometry.table_to_raw(target[0], target[1])
         cv2.drawMarker(
             output,
             point(tx, ty),
@@ -92,12 +93,35 @@ def _draw_annotations(
 
     cv2.putText(output, f"FPS {result.fps:.1f}", point(14, 30), cv2.FONT_HERSHEY_SIMPLEX,
                 0.7 * scale, (255, 255, 255), size(2))
+    if result.rally is not None:
+        cv2.putText(output, result.rally.state.name, point(150, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5 * scale, (255, 255, 255), size(1))
     return output
 
 
 def format_status(result: VisionResult, correction_enabled: bool = False) -> str:
     """生成 GUI 状态栏显示的简要文本。"""
     corr_status = "ON" if correction_enabled else "OFF"
+    if result.rally is not None:
+        rally = result.rally
+        velocity = (
+            f"({result.stone_state.vx:.0f}, {result.stone_state.vy:.0f})"
+            if result.stone_state is not None else "none"
+        )
+        intercept = (
+            f"({rally.intercept[0]:.0f}, {rally.intercept[1]:.0f})"
+            if rally.intercept is not None else "none"
+        )
+        arrival = f">={rally.time_to_intercept:.2f}s" if rally.time_to_intercept is not None else "none"
+        travel = f"{rally.time_to_mallet:.2f}s" if rally.time_to_mallet is not None else "none"
+        target = f"({rally.target[0]:.0f}, {rally.target[1]:.0f})" if rally.target is not None else "none"
+        return (
+            f"FPS {result.fps:.1f} | 校正 {corr_status} | {rally.state.name}: {rally.reason} "
+            f"| confirmed={result.track_confirmed} | {rally.direction} | 速度 {velocity} "
+            f"| intercept {intercept} / {arrival}; travel {travel}; reachable={rally.reachable} "
+            f"| mallet ({rally.mallet_position[0]:.0f}, {rally.mallet_position[1]:.0f}) {rally.mallet_source} "
+            f"| target {target}"
+        )
     if result.track is not None and result.stone_state is not None:
         target_str = (
             f"({result.ai_target[0]:.0f}, {result.ai_target[1]:.0f})"

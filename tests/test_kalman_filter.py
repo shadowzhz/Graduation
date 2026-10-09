@@ -16,6 +16,8 @@ import numpy as np
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.estimation import KalmanFilter
+from air_hockey.physics import apply_friction_velocity
+from air_hockey import core_config as core
 from air_hockey.vision.types import Detection
 from game_state import CurlingState
 
@@ -168,6 +170,83 @@ def test_state_continues_through_detection_gaps():
         assert state.x > previous.x
         assert math.isfinite(state.x)
         previous = state
+
+
+def test_constant_velocity_model_preserves_existing_behavior():
+    measurements = ((10.0, 20.0, 0.0), (14.0, 18.0, 0.1), (20.0, 15.0, 0.2), (25.0, 13.0, 0.3))
+    expected_state = np.array([24.91850884329016, 12.901566289265961, 51.433944449265084, -23.90969203873432])
+    expected_covariance = np.array(
+        [
+            [11.546262749153277, 0.0, 57.83296594874285, 0.0],
+            [0.0, 11.546262749153277, 0.0, 57.83296594874285],
+            [57.832965948742924, 0.0, 694.5145055154888, 0.0],
+            [0.0, 57.832965948742924, 0.0, 694.5145055154888],
+        ]
+    )
+    default = KalmanFilter()
+    explicit = KalmanFilter(motion_model="constant_velocity")
+    for measurement in measurements:
+        default.update(*measurement)
+        explicit.update(*measurement)
+
+    np.testing.assert_allclose(default.state_vector, expected_state, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(default._P, expected_covariance, rtol=0.0, atol=1e-10)
+    np.testing.assert_array_equal(default.state_vector, explicit.state_vector)
+    np.testing.assert_array_equal(default._P, explicit._P)
+
+
+def _friction_filter(vx, vy):
+    kalman = KalmanFilter(motion_model="friction")
+    kalman.update(10.0, 20.0, 0.0)
+    kalman._x[2:] = (vx, vy)
+    kalman._friction_started = True
+    return kalman
+
+
+def test_friction_jacobian_matches_finite_difference():
+    vx, vy, dt, epsilon = 120.0, -80.0, 1.0 / 60.0, 1e-4
+
+    def velocity(x, y):
+        return np.array(apply_friction_velocity(x, y, dt))
+
+    finite_difference = np.column_stack(
+        (
+            (velocity(vx + epsilon, vy) - velocity(vx - epsilon, vy)) / (2.0 * epsilon),
+            (velocity(vx, vy + epsilon) - velocity(vx, vy - epsilon)) / (2.0 * epsilon),
+        )
+    )
+    analytic = KalmanFilter._friction_velocity_jacobian(vx, vy, dt)
+    np.testing.assert_allclose(analytic, finite_difference, rtol=1e-4, atol=1e-5)
+
+
+def test_friction_model_bootstraps_unknown_initial_velocity():
+    kalman = KalmanFilter(motion_model="friction")
+    kalman.update(0.0, 0.0, 0.0)
+    state = kalman.update(20.0, 0.0, 0.1)
+    assert state.vx > 0.0
+
+
+def test_friction_prediction_reduces_velocity_magnitude():
+    dt = 1.0 / 60.0
+    state = _friction_filter(100.0, 0.0).predict(dt)
+    assert state.x == 10.0 + 100.0 * dt
+    assert 0.0 < abs(state.vx) < 100.0
+    assert abs(state.vy) < 1e-12
+
+
+def test_friction_prediction_preserves_direction():
+    vx, vy = 100.0, -50.0
+    state = _friction_filter(vx, vy).predict(1.0 / 60.0)
+    assert state.vx > 0.0 and state.vy < 0.0
+    assert math.isclose(state.vx / vx, state.vy / vy, rel_tol=1e-12)
+
+
+def test_friction_prediction_stops_without_velocity_sign_flip():
+    dt = 0.01
+    speed = core.STONE_FRICTION_DECELERATION * dt * 0.5
+    state = _friction_filter(speed, -speed).predict(dt)
+    assert state.vx == 0.0 and state.vy == 0.0
+    np.testing.assert_array_equal(KalmanFilter._friction_velocity_jacobian(speed, -speed, dt), np.zeros((2, 2)))
 
 
 class _MovingDetector:

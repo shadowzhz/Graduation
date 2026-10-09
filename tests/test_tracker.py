@@ -10,10 +10,14 @@ def make_detection(x, y, t, radius=25.0):
 
 
 def test_new_detection_creates_track():
-    tracks = StoneTracker().update(make_detection(100, 200, 0.0))
+    tracker = StoneTracker()
+    tracks = tracker.update(make_detection(100, 200, 0.0))
     assert len(tracks) == 1
     assert tracks[0].track_id == 1
-    assert tracks[0].state.value == "active"
+    assert tracks[0].state.value == "tentative"
+    track = tracker.update(make_detection(100, 200, 0.033))[0]
+    assert track.track_id == 1
+    assert track.state.value == "active"
 
 
 def test_near_detection_keeps_same_id():
@@ -27,8 +31,49 @@ def test_near_detection_keeps_same_id():
 def test_far_detection_gets_new_id():
     tracker = StoneTracker()
     tracker.update(make_detection(100, 200, 0.0))
-    track = tracker.update(make_detection(500, 500, 0.033))[0]
+    tracker.update(make_detection(100, 200, 0.033))
+    track = tracker.update(make_detection(500, 500, 0.066))[0]
     assert track.track_id == 2
+    assert track.state.value == "tentative"
+
+
+def test_track_requires_two_real_detections_to_confirm():
+    tracker = StoneTracker()
+    first = tracker.update(make_detection(100, 200, 0.0))[0]
+    assert first.state.value == "tentative" and first.hits == 1
+
+    for timestamp in (0.033, 0.066):
+        predicted = tracker.predict(timestamp)[0]
+        assert predicted.state.value == "tentative" and predicted.hits == 1
+    assert tracker.track.state.value == "tentative" and tracker.track.hits == 1
+
+    confirmed = tracker.update(make_detection(100, 200, 0.099))[0]
+    assert confirmed.track_id == 1
+    assert confirmed.state.value == "active" and confirmed.hits == 2
+
+
+def test_far_detection_creates_new_tentative_identity():
+    tracker = StoneTracker()
+    tracker.update(make_detection(100, 200, 0.0))
+    tracker.update(make_detection(100, 200, 0.033))
+
+    candidate = tracker.update(make_detection(500, 500, 0.066))[0]
+    assert candidate.track_id == 2
+    assert candidate.state.value == "tentative"
+    assert tracker.update(make_detection(500, 500, 0.099))[0].state.value == "active"
+
+
+def test_lost_identity_requires_confirmation_after_recreation():
+    tracker = StoneTracker(max_missed_frames=1)
+    tracker.update(make_detection(100, 200, 0.0))
+    tracker.update(make_detection(100, 200, 0.033))
+    tracker.update(None)
+    assert tracker.update(None) == []
+
+    candidate = tracker.update(make_detection(100, 200, 0.2))[0]
+    assert candidate.track_id == 2
+    assert candidate.state.value == "tentative"
+    assert tracker.update(make_detection(100, 200, 0.233))[0].state.value == "active"
 
 
 def test_missed_frames_go_lost_then_drop():
@@ -70,5 +115,7 @@ def test_scheduled_predictions_preserve_state_and_missing_detection_budget():
             assert tracker.update(None) == []
         assert tracker.predict(1.4) == []
         recovered = tracker.update(make_detection(110, 200, 1.5))[0]
-        assert recovered.state.value == "active"
+        assert recovered.track_id == 2
+        assert recovered.state.value == "tentative"
         assert recovered.missed_frames == 0
+        assert tracker.update(make_detection(110, 200, 1.6))[0].state.value == "active"

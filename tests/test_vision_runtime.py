@@ -5,6 +5,7 @@ frame -> detection -> track -> table StoneState -> predictor -> AI
 """
 
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -131,7 +132,8 @@ def test_vision_runtime_dataflow_track_to_ai():
     assert res1.detection.center_x == 500.0
     assert res1.track is not None
     assert res1.track.center_x == 500.0
-    assert res1.track.state == TrackState.ACTIVE
+    assert res1.track.state == TrackState.TENTATIVE
+    assert not res1.track_confirmed
 
     # 验证经过坐标变换生成的 StoneState
     assert isinstance(res1.stone_state, StoneState)
@@ -162,6 +164,8 @@ def test_vision_runtime_dataflow_track_to_ai():
 
     assert res3.detection is not None
     assert res3.track is not None
+    assert res3.track.state == TrackState.ACTIVE
+    assert res3.track_confirmed
     assert res3.track.vx > 0
     assert res3.stone_state is not None
     assert res3.stone_state.vx > 0
@@ -205,15 +209,105 @@ def _assert_vision_runtime_threat_predicts_once(stone_y):
         serve_phase="idle",
         stalled_stone_phase="idle",
         reaction_timer=0.0,
-        difficulty=core.DIFFICULTIES["普通"],
+        difficulty=replace(core.DIFFICULTIES["普通"], aim_error=0.0),
     )
     baseline = baseline_ai.update(baseline_state, 0.001)
     assert result.ai_target == (baseline.target_x, baseline.target_y)
     assert result.ai_decision.stalled_stone_phase == baseline.stalled_stone_phase
 
 
+def test_realtime_ai_target_stays_fixed_for_a_stationary_puck():
+    timestamps = [1.0 + 0.1 * index for index in range(5)]
+    detection = lambda timestamp: Detection(
+        center_x=640.0, center_y=360.0, radius=30.0, area=2800.0, timestamp=timestamp
+    )
+    runtime = VisionRuntime(
+        table_calibration_file=None,
+        disable_undistort=True,
+        detection_interval=1,
+        detector=MockDetector([detection(timestamp) for timestamp in timestamps]),
+    )
+    runtime.ai._random.seed(120)
+    results = [
+        runtime.process_frame(
+            Frame(np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=timestamp, sequence=index + 1)
+        )
+        for index, timestamp in enumerate(timestamps)
+    ]
+
+    targets = [result.ai_target for result in results]
+    assert all(target is not None for target in targets)
+    assert all(target == targets[0] for target in targets)
+
+
 def test_vision_runtime_threat_behind_ai_predicts_once():
     _assert_vision_runtime_threat_predicts_once(AI_HOME_Y - 50.0)
+
+
+def test_vision_runtime_does_not_confirm_single_detection():
+    runtime = VisionRuntime(
+        table_calibration_file=None, disable_undistort=True,
+        detector=MockDetector([
+            Detection(center_x=500.0, center_y=300.0, radius=25.0,
+                      area=1960.0, timestamp=1.0),
+        ]),
+    )
+    result = runtime.process_frame(Frame(np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=1.0))
+
+    assert result.track is not None
+    assert result.track.state == TrackState.TENTATIVE
+    assert not result.track_confirmed
+
+
+def test_vision_runtime_confirms_after_second_hard_detection():
+    runtime = VisionRuntime(
+        table_calibration_file=None, disable_undistort=True, detection_interval=3,
+        detector=MockDetector([
+            Detection(center_x=500.0, center_y=300.0, radius=25.0,
+                      area=1960.0, timestamp=1.0),
+            Detection(center_x=501.0, center_y=300.0, radius=25.0,
+                      area=1960.0, timestamp=1.066),
+        ]),
+    )
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    results = []
+    states = []
+    for index in range(3):
+        result = runtime.process_frame(Frame(image, timestamp=1.0 + index * 0.033))
+        results.append(result)
+        states.append(result.track.state)
+
+    assert states == [TrackState.TENTATIVE, TrackState.TENTATIVE, TrackState.ACTIVE]
+    assert results[1].detection is None
+    assert results[2].detection is not None
+    assert [result.track_confirmed for result in results] == [False, False, True]
+
+
+def test_new_far_identity_revokes_confirmation():
+    detections = [
+        Detection(center_x=x, center_y=300.0, radius=25.0, area=1960.0,
+                  timestamp=1.0 + index * 0.033)
+        for index, x in enumerate((500.0, 501.0, 900.0, 901.0))
+    ]
+    runtime = VisionRuntime(
+        table_calibration_file=None, disable_undistort=True, detection_interval=1,
+        detector=MockDetector(detections),
+    )
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    results = []
+    identities = []
+    states = []
+    for index in range(len(detections)):
+        result = runtime.process_frame(Frame(image, timestamp=1.0 + index * 0.033))
+        results.append(result)
+        identities.append(result.track.track_id)
+        states.append(result.track.state)
+
+    assert identities == [1, 1, 2, 2]
+    assert states == [
+        TrackState.TENTATIVE, TrackState.ACTIVE, TrackState.TENTATIVE, TrackState.ACTIVE,
+    ]
+    assert [result.track_confirmed for result in results] == [False, True, False, True]
 
 
 def test_vision_runtime_threat_outside_attack_zone_predicts_once():
@@ -272,23 +366,23 @@ def test_vision_runtime_ai_uses_fresh_axis_feedback_not_software_position():
 def test_plc_track_confirmation_stops_on_missed_detection_and_recovers():
     detector = MockDetector([
         Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0),
+        Detection(center_x=501.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.03),
         None,
         Detection(center_x=501.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.15),
     ])
     runtime = VisionRuntime(
         calibration_file=str(CALIB_FILE), table_calibration_file=None,
-        disable_undistort=True, detector=detector,
+        disable_undistort=True, detection_interval=1, detector=detector,
     )
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     results = [runtime.process_frame(Frame(image=image, timestamp=1 + (i - 1) * 0.03, sequence=i))
-               for i in range(1, 7)]
-    assert results[0].track_confirmed
-    assert results[1].track_confirmed  # 正常抽帧预测不等于漏检
+               for i in range(1, 5)]
+    assert not results[0].track_confirmed
+    assert results[1].track_confirmed
     assert results[2].ai_decision is not None and not results[2].track_confirmed
-    assert not results[3].track_confirmed and not results[4].track_confirmed
-    assert results[5].track_confirmed
+    assert results[3].track_confirmed
     assert [result.curling_state.tracking_state.value for result in results] == [
-        "active", "active", "lost", "lost", "lost", "active",
+        "active", "active", "lost", "active",
     ]
 
 
