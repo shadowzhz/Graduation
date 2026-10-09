@@ -72,6 +72,41 @@ def test_stone_tracker_predict_position_public():
     assert pred_y > 210.0
 
 
+def test_default_detector_finds_red_puck_on_both_hue_ends():
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+
+    for hue, saturation, value, expected in (
+        (5, 157, 186, True), (178, 180, 135, True), (90, 180, 135, False),
+    ):
+        image = np.full((720, 1280, 3), 255, dtype=np.uint8)
+        red = cv2.cvtColor(
+            np.array([[[hue, saturation, value]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+        )[0, 0]
+        cv2.circle(image, (715, 200), 35, tuple(int(channel) for channel in red), -1)
+        detection = runtime.detector.detect(Frame(image))
+
+        assert (detection is not None) is expected
+        if expected:
+            assert abs(detection.center_x - 715) < 1.0
+            assert abs(detection.center_y - 200) < 1.0
+            assert detection.radius >= 25
+
+    image = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    red = cv2.cvtColor(np.array([[[1, 167, 166]]], dtype=np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
+    color = tuple(int(channel) for channel in red)
+    line_only = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    cv2.line(line_only, (540, 0), (540, 650), color, 7)
+    assert runtime.detector.detect(Frame(line_only)) is None
+
+    cv2.line(image, (540, 140), (540, 190), color, 7)
+    cv2.circle(image, (580, 190), 39, color, -1)
+    detection = runtime.detector.detect(Frame(image))
+
+    assert detection is not None
+    assert abs(detection.center_x - 580) < 15
+    assert abs(detection.center_y - 190) < 15
+
+
 def test_vision_runtime_dataflow_track_to_ai():
     """验证 track -> table StoneState -> predictor -> AI 的完整调用链。"""
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -252,6 +287,9 @@ def test_plc_track_confirmation_stops_on_missed_detection_and_recovers():
     assert results[2].ai_decision is not None and not results[2].track_confirmed
     assert not results[3].track_confirmed and not results[4].track_confirmed
     assert results[5].track_confirmed
+    assert [result.curling_state.tracking_state.value for result in results] == [
+        "active", "active", "lost", "lost", "lost", "active",
+    ]
 
 
 def test_vision_runtime_without_detection():

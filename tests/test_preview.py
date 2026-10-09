@@ -54,3 +54,16 @@ def test_encode_preview_ppm_preserves_non_default_aspect_ratio():
     rgb = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
     assert (width, height) == (640, 320)
     assert tuple(rgb[160, 320]) == (0, 255, 0)
+
+
+def test_encode_preview_brightness_gain_does_not_change_camera_frame():
+    result = make_result(30.0)
+    result.frame.image[:] = (100, 80, 60)
+
+    width, height, _, pixels = split_ppm(
+        encode_preview_ppm(result, TABLE_ROI, MockGeometry(), brightness_gain=0.5)
+    )
+    rgb = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
+
+    assert tuple(rgb[330, 500]) == (30, 40, 50)
+    assert np.all(result.frame.image == (100, 80, 60))
