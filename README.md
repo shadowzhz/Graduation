@@ -126,7 +126,7 @@ python3 main.py --sim --plc 192.168.0.64          # 仿真游戏/实机轴反馈
 
 **现场安全边界**：视觉计划性抽帧仍可预测目标；一次实际检测漏检后立即停止刷新 PLC 目标，重新检测到冰壶才恢复。所有上位机控制位改用原生同步 S7 BIT 写入，不再读改写整个共享字节，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`，成功后单独置 `DB1.56.0`；DB 地址不变。连接必须先成功初始化心跳位并清除直线触发位，才允许后续授权。单个位原子写入不等于整组命令原子完成，部分失败不能撤回 PLC 已接受的位；仍须现场验证 PLC 扫描、触发脉宽和独立失联停止。软件暂停只清除后续目标，不能撤销已经进入网络发送过程的运动指令，**不得作为急停使用**。
 
-PLC 模式固定使用与 Python 3.8 兼容的 `python-snap7==1.3` 及 `libsnap7.so`，其他绑定版本明确拒绝连接；离线测试不需要 Snap7。该绑定导入时还需要 `pkg_resources`，由系统 `python3-setuptools` 或兼容的 setuptools 提供。pip 环境安装：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。依赖缺失会报告实际导入错误并拒绝连接。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不是 Python `db_write()` 的整字节写入。
+PLC 模式固定使用与 Python 3.8 兼容的 `python-snap7==1.3` 及平台对应的 Snap7 原生库，其他绑定版本明确拒绝连接；离线测试不需要 Snap7。该绑定导入时还需要 `pkg_resources`，由系统 `python3-setuptools` 或兼容的 setuptools 提供。pip 环境安装：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。依赖缺失会报告实际导入错误并拒绝连接。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不是 Python `db_write()` 的整字节写入。
 
 常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
 
@@ -157,7 +157,9 @@ python3 tests/run_tests.py                          # 全量自动化测试
 
 `plc_request` 记录本帧经 AI 半场限幅的目标（场地逻辑坐标），并非 PLC 接收或电机到位确认；`version=3` 不兼容旧的冰壶状态/比分载荷记录解析。
 
-Linux 上，设置路径后逐帧写入 `<path>.journal` 并执行 `fsync`，内存不随帧数增长；正常关闭时流式生成上述版本 3 JSON，再删除日志。导出失败保留日志且允许重试关闭。输出 JSON 与日志会短暂共存，磁盘须留出导出空间；完整预测也会增加每帧日志大小。只有显式调用 `to_dict()` / `to_json()` 才把全部帧读入内存，未设置路径的有限长度离线记录仍使用内存。
+Linux 和 Windows 上，设置路径后逐帧写入 `<path>.journal` 并执行 `fsync`，内存不随帧数增长；正常关闭时流式生成上述版本 3 JSON，再删除日志。导出失败保留日志且允许重试关闭。输出 JSON 与日志会短暂共存，磁盘须留出导出空间；完整预测也会增加每帧日志大小。只有显式调用 `to_dict()` / `to_json()` 才把全部帧读入内存，未设置路径的有限长度离线记录仍使用内存。
+
+文件锁使用系统标准库：Linux 用 `fcntl.flock`，Windows 用 [msvcrt.locking](https://docs.python.org/3/library/msvcrt.html#msvcrt.locking)，不需要安装 `fcntl`。Windows 快照复用持锁句柄，恢复后先关闭文件再删除日志。Linux 另同步目录；Windows 标准库不能 `fsync` 目录，不承诺突然断电后的目录项持久性。本次 Windows 分支只做模型模拟，未在 Windows 实机验证。Windows 仿真不需要相机，Jetson 实时采集仍依赖 Linux/NVIDIA GStreamer 环境。
 
 异常退出后，先确认旧进程已退出，再恢复；仅丢弃最后一个未完成行，完整行损坏会报错并保留日志。正在运行的日志由文件锁保护，同路径的新记录器也拒绝覆盖未恢复日志：
 

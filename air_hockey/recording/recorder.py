@@ -7,11 +7,16 @@ RuntimeRecorder 从实时 VisionResult 中抽取 CurlingState / PredictionState 
 
 from __future__ import annotations
 
-import fcntl
+import errno
 import json
 import os
 from pathlib import Path
 from typing import Any, Optional
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from game_state import CurlingState
 
@@ -19,7 +24,23 @@ from ..simulation import SimulationResult
 from .schema import RECORDING_FORMAT, RECORDING_VERSION, build_document, build_frame
 
 
+def _lock_journal(journal) -> None:
+    journal.seek(0)
+    if os.name == "nt":
+        try:
+            msvcrt.locking(journal.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno == errno.EACCES:
+                raise BlockingIOError(exc.errno, "recording journal is already in use") from exc
+            raise
+    else:
+        fcntl.flock(journal, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def _sync_directory(directory: Path) -> None:
+    if os.name == "nt":
+        # ponytail: Windows 标准库不能 fsync 目录；若需断电持久化保证，须另验原生实现。
+        return
     descriptor = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
@@ -74,9 +95,9 @@ class RuntimeRecorder:
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             journal_path = self.path.with_name(self.path.name + ".journal")
-            self._journal = journal_path.open("x", encoding="utf-8")
+            self._journal = journal_path.open("x+", encoding="utf-8")
             try:
-                fcntl.flock(self._journal, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _lock_journal(self._journal)
                 header = build_document(self.source, [], self.meta)
                 del header["frames"]
                 self._journal.write(json.dumps(header, ensure_ascii=False) + "\n")
@@ -147,10 +168,14 @@ class RuntimeRecorder:
         if self.path is not None:
             if self._closed:
                 return json.loads(self.path.read_text(encoding="utf-8"))
-            with Path(self._journal.name).open(encoding="utf-8") as journal:
-                document = json.loads(journal.readline())
-                document["frames"] = [json.loads(line) for line in journal if line.endswith("\n")]
+            # Windows 字节锁禁止其他句柄读锁区，快照必须复用持锁句柄。
+            self._journal.seek(0)
+            try:
+                document = json.loads(self._journal.readline())
+                document["frames"] = [json.loads(line) for line in self._journal if line.endswith("\n")]
                 return document
+            finally:
+                self._journal.seek(0, os.SEEK_END)
         return build_document(self.source, self._frames, self.meta)
 
     def to_json(self, indent: int = 2) -> str:
@@ -163,8 +188,11 @@ class RuntimeRecorder:
         if not self._closed:
             self._journal.flush()
             os.fsync(self._journal.fileno())
-            with Path(self._journal.name).open(encoding="utf-8") as journal:
-                self._frame_count = _write_document(journal, self.path, indent)
+            self._journal.seek(0)
+            try:
+                self._frame_count = _write_document(self._journal, self.path, indent)
+            finally:
+                self._journal.seek(0, os.SEEK_END)
         return self.path
 
     def close(self) -> Optional[Path]:
@@ -186,8 +214,10 @@ class RuntimeRecorder:
         path = Path(path)
         journal_path = path.with_name(path.name + ".journal")
         with journal_path.open(encoding="utf-8") as journal:
-            fcntl.flock(journal, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_journal(journal)
             _write_document(journal, path, 2)
+            if os.name == "nt":
+                journal.close()
             journal_path.unlink()
             _sync_directory(path.parent)
         return path

@@ -331,6 +331,32 @@ def test_active_recording_cannot_be_recovered_or_overwritten():
         assert [frame["timestamp"] for frame in recorder.to_dict()["frames"]] == [1.0, 2.0]
 
 
+def test_live_and_failed_snapshots_preserve_recorded_frames():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "快照.json"
+        with RuntimeRecorder(path, meta={"name": "实验记录"}) as recorder:
+            recorder.record_frame(1.0, 60.0, CurlingState(x=100.0, y=200.0))
+            assert recorder.to_dict()["meta"] == {"name": "实验记录"}
+            recorder.flush()
+            recorder.record_frame(2.0, 60.0, CurlingState(x=200.0, y=200.0))
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.mkdir()
+            try:
+                try:
+                    recorder.flush()
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("snapshot export must fail over a directory")
+            finally:
+                temporary.rmdir()
+            recorder.record_frame(3.0, 60.0, CurlingState(x=300.0, y=200.0))
+            assert [(frame["index"], frame["timestamp"], frame["curling_state"]["x"])
+                    for frame in recorder.to_dict()["frames"]] == [
+                        (0, 1.0, 100.0), (1, 2.0, 200.0), (2, 3.0, 300.0)]
+        assert json.loads(path.read_text(encoding="utf-8"))["frames"][-1]["timestamp"] == 3.0
+
+
 def test_failed_close_preserves_journal_and_can_be_retried():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "blocked.json"
