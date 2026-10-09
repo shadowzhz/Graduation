@@ -16,15 +16,6 @@ from air_hockey.camera.types import Frame
 from air_hockey.vision import ROI, StoneDetector
 
 
-def _int_triplet(values):
-    if len(values) != 3:
-        raise argparse.ArgumentTypeError("expected three integer values")
-    try:
-        return tuple(int(value) for value in values)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("threshold values must be integers") from exc
-
-
 def build_parser():
     parser = argparse.ArgumentParser(description="Run StoneDetector on one image")
     parser.add_argument("image", type=Path, help="input BGR image")

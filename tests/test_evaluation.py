@@ -107,7 +107,9 @@ def test_evaluate_result_does_not_mutate_input():
 
 
 def test_experiment_config_validation():
-    for kwargs in ({"runs": 0}, {"runs": -1}, {"steps": 0}, {"dt": 0.0}, {"position_noise": -1.0}):
+    invalid = [{"runs": 0}, {"runs": -1}, {"steps": 0}, {"dt": 0.0}, {"position_noise": -1.0}]
+    invalid.extend({name: value} for name in ("dt", "position_noise") for value in (math.nan, math.inf, -math.inf))
+    for kwargs in invalid:
         try:
             ExperimentConfig(**kwargs)
             assert False, f"{kwargs} 应该抛 ValueError"

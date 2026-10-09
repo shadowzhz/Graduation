@@ -117,6 +117,7 @@ class VisionRuntime:
             self.camera_geometry = self.vision_pipeline.geometry
 
         self.last_timestamp = None
+        self._kalman_track_id = None
         self.frame_index = 0
         self.display_fps = 0.0
         self.detect_ms = 0.0
@@ -196,6 +197,9 @@ class VisionRuntime:
         decision = None
 
         if track is not None:
+            if self._kalman_track_id is not None and self._kalman_track_id != track.track_id:
+                self.kalman.reset()
+            self._kalman_track_id = track.track_id
             # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
             undist_x, undist_y = self.camera_geometry.raw_to_undistorted(track.center_x, track.center_y)
             table_x, table_y = self.camera_geometry.undistorted_to_table(undist_x, undist_y)
@@ -212,7 +216,7 @@ class VisionRuntime:
                 )
             else:
                 estimated = self.kalman.predict(
-                    track.last_timestamp,
+                    processed_frame.timestamp,
                     confidence=track.confidence,
                     radius=track.radius,
                 )
@@ -273,6 +277,7 @@ class VisionRuntime:
         else:
             # 轨迹丢失时清空估计器，避免下一个冰壶被旧状态污染
             self.kalman.reset()
+            self._kalman_track_id = None
 
         self.frame_ms = self.frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
 

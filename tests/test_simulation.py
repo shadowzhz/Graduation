@@ -27,7 +27,9 @@ def test_config_generates_initial_conditions_and_validates():
     assert (config.initial_vx, config.initial_vy) == (30.0, -40.0)
     assert config.dt > 0.0
 
-    for kwargs in ({"dt": 0.0}, {"dt": -1.0}, {"steps": 0}, {"position_noise": -1.0}):
+    invalid = [{"dt": 0.0}, {"dt": -1.0}, {"steps": 0}, {"position_noise": -1.0}]
+    invalid.extend({name: value} for name in ("dt", "position_noise") for value in (math.nan, math.inf, -math.inf))
+    for kwargs in invalid:
         base = dict(initial_x=0.0, initial_y=0.0, initial_vx=1.0, initial_vy=1.0)
         base.update(kwargs)
         try:
@@ -51,6 +53,28 @@ def test_zero_noise_observation_matches_true():
     simulator = MotionSimulator.default(position_noise=0.0)
     result = simulator.simulate()
     assert result.observed_trajectory == result.true_trajectory
+
+
+def test_scored_true_trajectory_holds_position_and_timestamps():
+    config = SimulationConfig(300.0, 80.0, 0.0, -150.0, dt=1 / 60, steps=120, position_noise=0.0)
+    result = MotionSimulator(config).simulate()
+    trajectory = result.true_trajectory
+    scored_index = next(index for index, (_, y) in enumerate(trajectory) if y + core.STONE_RADIUS < core.RINK_TOP)
+    assert scored_index < config.steps
+    assert all(point == trajectory[scored_index] for point in trajectory[scored_index:])
+    assert len(trajectory) == config.steps + 1
+    assert result.timestamps == [index * config.dt for index in range(config.steps + 1)]
+
+
+def test_true_trajectory_deflects_grazing_hits_and_rebounds_head_on():
+    trajectory = MotionSimulator(SimulationConfig(223.0, 80.0, 0.0, -150.0, steps=120)).true_trajectory()
+    assert len(trajectory) == 121
+    assert max(x for x, _ in trajectory) > 240.0
+    head_on = MotionSimulator(SimulationConfig(core.GOAL_LEFT, 80.0, 0.0, -150.0, steps=120)).true_trajectory()
+    contact_y = core.RINK_TOP + core.STONE_RADIUS + core.GOAL_POST_RADIUS
+    assert abs(min(y for _, y in head_on) - contact_y) < 1e-9
+    assert head_on[-1][1] > 80.0
+    assert all(y + core.STONE_RADIUS >= core.RINK_TOP for _, y in head_on)
 
 
 def test_observation_adds_position_noise():

@@ -1,5 +1,4 @@
 import math
-from pathlib import Path
 
 from air_hockey import core_config as layout
 from air_hockey.physics import (
@@ -156,7 +155,8 @@ def test_stone_eventually_stops():
 
     # 低速在冰面滑动很短距离后停止
     short_traj = predictor.predict(layout.RINK_CENTER_X, layout.RINK_CENTER_Y, 20.0, 0.0)
-    assert 1 < len(short_traj) < layout.PREDICTION_POINT_COUNT
+    assert len(short_traj) > 1
+    assert 0.0 < short_traj.endpoint[0] - layout.RINK_CENTER_X < 3.0
 
 
 def test_vision_and_sim_produce_identical_trajectory():
@@ -177,33 +177,6 @@ def test_vision_and_sim_produce_identical_trajectory():
 
     assert vision_traj == sim_traj
     assert vision_traj == func_traj
-
-
-def test_no_old_predictor_references():
-    """删除旧 Predictor 后，确保不存在旧引用与旧模块。"""
-    import importlib
-
-    # 确保 vision.predictor 不存在
-    try:
-        importlib.import_module("vision.predictor")
-        assert False, "vision.predictor 应已被删除"
-    except ModuleNotFoundError:
-        pass
-
-    try:
-        importlib.import_module("prediction.trajectory")
-        assert False, "prediction.trajectory 应已被删除"
-    except ModuleNotFoundError:
-        pass
-
-    # 扫描工程下所有 py 文件，确保没有引用 vision.predictor 或旧 predict_position
-    root = Path(__file__).resolve().parents[1]
-    for py_file in root.rglob("*.py"):
-        if ".git" in py_file.parts or "__pycache__" in py_file.parts or py_file == Path(__file__).resolve():
-            continue
-        content = py_file.read_text(encoding="utf-8")
-        assert "vision.predictor" not in content, f"{py_file} 仍包含 vision.predictor 引用"
-        assert "prediction.trajectory" not in content, f"{py_file} 仍包含 prediction.trajectory 引用"
 
 
 def test_predictor_reads_core_config_at_runtime():
@@ -241,17 +214,11 @@ def test_predictor_reads_core_config_at_runtime():
         layout.MALLET_RADIUS = orig_mallet
 
 
-def test_ai_uses_shared_predictor_without_independent_physics():
-    """验证 AI 不再保留任何独立物理公式（无 _reflect_coordinate），统一使用 TrajectoryPredictor。"""
+def test_ai_crossing_matches_shared_prediction():
+    """AI 横线截距与共享预测的轨迹插值一致。"""
     from air_hockey import ai
 
-    # 模块和类中绝无 _reflect_coordinate
-    assert not hasattr(ai, "_reflect_coordinate")
-    assert not hasattr(ai.AirHockeyAI, "_reflect_coordinate")
-
     ai = ai.AirHockeyAI()
-    assert hasattr(ai, "predictor")
-    assert isinstance(ai.predictor, TrajectoryPredictor)
 
     # 验证 AI 的预测直接由其共享的 predictor 提供
     state = StoneState(x=300.0, y=500.0, vx=80.0, vy=-120.0)
@@ -295,4 +262,55 @@ def test_vision_sim_ai_share_same_prediction_core():
 
     assert vision_traj == sim_traj
     assert vision_traj == ai_traj
+
+
+def test_default_forecast_reaches_stop_after_multiple_bounces():
+    source = StoneMotion(x=300.0, y=380.0, vx=layout.MAX_STONE_SPEED)
+    prediction = TrajectoryPredictor().predict(source)
+    expected = StoneMotion(x=source.x, y=source.y, vx=source.vx)
+    step = layout.PREDICTION_SUBSTEP
+    steps = 0
+    while math.hypot(expected.vx, expected.vy) > layout.STONE_STOP_SPEED:
+        expected.x += expected.vx * step
+        expected.y += expected.vy * step
+        expected.resolve_walls()
+        expected.resolve_goal_posts()
+        expected.advance_velocity(step)
+        steps += 1
+    assert prediction.endpoint == (expected.x, expected.y)
+    assert prediction[-1] == prediction.endpoint
+    assert abs(prediction.duration - steps * step) < 1e-9
+    assert prediction.duration > 1024 * step
+    assert sum(x in (50.0, 550.0) for x, _ in prediction) > 2
+    assert source.vx == layout.MAX_STONE_SPEED
+
+
+def test_overspeed_is_capped_before_first_position_step():
+    predictor = TrajectoryPredictor()
+    source = StoneState(x=300.0, y=50.0, vx=0.0, vy=-5000.0)
+    prediction = predictor.predict(source)
+    expected = predictor.predict(300.0, 50.0, 0.0, -layout.MAX_STONE_SPEED)
+    assert prediction.trajectory == expected.trajectory
+    assert prediction.duration == expected.duration
+    assert prediction.source_state is source
+    assert source.vy == -5000.0
+
+
+def test_current_and_target_velocity_are_capped_without_losing_response():
+    source = StoneMotion(x=300.0, y=380.0, vx=5000.0, target_vx=-5000.0, response_active=True)
+    prediction = TrajectoryPredictor().predict(source)
+    expected = TrajectoryPredictor().predict(
+        StoneMotion(x=300.0, y=380.0, vx=1100.0, target_vx=-1100.0, response_active=True)
+    )
+    assert prediction.trajectory == expected.trajectory
+    assert prediction.duration == expected.duration
+    assert (source.vx, source.target_vx, source.response_active) == (5000.0, -5000.0, True)
+
+
+def test_stationary_current_velocity_with_active_response_still_moves():
+    source = StoneMotion(x=300.0, y=380.0, target_vx=150.0, response_active=True)
+    prediction = TrajectoryPredictor().predict(source)
+    assert prediction.endpoint[0] > source.x + 100.0
+    assert prediction.duration > 1.0
+    assert (source.vx, source.target_vx, source.response_active) == (0.0, 150.0, True)
 

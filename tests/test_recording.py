@@ -7,6 +7,8 @@
 """
 
 import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -278,4 +280,76 @@ def test_runtime_pipeline_records_in_unified_format():
         assert set(frame["prediction"].keys()) == PREDICTION_KEYS
         assert frame["curling_state"]["radius"] == 25.0
         assert frame["curling_state"]["confidence"] == 0.8
+
+
+def test_recording_survives_process_exit_and_partial_last_frame():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "crash.json"
+        code = """
+import os, sys
+from air_hockey.recording import RuntimeRecorder
+from game_state import CurlingState
+recorder = RuntimeRecorder(sys.argv[1], meta={"run": "crash"})
+recorder.record_frame(1.5, 60.0, CurlingState(x=123.0, y=456.0, timestamp=1.5))
+recorder.record_frame(2.0, 60.0, CurlingState(x=234.0, y=345.0, timestamp=2.0))
+os._exit(0)
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(path)],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=20,
+        )
+        assert completed.returncode == 0, completed.stderr
+        journal = path.with_name(path.name + ".journal")
+        with journal.open("a", encoding="utf-8") as output:
+            output.write('{"index":2,"timestamp":')
+        RuntimeRecorder.recover(path)
+        document = json.loads(path.read_text(encoding="utf-8"))
+        assert document["meta"] == {"run": "crash"}
+        assert [(frame["index"], frame["timestamp"], frame["curling_state"]["x"])
+                for frame in document["frames"]] == [(0, 1.5, 123.0), (1, 2.0, 234.0)]
+        assert not journal.exists()
+
+
+def test_active_recording_cannot_be_recovered_or_overwritten():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "active.json"
+        with RuntimeRecorder(path) as recorder:
+            recorder.record_frame(1.0, 60.0)
+            for operation, expected in (
+                    (lambda: RuntimeRecorder.recover(path), BlockingIOError),
+                    (lambda: RuntimeRecorder(path), FileExistsError)):
+                try:
+                    operation()
+                except expected:
+                    pass
+                else:
+                    raise AssertionError("live recording must remain owned by its writer")
+            recorder.flush()
+            assert [frame["timestamp"] for frame in json.loads(path.read_text())["frames"]] == [1.0]
+            recorder.record_frame(2.0, 60.0)
+        assert [frame["timestamp"] for frame in recorder.to_dict()["frames"]] == [1.0, 2.0]
+
+
+def test_failed_close_preserves_journal_and_can_be_retried():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "blocked.json"
+        path.mkdir()
+        recorder = RuntimeRecorder(path)
+        try:
+            recorder.record_frame(1.0, 60.0, _curling_state())
+            try:
+                recorder.close()
+            except OSError:
+                pass
+            else:
+                raise AssertionError("export over a directory must fail")
+            assert not recorder.closed
+            assert recorder.to_dict()["frames"][0]["curling_state"]["x"] == 100.0
+        finally:
+            path.rmdir()
+            recorder.close()
+        document = json.loads(path.read_text(encoding="utf-8"))
+        assert document["frames"][0]["timestamp"] == 1.0
+        assert document["frames"][0]["curling_state"]["x"] == 100.0
 

@@ -18,7 +18,7 @@ from typing import Optional
 
 from .. import core_config as core
 from ..estimation import KalmanFilter
-from ..physics import StoneMotion
+from ..physics import StoneMotion, goal_scorer
 from ..prediction import PredictionState, TrajectoryPredictor
 from game_state import CurlingState
 
@@ -37,12 +37,12 @@ class SimulationConfig:
     seed: Optional[int] = 0
 
     def __post_init__(self) -> None:
-        if self.dt <= 0.0:
-            raise ValueError("dt must be positive")
+        if not math.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError("dt must be finite and positive")
         if self.steps <= 0:
             raise ValueError("steps must be positive")
-        if self.position_noise < 0.0:
-            raise ValueError("position_noise must be non-negative")
+        if not math.isfinite(self.position_noise) or self.position_noise < 0.0:
+            raise ValueError("position_noise must be finite and non-negative")
 
 
 @dataclass
@@ -140,19 +140,24 @@ class MotionSimulator:
         return cls(config)
 
     def true_trajectory(self) -> list[tuple[float, float]]:
-        """用共享物理（StoneMotion）推进得到真实轨迹。"""
+        """共享墙壁、门柱和进球规则；得分后保持位置，保留 steps + 1 帧。"""
         stone = StoneMotion(
             x=self.config.initial_x,
             y=self.config.initial_y,
             vx=self.config.initial_vx,
             vy=self.config.initial_vy,
         )
+        stone.set_immediate_velocity(stone.vx, stone.vy)
         trajectory = [(stone.x, stone.y)]
+        scored = goal_scorer(stone) is not None
         for _ in range(self.config.steps):
-            stone.advance_velocity(self.config.dt)
-            stone.x += stone.vx * self.config.dt
-            stone.y += stone.vy * self.config.dt
-            stone.resolve_walls()
+            if not scored:
+                stone.advance_velocity(self.config.dt)
+                stone.x += stone.vx * self.config.dt
+                stone.y += stone.vy * self.config.dt
+                stone.resolve_walls()
+                stone.resolve_goal_posts()
+                scored = goal_scorer(stone) is not None
             trajectory.append((stone.x, stone.y))
         return trajectory
 

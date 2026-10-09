@@ -135,7 +135,8 @@ def test_plan_does_not_modify_inputs():
 def test_plan_connects_real_prediction_output():
     curling = CurlingState(x=300.0, y=500.0, vx=120.0, vy=-80.0)
     prediction = TrajectoryPredictor().predict(curling)
-    assert prediction.duration > 0.0
+    stop_time = (curling.speed - core.STONE_STOP_SPEED) / core.STONE_FRICTION_DECELERATION
+    assert stop_time <= prediction.duration < stop_time + core.PREDICTION_SUBSTEP
 
     planner = TrajectoryPlanner()
     command = planner.plan(curling, prediction, (350.0, 200.0))
@@ -143,6 +144,7 @@ def test_plan_connects_real_prediction_output():
     assert isinstance(command, ControlCommand)
     assert abs(math.hypot(*command.direction) - 1.0) < 1e-9
     assert 0.0 < command.speed <= planner.max_speed
+    assert abs(command.speed - math.dist(curling.position, command.target_position) / prediction.duration) < 1e-9
     left, right, top, bottom = planner.bounds
     assert left + planner.margin <= command.target_position[0] <= right - planner.margin
     assert top + planner.margin <= command.target_position[1] <= bottom - planner.margin

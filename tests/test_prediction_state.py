@@ -7,10 +7,13 @@
 - VisionRuntime 透传 PredictionState
 """
 
+import math
 from pathlib import Path
+from unittest import TestCase
 
 import numpy as np
 
+from air_hockey import core_config as core
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.prediction import PredictionState, TrajectoryPredictor, predict_trajectory
@@ -64,6 +67,70 @@ def test_predict_trajectory_function_returns_prediction_state():
     pred = predict_trajectory(300.0, 400.0, 120.0, -60.0)
     assert isinstance(pred, PredictionState)
     assert pred.endpoint == pred.trajectory[-1]
+
+
+def test_stop_endpoint_includes_last_subpixel_motion_at_budget_boundary():
+    predictor = TrajectoryPredictor(substep=0.01, point_interval=1.0, max_simulation_steps=2)
+    prediction = predictor.predict(300.0, 380.0, 9.0, 0.0)
+    assert len(prediction.trajectory) == 2
+    assert prediction[0] == (300.0, 380.0)
+    assert math.dist(prediction.endpoint, (300.1728, 380.0)) < 1e-10
+    assert prediction.endpoint == prediction[-1]
+    assert prediction.duration == 0.02
+
+
+def test_budget_exhaustion_never_returns_false_terminal_state():
+    predictor = TrajectoryPredictor(max_simulation_steps=1)
+    with TestCase().assertRaisesRegex(RuntimeError, "max_simulation_steps=1.*terminal"):
+        predictor.predict(300.0, 380.0, 150.0, 0.0)
+    with TestCase().assertRaisesRegex(RuntimeError, "max_simulation_steps=1.*terminal"):
+        predictor.predict_endpoint(300.0, 380.0, 150.0, 0.0)
+
+
+def test_goal_and_obstacle_terminal_positions_are_exact():
+    predictor = TrajectoryPredictor()
+    goal = predictor.predict(300.0, 80.0, 0.0, -150.0)
+    assert goal.endpoint == goal[-1]
+    assert goal.endpoint[1] + core.STONE_RADIUS < core.RINK_TOP
+    assert goal.duration > 0.0
+    already_scored = predictor.predict(300.0, 20.0, 0.0, -150.0)
+    assert already_scored.trajectory == [(300.0, 20.0)]
+    assert already_scored.duration == 0.0
+
+    obstacle = (350.0, 380.0)
+    contact = predictor.predict(300.0, 380.0, 150.0, 0.0, obstacles=(obstacle,))
+    assert contact.endpoint == contact[-1]
+    assert math.dist(contact.endpoint, obstacle) <= core.STONE_RADIUS + core.MALLET_RADIUS
+    assert contact.duration > 0.0
+    already_touching = predictor.predict(350.0, 380.0, 150.0, 0.0, obstacles=(obstacle,))
+    assert already_touching.trajectory == [(350.0, 380.0)]
+    assert already_touching.duration == 0.0
+
+
+def test_predictor_rejects_invalid_numerical_and_budget_parameters():
+    invalid = [
+        {"substep": 0.0}, {"substep": -1.0}, {"point_interval": 0.0},
+        {"stop_speed": -1.0}, {"max_simulation_steps": 0}, {"max_simulation_steps": -1},
+        {"max_simulation_steps": 1.5}, {"max_simulation_steps": True},
+    ]
+    invalid.extend(
+        {name: value}
+        for name in ("substep", "point_interval", "stop_speed", "max_simulation_steps")
+        for value in (math.nan, math.inf, -math.inf)
+    )
+    for kwargs in invalid:
+        with TestCase().assertRaises(ValueError):
+            TrajectoryPredictor(**kwargs)
+
+    predictor = TrajectoryPredictor()
+    for value in (math.nan, math.inf, -math.inf):
+        for source in (CurlingState(x=value, y=380.0), CurlingState(x=300.0, y=380.0, vx=value)):
+            with TestCase().assertRaisesRegex(ValueError, "finite"):
+                predictor.predict(source)
+        with TestCase().assertRaisesRegex(ValueError, "finite"):
+            predictor.predict(300.0, 380.0, 150.0, 0.0, obstacle_radius=value)
+        with TestCase().assertRaisesRegex(ValueError, "finite"):
+            predictor.predict(300.0, 380.0, 150.0, 0.0, obstacles=((value, 380.0),))
 
 
 class _MockDetector:

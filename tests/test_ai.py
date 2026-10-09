@@ -60,6 +60,25 @@ def test_defense_uses_injected_predictor():
     assert normal.target_x != short_stop.target_x
 
 
+def test_default_forecast_reaches_home_line_and_guides_defense():
+    state = make_state(260.0, 500.0, vx=180.0, vy=-250.0)
+    ai = AirHockeyAI()
+    prediction = ai.predictor.predict(state.stone)
+    home = state.ai_home_y
+    crossings = [
+        x0 + (home - y0) / (y1 - y0) * (x1 - x0)
+        for (x0, y0), (x1, y1) in zip(prediction[:-1], prediction[1:])
+        if y1 <= home < y0
+    ]
+    assert crossings
+    assert abs(crossings[0] - 519.55) < 0.1
+    assert abs(ai._predict_stone_x(state, home, prediction) - crossings[0]) < 1e-9
+    decision = ai.choose_target(state, prediction=prediction)
+    expected_x = layout.RINK_CENTER_X * (1.0 - NO_ERROR.prediction) + crossings[0] * NO_ERROR.prediction
+    assert abs(decision.target_x - expected_x) < 1e-9
+    assert decision.target_y == home
+
+
 def _assert_realtime_threat_reuses_prediction(stone_y):
     state = make_state(260.0, stone_y, vx=180.0, vy=-250.0)
     predictor = CountingPredictor()

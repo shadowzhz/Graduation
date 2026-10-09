@@ -4,9 +4,16 @@
 frame -> detection -> track -> table StoneState -> predictor -> AI
 """
 
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import TestCase
+from unittest.mock import patch
+import math
+import sys
+import tempfile
 import time
+import cv2
 import numpy as np
 
 from air_hockey import core_config as core
@@ -269,3 +276,142 @@ def test_vision_runtime_without_detection():
     assert result.trajectory is None
     assert result.ai_target is None
     assert result.ai_decision is None
+
+
+def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
+    runtime = VisionRuntime(
+        table_calibration_file=None, disable_undistort=True, detection_interval=1,
+    )
+    results = []
+    for sequence, x in enumerate([500, 503, 506, 509, 512, None, None, None, 800], 1):
+        hsv = np.zeros((720, 1280, 3), dtype=np.uint8)
+        if x is not None:
+            cv2.circle(hsv, (x, 300), 30, (175, 255, 255), -1)
+        frame = Frame(
+            image=cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR),
+            timestamp=1.0 + (sequence - 1) * 0.005, sequence=sequence,
+        )
+        results.append(runtime.process_frame(frame))
+
+    assert results[4].curling_state.vx > 0.0
+    for previous, missed in zip(results[4:7], results[5:8]):
+        assert missed.detection is None
+        assert missed.track.track_id == 1
+        assert missed.curling_state.timestamp == missed.frame.timestamp
+        assert missed.curling_state.x > previous.curling_state.x
+        assert math.isclose(missed.curling_state.x,
+                            previous.curling_state.x + previous.curling_state.vx * 0.005)
+        assert math.isclose(missed.curling_state.vx, previous.curling_state.vx)
+
+    new = results[-1]
+    assert new.track.track_id == 2
+    undistorted = runtime.camera_geometry.raw_to_undistorted(800.0, 300.0)
+    expected = runtime.camera_geometry.undistorted_to_table(*undistorted)
+    assert math.dist(new.curling_state.position, expected) < 1e-6
+    assert new.curling_state.timestamp == new.frame.timestamp
+    assert new.curling_state.vx == 0.0
+    assert new.curling_state.vy == 0.0
+
+
+def test_estimator_reset_on_no_track_preserves_new_observation_initialization():
+    runtime = VisionRuntime(
+        table_calibration_file=None, disable_undistort=True, detection_interval=1,
+        tracker=StoneTracker(max_missed_frames=0),
+        detector=MockDetector([
+            Detection(center_x=500.0, center_y=300.0, radius=30.0, area=2800.0, timestamp=1.0),
+            Detection(center_x=503.0, center_y=300.0, radius=30.0, area=2800.0, timestamp=1.005),
+            None,
+            Detection(center_x=800.0, center_y=300.0, radius=30.0, area=2800.0, timestamp=1.015),
+        ]),
+    )
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    runtime.process_frame(Frame(image=image, timestamp=1.0))
+    moving = runtime.process_frame(Frame(image=image, timestamp=1.005))
+    assert moving.curling_state.vx > 0.0
+    missing = runtime.process_frame(Frame(image=image, timestamp=1.01))
+    assert missing.track is None and missing.curling_state is None
+    new = runtime.process_frame(Frame(image=image, timestamp=1.015))
+    expected = runtime.camera_geometry.undistorted_to_table(800.0, 300.0)
+    assert math.dist(new.curling_state.position, expected) < 1e-6
+    assert new.curling_state.vx == new.curling_state.vy == 0.0
+
+
+def test_camera_calibration_capture_failure_exits_and_cleans_up():
+    from air_hockey.tools import calibrate_camera as tool
+
+    failure = RuntimeError('GStreamer capture failed')
+
+    class Camera:
+        error = None
+        stopped = False
+
+        def start(self):
+            if failure_stage == 'start':
+                raise failure
+
+        def get_latest_frame(self):
+            self.error = failure
+            return Frame(np.zeros((240, 320, 3), dtype=np.uint8), sequence=1)
+
+        def stop(self):
+            self.stopped = True
+
+    for failure_stage in ('start', 'capture'):
+        camera = Camera()
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as patches:
+            output = Path(tmp) / 'calibration.npz'
+            patches.enter_context(patch.object(sys, 'argv', ['calibrate_camera.py', '--output', str(output)]))
+            patches.enter_context(patch.object(tool, 'CameraManager', return_value=camera))
+            for name in ('namedWindow', 'imshow', 'destroyAllWindows'):
+                patches.enter_context(patch.object(tool.cv2, name, return_value=None))
+            patches.enter_context(patch.object(tool.cv2, 'waitKey', return_value=-1))
+            with TestCase().assertRaises(RuntimeError) as caught:
+                tool.main()
+            assert camera.stopped and not output.exists()
+            if failure_stage == 'capture':
+                assert caught.exception.__cause__ is failure
+            else:
+                assert caught.exception is failure
+
+
+def test_camera_calibration_duplicate_sequence_is_not_resampled_and_quit_responds():
+    from air_hockey.tools import calibrate_camera as tool
+
+    image = np.full((300, 420, 3), 255, dtype=np.uint8)
+    for row in range(8):
+        for col in range(11):
+            if (row + col) % 2 == 0:
+                image[30 + row * 24:30 + (row + 1) * 24,
+                      30 + col * 24:30 + (col + 1) * 24] = 0
+    shifted = np.roll(image, 60, axis=1)
+    frames = iter([Frame(image, sequence=7), Frame(shifted, sequence=7)])
+    keys = iter([-1, -1, ord('q')])
+    clock = iter([1.0, 2.0])
+    calibrator = tool.CameraCalibrator((10, 7), 25)
+
+    class Camera:
+        error = None
+        stopped = False
+
+        def start(self):
+            pass
+
+        def get_latest_frame(self):
+            return next(frames)
+
+        def stop(self):
+            self.stopped = True
+
+    camera = Camera()
+    with tempfile.TemporaryDirectory() as tmp, ExitStack() as patches:
+        output = Path(tmp) / 'calibration.npz'
+        patches.enter_context(patch.object(sys, 'argv', ['calibrate_camera.py', '--output', str(output)]))
+        patches.enter_context(patch.object(tool, 'CameraManager', return_value=camera))
+        patches.enter_context(patch.object(tool, 'CameraCalibrator', return_value=calibrator))
+        patches.enter_context(patch.object(tool.time, 'monotonic', side_effect=lambda: next(clock)))
+        for name in ('namedWindow', 'imshow', 'destroyAllWindows'):
+            patches.enter_context(patch.object(tool.cv2, name, return_value=None))
+        patches.enter_context(patch.object(tool.cv2, 'waitKey', side_effect=lambda delay: next(keys)))
+        tool.main()
+        assert camera.stopped and not output.exists()
+    assert calibrator.sample_count == 1
