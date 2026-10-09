@@ -47,3 +47,28 @@ def test_velocity_is_smoothed():
     assert tracker.track.vx == 5.0
     tracker.update(make_detection(30, 0, 2.0))  # 瞬时速度 20，平滑后取一半
     assert tracker.track.vx == 12.5
+
+
+def test_scheduled_predictions_preserve_state_and_missing_detection_budget():
+    for budget in (0, 1):
+        tracker = StoneTracker(max_missed_frames=budget, velocity_alpha=1.0)
+        tracker.update(make_detection(100, 200, 0.0))
+        tracker.update(make_detection(110, 200, 1.0))
+        for timestamp in (1.1, 1.2):
+            predicted = tracker.predict(timestamp)[0]
+            assert predicted.state.value == "active"
+            assert predicted.missed_frames == 0
+            assert abs(predicted.center_x - (110 + 10 * (timestamp - 1))) < 1e-9
+        assert tracker.track.center_x == 110
+        assert tracker.track.last_timestamp == 1.0
+
+        tracker.update(None)
+        if budget:
+            predicted = tracker.predict(1.3)[0]
+            assert predicted.state.value == "lost"
+            assert predicted.missed_frames == 1
+            assert tracker.update(None) == []
+        assert tracker.predict(1.4) == []
+        recovered = tracker.update(make_detection(110, 200, 1.5))[0]
+        assert recovered.state.value == "active"
+        assert recovered.missed_frames == 0

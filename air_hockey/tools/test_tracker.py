@@ -25,10 +25,10 @@ def parse_args():
         default=(350, 0, 580, 650),
     )
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80))
-    parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255))
+    parser.add_argument("--upper", type=int, nargs=3, default=(10, 255, 255))
     parser.add_argument("--min-area", type=float, default=500.0)
     parser.add_argument("--min-radius", type=float, default=25.0)
-    parser.add_argument("--min-circularity", type=float, default=0.65)
+    parser.add_argument("--min-circularity", type=float, default=0.55)
     parser.add_argument("--max-distance", type=float, default=80.0)
     parser.add_argument("--max-missed-frames", type=int, default=5)
     parser.add_argument("--duration", type=float, default=0.0)

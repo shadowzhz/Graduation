@@ -46,6 +46,11 @@ def threshold(image, lower, upper, color_space="hsv"):
     upper_array = np.asarray(tuple(upper), dtype=np.uint8)
     if lower_array.shape != (3,) or upper_array.shape != (3,):
         raise ValueError("lower and upper thresholds must contain three values")
+    if color_space == "hsv" and lower_array[0] > upper_array[0]:
+        low_hue = lower_array.copy()
+        high_hue = upper_array.copy()
+        low_hue[0], high_hue[0] = 0, 179
+        return cv2.inRange(converted, lower_array, high_hue) | cv2.inRange(converted, low_hue, upper_array)
     return cv2.inRange(converted, lower_array, upper_array)
 
 # 形态学处理

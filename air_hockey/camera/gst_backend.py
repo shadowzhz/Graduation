@@ -36,11 +36,13 @@ class GStreamerBackend:
         width = self.config.width
         height = self.config.height
         fps = Fraction(str(self.config.requested_fps)).limit_denominator(1000)
+        decoder = ("nvv4l2decoder mjpeg=1 ! nvvidconv"
+                   if all(Gst.ElementFactory.find(name) for name in ("nvv4l2decoder", "nvvidconv"))
+                   else "jpegdec ! videoconvert")
         pipeline_desc = (
             f"v4l2src device={device} io-mode=2 ! "
             f"image/jpeg,width={width},height={height},framerate={fps.numerator}/{fps.denominator} ! "
-            "nvv4l2decoder mjpeg=1 ! "
-            "nvvidconv ! video/x-raw,format=BGRx ! "
+            f"{decoder} ! video/x-raw,format=BGRx ! "
             "appsink name=sink emit-signals=false max-buffers=1 drop=true sync=false "
             "qos=false enable-last-sample=false wait-on-eos=false"
         )

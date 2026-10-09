@@ -2,7 +2,7 @@
 
 import threading
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -112,6 +112,50 @@ def test_runtime_read_failure_stops_capture_and_reports_error():
         next_read.set()
         manager.stop()
         backend_patch.stop()
+
+
+def test_gst_selects_software_decode_without_jetson_plugins():
+    from air_hockey.camera.gst_backend import GStreamerBackend
+
+    for jetson_plugins in (False, True):
+        descriptions = []
+
+        class Pipeline:
+            def get_by_name(self, name):
+                return object()
+
+            def get_bus(self):
+                return SimpleNamespace(pop_filtered=lambda mask: None)
+
+            def set_state(self, state):
+                return 1
+
+        pipeline = Pipeline()
+        gi = ModuleType("gi")
+        gi.__path__ = []
+        gi.require_version = lambda *args: None
+        repository = ModuleType("gi.repository")
+        gst = SimpleNamespace(
+            init=lambda *args: None,
+            ElementFactory=SimpleNamespace(find=lambda name: object() if jetson_plugins else None),
+            parse_launch=lambda description: (descriptions.append(description) or pipeline),
+            State=SimpleNamespace(PLAYING=1, NULL=0),
+            StateChangeReturn=SimpleNamespace(FAILURE=-1),
+            MessageType=SimpleNamespace(ERROR=1, EOS=2),
+        )
+        repository.Gst = gst
+        with patch.dict("sys.modules", {"gi": gi, "gi.repository": repository}):
+            backend = GStreamerBackend(CameraConfig())
+            backend.open("/dev/video2")
+            backend.release()
+
+        description = descriptions[0]
+        if jetson_plugins:
+            assert "nvv4l2decoder mjpeg=1 ! nvvidconv" in description
+            assert "jpegdec" not in description
+        else:
+            assert "jpegdec ! videoconvert" in description
+            assert "nvv4l2decoder" not in description and "nvvidconv" not in description
 
 
 def test_gst_bus_eos_and_error_are_not_silent():

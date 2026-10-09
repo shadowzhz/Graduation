@@ -72,7 +72,7 @@ class VisionRuntime:
         self,
         table_roi: tuple[int, int, int, int] = (350, 0, 580, 650),
         lower: tuple[int, int, int] = (170, 100, 80),
-        upper: tuple[int, int, int] = (179, 255, 255),
+        upper: tuple[int, int, int] = (10, 255, 255),
         calibration_file: str = "calibration/camera_calibration.npz",
         table_calibration_file: str = "calibration/table_homography.npz",
         disable_undistort: bool = False,
@@ -95,7 +95,8 @@ class VisionRuntime:
             upper=tuple(upper),
             min_area=500.0,
             min_radius=25.0,
-            min_circularity=0.65,
+            # ponytail: rink-line overlaps reach 0.578; lower values risk matching red markings.
+            min_circularity=0.55,
         )
         self.tracker = tracker or StoneTracker(max_missed_frames=self.detection_interval * 4)
         self.kalman = kalman or KalmanFilter()

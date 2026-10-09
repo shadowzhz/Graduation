@@ -86,12 +86,12 @@ Camera -> VisionRuntime
 4. **卡尔曼状态估计**：常量速度模型（`[px, py, vx, vy]`）融合观测序列，输出平滑的 `CurlingState`，显著降低检测抖动（观测误差 ≈3.8 → 滤波误差 ≈1.7）。
 5. **单目去畸变与坐标系几何映射**：`raw → undistorted → table` 三层解耦；`undistorted → table` 支持**球台四点 Homography**（透视校正），也保留 ROI 线性映射回退；速度用空间微元有限差分换算。
 6. **统一微步物理轨迹预测核心**：`TrajectoryPredictor` 涵盖摩擦阻尼、边墙弹性碰撞、门柱圆弧反弹与进球穿透判定；视觉、仿真、AI **共用同一物理核心**。
-7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距，覆盖前压击球、死球处理与自动回中状态机；独立仿真调用仍可自行预测。
+7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距；身后冰壶按侧移、后退、对齐、击球分段回收，避免斜退穿球造成乌龙。进入球门侧安全退让线（当前逻辑 y≤91）的球不主动向自家球门推，不能保证救回已经越过可安全击球区域的快球；独立仿真调用仍可自行预测。
 8. **轨迹规划与控制适配层**：独立 `TrajectoryPlanner` 可生成 `ControlCommand`；实时 `PlcControlAdapter` 限制 AI 半场目标，`PLCLink` 周期读取轴状态及位置，安全状态成立才下发运动目标。
 9. **仿真 / 评估 / 记录工具链**：无摄像头运动仿真（真实轨迹→观测→Kalman→预测）、多组实验误差评估（JSON + 控制台报告）、真实/仿真统一格式运行日志（含 CurlingState / PredictionState / AIDecision / PLC request）。
 10. **西门子 PLC 工业通信**：按 S7-1500T/TO_Kinematics 联调版的 DB1/DB18 协议收发；只下发 `[X,0,Y,0]` 运动学位置和触发脉冲，冰壶状态与比分不再写入 PLC。
 
-运行时漏检会把状态估计推进到当前帧时间；追踪 ID 改变时清空旧估计，新目标不继承旧速度。预测前先限制当前及目标速度，完整预测到停止、进球或障碍接触，不再以 18 个绘制点或反弹次数截断物理过程。`endpoint` / `duration` 是终态位置及完整时长；默认最多 4000 个微步（约 16.67 秒），耗尽预算会明确报错，不返回假终点。
+计划性跳过检测的帧只外推位置，保留追踪状态和漏检次数；真正执行检测却没找到冰壶时才进入 `lost`，重新检测到后恢复 `active`。运行时漏检会把状态估计推进到当前帧时间；追踪 ID 改变时清空旧估计，新目标不继承旧速度。预测前先限制当前及目标速度，完整预测到停止、进球或障碍接触，不再以 18 个绘制点或反弹次数截断物理过程。`endpoint` / `duration` 是终态位置及完整时长；默认最多 4000 个微步（约 16.67 秒），耗尽预算会明确报错，不返回假终点。
 
 离线仿真真值处理门柱与进球，得分后保持位置直到配置末帧。仿真和评估的 `dt` 必须为有限正数，`noise` 必须为有限非负数；NaN / Inf 会报错。
 
@@ -101,13 +101,13 @@ Camera -> VisionRuntime
 
 统一通过根目录 [main.py](file:///run/media/shadowemperor/游戏/Ubuntu/Project/Python/Graduation/main.py) 启动：
 
-默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。真实启动要求目标系统提供 `/dev/video*`、PyGObject/GStreamer 及 Jetson MJPEG 硬件解码元件；没有 V4L2/OpenCV 回退。
+默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。相机通过 PyGObject/GStreamer 的 V4L2 管道采集：Jetson 有 NVIDIA 元件时使用硬件解码，普通 Linux 自动用 `jpegdec`/`videoconvert` 软件解码；两种环境都需要相应的 GStreamer 插件。`--camera-device /dev/video2` 可指定 USB 相机。
 
 ```bash
 python3 air_hockey/tools/calibrate_camera.py --cols 10 --rows 7 --square-size 25 --output calibration/camera_calibration.npz
 python3 air_hockey/tools/calibrate_table.py --output calibration/table_homography.npz
 python3 main.py                       # 实时视觉演示（Camera -> ... -> AI）
-python3 main.py --disable-undistort --disable-homography  # 无标定采集调试，非实台物理坐标
+python3 main.py --camera-device /dev/video2 --disable-undistort --disable-homography  # Linux 相机调试，非实台物理坐标
 python3 main.py --headless            # 无显示性能基准测试
 python3 main.py --headless --benchmark-seconds 30 --perf-json benchmark.json  # 有标定文件时的分段耗时报告
 python3 main.py --sim                 # 虚拟仿真对战（也可写作 --game）
@@ -128,7 +128,7 @@ python3 main.py --sim --plc 192.168.0.64          # 仿真游戏/实机轴反馈
 
 PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在 Windows 或实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
 
-常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
+常用参数：`--camera-device`、`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。冰壶 HSV 默认阈值为 `--lower 170 100 80 --upper 10 255 255`，会同时覆盖红色在 HSV 色调 0 和 179 两端的范围；灯光、曝光或壶颜色不同需用实拍图重新调。
 
 Jetson 的 Python 3.8 运行时需使用已包含延迟类型注解修复的最新代码，并确保该解释器安装了 `numpy`、`cv2`、`gi` 等运行依赖；无标定开关只跳过标定，不会跳过摄像头和 GStreamer 依赖。
 
@@ -136,7 +136,7 @@ Jetson 上若看到 `unknown type GstFraction`，需更新到通过 `Gst.Structu
 
 采集诊断：`python3 air_hockey/tools/test_camera.py --benchmark --duration 10` 给出设备、请求与真实 caps 协商模式、采集线程实测 FPS、独立取样的 read/convert 耗时分布（read 总耗时包含取样等待和转换，不与 convert 相加）；`python3 air_hockey/tools/test_gstreamer_transfer.py --mode bgr-cvt --duration 10` 在独立管道比较与实际后端相同的 OpenCV BGRx→BGR 转换，`--mode bgr-copy` 则只测 NumPy 三通道裁剪复制。后者不是实际转换路径，独立管道的 FPS 也不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/协商 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的读取/转换完成时刻，Gst PTS 是未映射的管道时钟域原值，二者均不是曝光时间；不能据此声称曝光到显示或 PLC 端到端延迟。本机无 Jetson，尚未取得本次变更的实机测量数据。
 
-预览链路先将原始帧缩到 640 像素宽，再按相同比例绘制 ROI、观测、轨迹和 AI 目标；`render()` 全分辨率输出仍保持原有行为。此路径不再为预览复制、绘制整张原始分辨率图像。本机 1280×720 合成画面、各预热 3 次后各测 50 次的单次对比：预览编码耗时 p50 从约 1.97 ms 降为约 0.96 ms；这不是 Jetson 或真实相机的性能结论。GStreamer 后端仍保留 cv2 的 BGRx→BGR 转换，不在缺少 Jetson 实测时改动硬件协商管道。
+预览链路先将原始帧缩到 640 像素宽，再按相同比例绘制 ROI、观测、轨迹和 AI 目标；`render()` 全分辨率输出仍保持原有行为。预览按稀疏采样的全画面亮度做缓慢校正，以减轻整幅画面的明暗闪烁；只修改显示图像，不改检测、追踪或 PLC 输入，局部条纹仍需稳定照明。本机 1280×720 合成画面、各预热 3 次后各测 50 次的单次对比：预览编码耗时 p50 从约 1.97 ms 降为约 0.96 ms；这不是 Jetson 或真实相机的性能结论。GStreamer 后端仍保留 cv2 的 BGRx→BGR 转换，不在缺少 Jetson 实测时改动硬件协商管道。
 
 预览状态栏使用固定宽高容器并换行：识别到冰壶后较长的位置、速度和预测文本不会撑宽 Tk 窗口，也不会使居中的预览图像左右跳动。
 

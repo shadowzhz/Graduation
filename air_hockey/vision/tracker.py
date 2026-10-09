@@ -63,10 +63,6 @@ class StoneTracker:
             return []
         timestamp = float(timestamp)                    # 当前帧的时间戳
         dt = timestamp - self._track.last_timestamp     # 预测时间差
-        missed = self._track.missed_frames + 1          # 漏检计数 
-        # 如果超过最大允许漏检帧数，返回空列表，否则创建新对象
-        if missed > self.max_missed_frames:
-            return []
         return [replace(
             self._track,
 
@@ -76,8 +72,6 @@ class StoneTracker:
 
             last_timestamp=timestamp,
             age=self._track.age + 1,
-            missed_frames=missed,
-            state=TrackState.LOST,
         )]
 
     def reset(self) -> None:

@@ -30,7 +30,7 @@ import tkinter as tk
 
 from air_hockey.app.renderer import format_status, render_preview
 from air_hockey.app.vision_runtime import VisionRuntime
-from air_hockey.camera import CameraManager
+from air_hockey.camera import CameraConfig, CameraManager
 from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.recording import RuntimeRecorder
 
@@ -77,9 +77,11 @@ def run_game(plc_ip=None, plc_rate=30.0):
     raise SystemExit(subprocess.run(command, cwd=str(SIM_ROOT)).returncode)
 
 
-def encode_preview_ppm(result, table_roi, camera_geometry):
+def encode_preview_ppm(result, table_roi, camera_geometry, brightness_gain=1.0):
     """将最新 VisionResult 渲染并编码为 Tk 可显示的 PPM 原始像素。"""
     small = render_preview(result, table_roi, camera_geometry, DISPLAY_WIDTH)
+    if brightness_gain != 1.0:
+        cv2.convertScaleAbs(small, small, alpha=brightness_gain)
     rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
     h, w = rgb.shape[:2]
     return f"P6 {w} {h} 255\n".encode() + rgb.tobytes()
@@ -205,7 +207,7 @@ def run_vision(args):
             "fatal": None,
         }
 
-    camera = CameraManager()
+    camera = CameraManager(CameraConfig(device=args.camera_device))
     try:
         camera.start()
         if args.record:
@@ -369,6 +371,7 @@ def run_vision(args):
     def encoding_loop():
         """预览转换线程：最新 VisionResult -> render 标注 -> 缩放 -> PPM（按预览帧率限速）。"""
         seen = -1
+        reference_brightness = None
         try:
             while not stop.wait(1.0 / args.preview_fps):
                 with preview_lock:
@@ -379,7 +382,16 @@ def run_vision(args):
                 seen = seq
 
                 encode_start = time.perf_counter() if samples is not None else 0.0
-                ppm_data = encode_preview_ppm(result, runtime.table_roi, runtime.camera_geometry)
+                blue, green, red = cv2.mean(result.frame.image[::8, ::8])[:3]
+                brightness = 0.114 * blue + 0.587 * green + 0.299 * red
+                if reference_brightness is None:
+                    reference_brightness = brightness
+                brightness_gain = max(0.75, min(1.33, reference_brightness / max(brightness, 1.0)))
+                # ponytail: global preview correction cannot remove local light bands; use flicker-free lighting for those.
+                reference_brightness += 0.005 * (brightness - reference_brightness)
+                ppm_data = encode_preview_ppm(
+                    result, runtime.table_roi, runtime.camera_geometry, brightness_gain
+                )
                 if samples is not None:
                     samples.add("preview_encode_ms", (time.perf_counter() - encode_start) * 1000.0)
                 with preview_lock:
@@ -474,13 +486,14 @@ def main():
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
+    parser.add_argument("--camera-device", default=None, help="相机设备路径，例如 /dev/video2；默认自动选择")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正（必须同时 --disable-homography）")
     parser.add_argument("--disable-homography", action="store_true", help="关闭 Homography，回退到旧 ROI 线性映射（调试用）")
     parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
-    parser.add_argument("--upper", type=int, nargs=3, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
+    parser.add_argument("--upper", type=int, nargs=3, default=(10, 255, 255), metavar=("C1", "C2", "C3"))
 
     args = parser.parse_args()
 

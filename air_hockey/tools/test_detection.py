@@ -1,6 +1,6 @@
 """实时 StoneDetector 测试 GUI。
 
-用法: python3 tools/test_detection.py --roi 250 100 780 520 --lower 170 100 80 --upper 179 255 255
+用法: python3 tools/test_detection.py --roi 250 100 780 520 --lower 170 100 80 --upper 10 255 255
 """
 
 
@@ -33,7 +33,7 @@ def build_parser():
     parser.add_argument("--roi", nargs=4, type=int, metavar=("X", "Y", "W", "H"))
     parser.add_argument("--color-space", choices=("hsv", "lab"), default="hsv")
     parser.add_argument("--lower", nargs=3, type=int, default=(170, 80, 50), metavar=("C1", "C2", "C3"))
-    parser.add_argument("--upper", nargs=3, type=int, default=(179, 255, 255), metavar=("C1", "C2", "C3"))
+    parser.add_argument("--upper", nargs=3, type=int, default=(10, 255, 255), metavar=("C1", "C2", "C3"))
     parser.add_argument("--min-area", type=float, default=100.0)
     parser.add_argument("--min-radius", type=float, default=3.0)
     parser.add_argument("--min-circularity", type=float, default=0.55)
