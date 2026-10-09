@@ -41,7 +41,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="球台四点 Homography 标定（undistorted -> table）")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--output", default="calibration/table_homography.npz", help="输出单应矩阵文件")
-    parser.add_argument("--device", default=None, help="摄像头设备，例如 /dev/video0")
+    parser.add_argument("--device", default=None, help="Linux 摄像头路径或 Windows 摄像头编号，例如 0")
     parser.add_argument("--image", default=None, help="改用静态图片而非相机")
     return parser.parse_args()
 

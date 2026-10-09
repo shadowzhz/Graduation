@@ -17,7 +17,7 @@ from air_hockey.camera import CameraConfig, CameraManager
 def build_parser():
     parser = argparse.ArgumentParser(description="测试纯摄像头采集 FPS，不启动 GUI 和检测")
     parser.add_argument("--benchmark", action="store_true", help="运行 FPS 基准测试")
-    parser.add_argument("--device", default=None, help="摄像头设备，例如 /dev/video0")
+    parser.add_argument("--device", default=None, help="Linux 摄像头路径或 Windows 摄像头编号，例如 0")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=200.0, dest="requested_fps")
@@ -62,7 +62,7 @@ def run_benchmark(args):
             f"后端={info.backend if info else '未知'}，"
             f"请求模式={config.width}x{config.height} @ {config.requested_fps:g} FPS，"
             f"模式={info.width if info else '?'}x{info.height if info else '?'}，"
-            f"协商 caps FPS={info.negotiated_fps if info else 0:.2f}，"
+            f"驱动报告 FPS={info.negotiated_fps if info else 0:.2f}，"
             f"输入格式={info.source_format if info else '?'}"
         )
         read_samples = []
@@ -88,15 +88,14 @@ def run_benchmark(args):
             f"{stats.elapsed:.2f} s；请求/协商 FPS 不是实测采集 FPS）"
         )
         print(f"阶段耗时来自读取最新帧的去重样本 {len(read_samples)} 帧；覆盖不保证每一采集帧。")
-        report_samples("appsink 读取总耗时（含颜色转换）", read_samples)
-        report_samples("颜色转换", convert_samples)
+        report_samples("后端读取总耗时", read_samples)
+        report_samples("后端单独报告的颜色转换耗时", convert_samples)
         if last_frame is not None:
-            print(
-                f"最近样本 Frame.timestamp={last_frame.timestamp:.6f} (host perf_counter，取样/转换后)，"
-                f"Gst PTS={last_frame.gst_pts_ns} ns (原始管道时钟域)"
-            )
-        print("读取总耗时包含取样等待及颜色转换，不能与转换耗时相加；不含曝光到 appsink 之前的时间。")
-        print("PTS 未映射主机时钟，不能推算曝光/端到端延迟。")
+            pts = (f"Gst PTS={last_frame.gst_pts_ns} ns (原始管道时钟域)"
+                   if last_frame.gst_pts_ns is not None else "此后端不提供 Gst PTS")
+            print(f"最近样本 Frame.timestamp={last_frame.timestamp:.6f} (host perf_counter，后端读取后)，{pts}")
+        print("读取耗时来自后端 read；解码和颜色处理未必能单独计时，不包含传感器曝光前的耗时。")
+        print("Gst PTS 未映射主机时钟；缺少该值时不能据此推算曝光/端到端延迟。")
         return 0
     except Exception as exc:
         print(f"摄像头基准测试失败: {exc}", file=sys.stderr)

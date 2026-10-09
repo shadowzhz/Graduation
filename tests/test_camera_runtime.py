@@ -277,3 +277,170 @@ def test_gst_rejects_unknown_padded_stride():
         assert "stride/offset" in str(exc)
     else:
         raise AssertionError("padded frames must not be interpreted as tightly packed")
+
+
+def test_opencv_backend_uses_actual_directshow_frame_mode():
+    from air_hockey.camera import opencv_backend
+
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    fourcc = opencv_backend.cv2.VideoWriter_fourcc(*"MJPG")
+
+    class Capture:
+        def __init__(self):
+            self.settings = {}
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, prop, value):
+            self.settings[prop] = value
+            return True
+
+        def read(self):
+            return True, image
+
+        def get(self, prop):
+            return {opencv_backend.cv2.CAP_PROP_FPS: 30.0,
+                    opencv_backend.cv2.CAP_PROP_FOURCC: fourcc}[prop]
+
+        def release(self):
+            self.released = True
+
+    capture = Capture()
+    calls = []
+    backend = opencv_backend.OpenCVBackend(CameraConfig())
+    with patch.object(opencv_backend.cv2, "VideoCapture",
+                      lambda index, api: (calls.append((index, api)) or capture)):
+        backend.open("2")
+        ok, frame = backend.read()
+        backend.release()
+
+    assert calls == [(2, opencv_backend.cv2.CAP_DSHOW)]
+    assert capture.settings == {
+        opencv_backend.cv2.CAP_PROP_FOURCC: fourcc,
+        opencv_backend.cv2.CAP_PROP_FRAME_WIDTH: 1280,
+        opencv_backend.cv2.CAP_PROP_FRAME_HEIGHT: 720,
+        opencv_backend.cv2.CAP_PROP_FPS: 200.0,
+    }
+    assert ok and frame is image
+    assert (backend.info.width, backend.info.height, backend.info.negotiated_fps) == (640, 480, 30.0)
+    assert backend.info.backend == "OpenCV/DirectShow"
+    assert (backend.info.source_format, backend.info.output_format) == ("MJPG", "BGR")
+    assert capture.released
+
+
+def test_windows_camera_manager_starts_default_directshow_device():
+    from air_hockey.camera import opencv_backend
+
+    image = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    class Capture:
+        def __init__(self):
+            self.reads = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, prop, value):
+            return True
+
+        def read(self):
+            self.reads += 1
+            if self.reads == 1:
+                return True, image
+            time.sleep(0.001)
+            return False, None
+
+        def get(self, prop):
+            if prop == opencv_backend.cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == opencv_backend.cv2.CAP_PROP_FOURCC:
+                return 0.0
+            raise AssertionError(f"unexpected camera property {prop}")
+
+        def release(self):
+            self.released = True
+
+    capture = Capture()
+    calls = []
+    manager = CameraManager(CameraConfig())
+    with patch.object(camera_manager.sys, "platform", "win32"), patch.object(
+        opencv_backend.cv2, "VideoCapture",
+        lambda index, api: (calls.append((index, api)) or capture),
+    ):
+        try:
+            manager.start(timeout=0.5)
+            frame = manager.get_latest_frame()
+            assert calls == [(0, opencv_backend.cv2.CAP_DSHOW)]
+            assert manager.info.device == "0"
+            assert manager.info.backend == "OpenCV/DirectShow"
+            assert (frame.image.shape[1], frame.image.shape[0]) == (640, 360)
+            assert frame.gst_pts_ns is None
+        finally:
+            manager.stop()
+    assert capture.released
+
+
+def test_opencv_backend_rejects_linux_paths_and_releases_failed_open():
+    from air_hockey.camera import opencv_backend
+
+    class Capture:
+        released = False
+
+        def isOpened(self):
+            return False
+
+        def release(self):
+            self.released = True
+
+    capture = Capture()
+    calls = []
+    backend = opencv_backend.OpenCVBackend(CameraConfig())
+    with patch.object(opencv_backend.cv2, "VideoCapture",
+                      lambda index, api: (calls.append((index, api)) or capture)):
+        try:
+            backend.open("/dev/video2")
+        except ValueError as exc:
+            assert "编号" in str(exc)
+        else:
+            raise AssertionError("DirectShow must reject a Linux device path")
+        assert calls == []
+        try:
+            backend.open("0")
+        except RuntimeError as exc:
+            assert "无法打开摄像头 0" in str(exc)
+        else:
+            raise AssertionError("an unopened camera must fail startup")
+    assert calls == [(0, opencv_backend.cv2.CAP_DSHOW)]
+    assert capture.released
+
+
+def test_opencv_backend_rejects_non_bgr_frames():
+    from air_hockey.camera import opencv_backend
+
+    class Capture:
+        def isOpened(self):
+            return True
+
+        def set(self, prop, value):
+            return True
+
+        def read(self):
+            return True, np.zeros((2, 2), dtype=np.uint8)
+
+        def release(self):
+            pass
+
+    backend = opencv_backend.OpenCVBackend(CameraConfig())
+    with patch.object(opencv_backend.cv2, "VideoCapture", lambda index, api: Capture()):
+        backend.open("0")
+        try:
+            backend.read()
+        except RuntimeError as exc:
+            assert "BGR uint8" in str(exc)
+        else:
+            raise AssertionError("grayscale frames must not enter the BGR vision pipeline")
+        finally:
+            backend.release()

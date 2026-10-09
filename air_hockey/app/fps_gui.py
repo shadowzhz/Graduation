@@ -143,7 +143,7 @@ def close_app():
 
 print(f"程序路径：{os.path.realpath(__file__)}")
 root = tk.Tk()
-root.title("Machine Camera 高速相机 FPS 测试（Linux）")
+root.title("Machine Camera 高速相机 FPS 测试")
 root.geometry("1280x650")
 root.resizable(False, False)
 left_panel = tk.Frame(root)
@@ -156,7 +156,7 @@ video_label = tk.Label(video_panel, bg="black")
 video_label.pack(fill="both", expand=True)
 tk.Label(
     left_panel,
-    text=(f"GStreamer | 请求 {CAMERA_CONFIG.width} × "
+    text=(f"相机采集 | 请求 {CAMERA_CONFIG.width} × "
           f"{CAMERA_CONFIG.height} | 请求 {CAMERA_CONFIG.requested_fps:g} FPS"),
     font=("Microsoft YaHei", 10),
 ).pack(pady=8)

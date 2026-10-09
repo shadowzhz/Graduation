@@ -238,7 +238,7 @@ def run_vision(args):
     if camera.info is not None:
         info = camera.info
         print(
-            f"GStreamer: {info.device} | 协商 {info.width}x{info.height} "
+            f"{info.backend}: {info.device} | 协商 {info.width}x{info.height} "
             f"@ {info.negotiated_fps:g} FPS ({info.source_format} -> {info.output_format}); "
             "实际采集速度以帧计数为准"
         )
@@ -267,7 +267,7 @@ def run_vision(args):
                 frame = camera.get_latest_frame()
                 if frame is None or frame.sequence == last_sequence:
                     if camera.error is not None:
-                        raise RuntimeError(f"GStreamer 采集已停止：{camera.error}") from camera.error
+                        raise RuntimeError(f"摄像头采集已停止：{camera.error}") from camera.error
                     time.sleep(0.001)
                     continue
                 skipped_frames[0] += max(0, frame.sequence - (last_sequence if last_sequence >= 0 else 0) - 1)
@@ -439,7 +439,7 @@ def run_vision(args):
             stages = samples.snapshot()
             info = camera.info
             report = {
-                "time_reference": "Host perf_counter: frame timestamp is after GStreamer pull/map/convert, not sensor exposure; raw Gst PTS has a different clock domain",
+                "time_reference": "Host perf_counter: frame timestamp is after backend read, not sensor exposure; raw Gst PTS (when present) has a different clock domain",
                 "sample_scope": "Stage distributions cover the latest processed frames only; capture FPS counts all reads. PLC write completion is not motor acknowledgement.",
                 "camera": None if info is None else {
                     "device": info.device,
@@ -486,12 +486,12 @@ def main():
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
-    parser.add_argument("--camera-device", default=None, help="相机设备路径，例如 /dev/video2；默认自动选择")
+    parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正（必须同时 --disable-homography）")
     parser.add_argument("--disable-homography", action="store_true", help="关闭 Homography，回退到旧 ROI 线性映射（调试用）")
-    parser.add_argument("--roi", type=int, nargs=4, default=(350, 0, 580, 650), metavar=("X", "Y", "W", "H"))
+    parser.add_argument("--roi", type=int, nargs=4, default=(4, 10, 1216, 710), metavar=("X", "Y", "W", "H"))
     parser.add_argument("--lower", type=int, nargs=3, default=(170, 100, 80), metavar=("C1", "C2", "C3"))
     parser.add_argument("--upper", type=int, nargs=3, default=(10, 255, 255), metavar=("C1", "C2", "C3"))
 
