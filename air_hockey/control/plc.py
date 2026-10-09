@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 import ctypes
-from importlib.metadata import version
 import queue
 import struct
 import threading
@@ -19,16 +18,17 @@ from air_hockey import core_config
 
 try:
     import snap7
-    # ponytail: 固定 1.3 的原生 BIT ABI；升级绑定时重验按位写入与 Python 3.8 支持。
-    if version("python-snap7") != "1.3":
-        raise ImportError("unsupported python-snap7 binding")
-    from snap7.types import Areas, WordLen
-    from snap7.common import check_error
+    try:
+        from snap7.type import Areas, WordLen
+    except ModuleNotFoundError as exc:
+        if exc.name != "snap7.type":
+            raise
+        from snap7.types import Areas, WordLen
     SNAP7_ERROR = ""
 except ImportError as exc:
     snap7 = None
     Areas = None
-    SNAP7_ERROR = f"PLC requires python-snap7==1.3 (native synchronous BIT writes): {exc}"
+    SNAP7_ERROR = f"PLC 无法加载 python-snap7：{exc}"
 
 HAS_SNAP7 = snap7 is not None
 
@@ -150,6 +150,7 @@ class PLCInterface:
         self._last_phys_y = None
         self.last_send_state = "unknown"
         self.last_buffer_mode = None
+        self.last_error = ""
         self._multi_read_failed = False
         self.round_trips = 0
 
@@ -158,7 +159,9 @@ class PLCInterface:
         return self._connected
 
     def connect(self, quiet=False):
+        self.last_error = ""
         if not HAS_SNAP7:
+            self.last_error = SNAP7_ERROR
             if not quiet:
                 print(f"[PLC] {SNAP7_ERROR}")
             return False
@@ -173,6 +176,7 @@ class PLCInterface:
             self.heartbeat_state = False
             return True
         except Exception as exc:
+            self.last_error = str(exc)
             if not quiet:
                 print(f"[PLC] 连接失败: {exc}")
             self.disconnect()
@@ -194,13 +198,27 @@ class PLCInterface:
         return True
 
     def _write_bool(self, db, offset, bit, value):
-        data = ctypes.c_uint8(bool(value))
         self.round_trips += 1
         try:
-            result = self._client._library.Cli_WriteArea(
-                self._client._pointer, Areas.DB.value, db, offset * 8 + bit,
-                1, WordLen.Bit.value, ctypes.byref(data))
-            check_error(result, context="client")
+            library = getattr(self._client, "_lib", None) or getattr(self._client, "_library", None)
+            if library is None:
+                request = bytearray(self._client.protocol.build_write_request(
+                    Areas.DB, db, offset * 8 + bit, WordLen.Bit, bytes([bool(value)])))
+                # ponytail: 3.0 错把 1 位编码成 8 位；升级协议接口时重验封包与应答。
+                data_start = 10 + struct.unpack_from(">H", request, 6)[0]
+                struct.pack_into(">H", request, data_start + 2, 1)
+                response = self._client._send_receive(request)
+                self._client.protocol.check_write_response(response)
+            else:
+                pointer = getattr(self._client, "_s7_client", None) or getattr(self._client, "_pointer", None)
+                if pointer is None:
+                    raise RuntimeError("Snap7 native client handle is unavailable")
+                data = ctypes.c_uint8(bool(value))
+                result = library.Cli_WriteArea(
+                    pointer, Areas.DB.value, db, offset * 8 + bit,
+                    1, WordLen.Bit.value, ctypes.byref(data))
+                if result != 0:
+                    raise RuntimeError(self._client.error_text(result))
         except Exception:
             self._connected = False
             raise
@@ -597,6 +615,8 @@ class PLCLink:
             self._echo_change_at = now
             self._echo_seen = False
             self._messages.put("PLC 已重新连接" if was_connected else "PLC 已连接")
+        elif self._requires_snap7:
+            self._messages.put(f"PLC 连接失败：{self._client.last_error}")
 
     def _publish(self, status):
         now = time.monotonic()

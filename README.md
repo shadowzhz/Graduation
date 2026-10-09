@@ -124,9 +124,9 @@ python3 main.py --sim --plc 192.168.0.64          # 仿真游戏/实机轴反馈
 
 **实机使用前提**：确认设备区域安全、硬件急停有效、TIA DB 布局匹配，完成相机内参与球台四点标定；不要用 `--disable-homography` / `--disable-undistort` 驱动实机。连接本身不使能轴；图形界面 E/「轴使能」、H/「轴回零」、C/「轴复位」由现场操作员操作。按 H 或 C 时停止游戏目标；操作完成、轴状态恢复后需重新按 E 授权，仿真游戏还需手动继续。PLC 响应异常、轴未就绪、心跳超时和反馈失效时禁止下发；断线重连也需重新人工使能。机械限位和急停仍由 PLC/硬件负责，软件限幅不能替代。`--headless --plc` 无现场轴使能按钮，不用于首次联调。
 
-**现场安全边界**：视觉计划性抽帧仍可预测目标；一次实际检测漏检后立即停止刷新 PLC 目标，重新检测到冰壶才恢复。所有上位机控制位改用原生同步 S7 BIT 写入，不再读改写整个共享字节，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`，成功后单独置 `DB1.56.0`；DB 地址不变。连接必须先成功初始化心跳位并清除直线触发位，才允许后续授权。单个位原子写入不等于整组命令原子完成，部分失败不能撤回 PLC 已接受的位；仍须现场验证 PLC 扫描、触发脉宽和独立失联停止。软件暂停只清除后续目标，不能撤销已经进入网络发送过程的运动指令，**不得作为急停使用**。
+**现场安全边界**：视觉计划性抽帧仍可预测目标；一次实际检测漏检后立即停止刷新 PLC 目标，重新检测到冰壶才恢复。所有上位机控制位采用同步 S7 BIT 写入，不再读改写整个共享字节，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`，成功后单独置 `DB1.56.0`；DB 地址不变。连接必须先成功初始化心跳位并清除直线触发位，才允许后续授权。单个位原子写入不等于整组命令原子完成，部分失败不能撤回 PLC 已接受的位；仍须现场验证 PLC 扫描、触发脉宽和独立失联停止。软件暂停只清除后续目标，不能撤销已经进入网络发送过程的运动指令，**不得作为急停使用**。
 
-PLC 模式固定使用与 Python 3.8 兼容的 `python-snap7==1.3` 及平台对应的 Snap7 原生库，其他绑定版本明确拒绝连接；离线测试不需要 Snap7。该绑定导入时还需要 `pkg_resources`，由系统 `python3-setuptools` 或兼容的 setuptools 提供。pip 环境安装：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。依赖缺失会报告实际导入错误并拒绝连接。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不是 Python `db_write()` 的整字节写入。
+PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在 Windows 或实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
 
 常用参数：`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。
 

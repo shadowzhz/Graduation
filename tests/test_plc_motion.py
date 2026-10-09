@@ -14,15 +14,10 @@ from air_hockey.control.plc import PLCInterface, PLCLink
 
 @contextmanager
 def memory_binding():
-    def check_error(result, context):
-        assert context == "client"
-        if result:
-            raise RuntimeError("native BIT write failed: %s" % result)
-
     with patch.multiple(protocol,
                         Areas=SimpleNamespace(DB=SimpleNamespace(value=0x84)),
                         WordLen=SimpleNamespace(Bit=SimpleNamespace(value=0x01)),
-                        check_error=check_error, HAS_SNAP7=True,
+                        HAS_SNAP7=True,
                         snap7=SimpleNamespace(client=SimpleNamespace(Client=MemoryS7)),
                         create=True):
         yield
@@ -46,11 +41,17 @@ class MemoryS7:
         self.echo = True
 
     def Cli_WriteArea(self, pointer, area, db, start, amount, wordlen, buffer):
-        assert pointer is self._pointer
+        assert pointer is (getattr(self, "_s7_client", None) or self._pointer)
         assert area == protocol.Areas.DB.value
         assert amount == 1 and wordlen == protocol.WordLen.Bit.value
+        value = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint8))[0]
+        return self.write_area(protocol.Areas.DB, db, start, bytearray([value]), protocol.WordLen.Bit)
+
+    def write_area(self, area, db, start, data, word_len):
+        assert area is protocol.Areas.DB and word_len is protocol.WordLen.Bit
+        assert len(data) == 1
         offset, bit = divmod(start, 8)
-        value = bool(ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint8))[0])
+        value = bool(data[0])
         self.operations.append(("bit", db, offset, bit, value))
         if self.before_bit is not None:
             self.before_bit(db, offset, bit, value)
@@ -66,6 +67,9 @@ class MemoryS7:
             self.moves.append(self.pending_payload)
             self.pending_payload = None
         return 0
+
+    def error_text(self, result):
+        return "BIT write failed: %s" % result
 
     def connect(self, ip, rack, slot):
         self.connected = True
@@ -88,6 +92,46 @@ class MemoryS7:
     def read_multi_vars(self, items):
         return 0, [self.db[item["db_number"]][item["start"]:item["start"] + item["size"]]
                    for item in items]
+
+
+class ModernMemoryS7(MemoryS7):
+    def __init__(self):
+        super().__init__()
+        self._lib, self._s7_client = self._library, self._pointer
+        del self._library, self._pointer
+
+
+class PureMemoryS7(MemoryS7):
+    def __init__(self):
+        super().__init__()
+        del self._library, self._pointer
+        self.protocol = SimpleNamespace(
+            build_write_request=self.build_write_request,
+            check_write_response=self.check_write_response)
+
+    def build_write_request(self, area, db, start, word_len, data):
+        assert area is protocol.Areas.DB and word_len is protocol.WordLen.Bit
+        request = bytearray(29)
+        struct.pack_into(">BBHHHH", request, 0, 0x32, 1, 0, 1, 14, 5)
+        request[10:16] = bytes.fromhex("0501120a1001")
+        struct.pack_into(">HHB", request, 16, 1, db, area.value)
+        request[21:24] = start.to_bytes(3, "big")
+        request[25] = 3
+        struct.pack_into(">H", request, 26, 8)
+        request[28] = data[0]
+        return bytes(request)
+
+    def _send_receive(self, request):
+        if struct.unpack_from(">H", request, 26)[0] != 1:
+            return {"result": 7}
+        db = struct.unpack_from(">H", request, 18)[0]
+        start = int.from_bytes(request[21:24], "big")
+        result = self.write_area(protocol.Areas.DB, db, start, request[28:], protocol.WordLen.Bit)
+        return {"result": result}
+
+    def check_write_response(self, response):
+        if response["result"]:
+            raise RuntimeError(self.error_text(response["result"]))
 
 
 class MemoryPLC(PLCInterface):
@@ -497,6 +541,41 @@ def test_production_connection_probes_native_bits_before_accepting_motion():
                 client.disconnect()
     finally:
         protocol.snap7.client.Client = factory
+
+
+@memory_binding()
+def test_connection_and_motion_preserve_other_bits_with_modern_clients():
+    for factory in (ModernMemoryS7, PureMemoryS7):
+        transport = factory()
+        transport.db[1][0] = 0x0D
+        transport.db[18][0] = 0x18
+        with patch.object(protocol.snap7.client, "Client", return_value=transport):
+            client = PLCInterface("memory")
+            try:
+                assert client.connect(quiet=True)
+                assert transport.db[18][0] == 0x18
+                assert client.enable_axes()
+                assert transport.db[1][0] == 0xCD
+                assert client.send_linear_move(300, 180)
+                assert transport.db[1][56] == 0x03
+                client.clear_trigger()
+                assert transport.db[1][56] == 0x02
+                assert client.disable_axes()
+                assert transport.db[1][0] == 0x0D
+                assert struct.unpack_from(">d", transport.moves[0])[0] == client.game_to_physical(300, 180)[0]
+            finally:
+                client.disconnect()
+        transport = factory()
+        transport.fail_bit = (18, 0, 0, False)
+        with patch.object(protocol.snap7.client, "Client", return_value=transport):
+            client = PLCInterface("memory")
+            try:
+                assert not client.connect(quiet=True)
+                assert not client.connected
+                assert not client.send_linear_move(300, 180)
+                assert transport.moves == []
+            finally:
+                client.disconnect()
 
 
 @memory_binding()
