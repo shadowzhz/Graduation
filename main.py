@@ -74,7 +74,7 @@ def run_game(plc_ip=None, plc_rate=30.0):
     command = [sys.executable, str(SIM_ROOT / "air_hockey.py")]
     if plc_ip:
         command.extend(("--plc", plc_ip, "--plc-rate", str(plc_rate)))
-    subprocess.run(command, cwd=str(SIM_ROOT))
+    raise SystemExit(subprocess.run(command, cwd=str(SIM_ROOT)).returncode)
 
 
 def encode_preview_ppm(result, table_roi, camera_geometry):
@@ -175,12 +175,6 @@ def run_vision(args):
     processing_failure = [None]
 
     recorder = None
-    if args.record:
-        recorder = RuntimeRecorder(
-            args.record,
-            source="runtime",
-            meta={"mode": "headless" if headless else "display"},
-        )
 
     table_calibration_file = None if args.disable_homography else args.table_calibration
     if table_calibration_file is not None and not Path(table_calibration_file).is_file():
@@ -214,10 +208,19 @@ def run_vision(args):
     camera = CameraManager()
     try:
         camera.start()
+        if args.record:
+            recorder = RuntimeRecorder(
+                args.record,
+                source="runtime",
+                meta={"mode": "headless" if headless else "display"},
+            )
     except Exception as exc:
-        if window is not None:
-            window.close()
-        raise SystemExit(f"摄像头启动失败：{exc}")
+        try:
+            camera.stop()
+        finally:
+            if window is not None:
+                window.close()
+        raise SystemExit(f"实时运行启动失败：{exc}") from exc
 
     plc = None
     plc_adapter = PlcControlAdapter() if args.plc else None

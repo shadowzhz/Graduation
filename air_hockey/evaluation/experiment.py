@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -31,10 +32,10 @@ class ExperimentConfig:
             raise ValueError("runs must be positive")
         if self.steps <= 0:
             raise ValueError("steps must be positive")
-        if self.dt <= 0.0:
-            raise ValueError("dt must be positive")
-        if self.position_noise < 0.0:
-            raise ValueError("position_noise must be non-negative")
+        if not math.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError("dt must be finite and positive")
+        if not math.isfinite(self.position_noise) or self.position_noise < 0.0:
+            raise ValueError("position_noise must be finite and non-negative")
 
     def to_dict(self) -> dict:
         return {

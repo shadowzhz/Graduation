@@ -23,7 +23,6 @@ def parse_args():
     p.add_argument('--fps', type=float, default=200)
     p.add_argument('--detect-fps', type=float, default=5)
     p.add_argument('--samples', type=int, default=20)
-    p.add_argument('--auto', action='store_true')
     p.add_argument('--output', default='calibration/camera_calibration.npz')
     return p.parse_args()
 
@@ -37,22 +36,26 @@ def main():
     print(f'目标样本: {args.samples}')
 
     last_detect = 0
-    corners = None
-    frame_img = None
+    last_sequence = None
     last_center = None
 
-    camera.start()
     try:
+        camera.start()
         cv2.namedWindow('Calibration', cv2.WINDOW_NORMAL)
         while True:
+            error = camera.error
+            if error is not None:
+                raise RuntimeError(f'相机标定采集失败: {error}') from error
+            if cv2.waitKey(1) & 0xff in (27, ord('q')):
+                break
             frame = camera.get_latest_frame()
-            if frame is not None:
-                frame_img = frame.image.copy()
-
-            if frame_img is None:
+            if frame is None or frame.sequence == last_sequence:
                 continue
+            last_sequence = frame.sequence
+            frame_img = frame.image.copy()
 
             now = time.monotonic()
+            corners = None
             if now - last_detect > 1 / args.detect_fps:
                 corners = calibrator.detect(frame_img)
                 last_detect = now
@@ -64,7 +67,7 @@ def main():
             cv2.putText(view, f'Samples {calibrator.sample_count}/{args.samples}', (20,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
             cv2.imshow('Calibration', view)
 
-            if corners is not None and (args.auto or True):
+            if corners is not None:
                 center = corners.mean(axis=0)[0]
                 if last_center is None or ((center-last_center)**2).sum() > 500:
                     if calibrator.add_sample(frame_img, corners):
@@ -80,8 +83,6 @@ def main():
                 print(f'完成 RMS={result.rms}, error={result.reprojection_error}')
                 break
 
-            if cv2.waitKey(1) & 0xff in (27, ord('q')):
-                break
     finally:
         camera.stop()
         cv2.destroyAllWindows()
