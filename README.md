@@ -136,6 +136,8 @@ python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 
 ### 单回合现场联调（先观察，再运动）
 
+检测调度保留每 3 帧一次，但距上次 detector 调用达到 80 ms 时在下一可用帧补检测；约 10 FPS 时每帧都检测，不再等三帧。时间按实际 frame timestamp 计算，检测成功与漏检都会更新调度时钟，predict 帧仍不计确认 hits。这避免低帧率下冰壶已离开旧动态 ROI、反复换 ID 并使估计速度归零；不会提高摄像头实际采集 FPS，也不能保证高速球在相邻图像间仍可关联。
+
 实时模式现在只做基础挡球/回击：上半场是机器侧，`vy < -25` 为来球；READY 复用原 AI HOME `(300, 139.52)`。只有确认轨迹的真实检测、有效新鲜状态及 READY 到位才启动防守；慢速抖动、候选轨迹和 outgoing 不启动。用预测轨迹第一次向上的 `y=184.52` 前接触线交点确定横向位置，球槌保持 `y=139.52`，不追预测终点。到达时间采用路径长度/速度上界的保守估计（扣除状态年龄），不是采样点序号推算；新移动需比估计到达时间早 85 ms。已经覆盖拦截点则保持，不在接触前因时间裕量不足撤位。
 
 回球确认要求近期观测/观测线段靠近实际球槌（接触距离 45 + 容差 14），随后至少两次不同时间戳的真实检测持续 `vy > 25`，跨度至少 40 ms、向人方位移至少 7；predict 帧不计数，反向/低速硬检测会重置计数。确认前只保持已到位的拦截位置（未到位则清目标），不追 outgoing，也不因单帧符号变化撤位；RETURNED 才立即请求 READY。实机回位须新鲜实际反馈、非 busy、距 READY ≤14；反馈失效不会靠计时假装回位成功。5 秒未返回、丢失/换 ID 或穿过防守线判失败并回位；下次须旧轨迹失效、新确认 ID，或再次从人方半场入射。
@@ -159,6 +161,8 @@ Windows 用现场已有 Python 环境，将 `python3` 改为 `python`、相机�
 B 连续观察 10 球；若要检查 RETURNED，在轴禁止运动并确认硬件安全后使用被动挡板/手动回球，不能把 dry-run 当作球槌已经击球。C 使用可靠隔离/接球装置防止实际接触，核对预测点、时间与实际位置；D 去除装置后只试一次真实接触；E 完成返回→回位→READY；F 不重启连续 10 次。每次转换打印原因，GUI/周期控制台显示 confirmed、方向、速度、拦截点、到达时间下界、球槌旅行时间、目标、实际位置及 PLC armed/safe。
 
 控制台/退出输出 `incoming_detected / defense_entered / intercept_attempted / successful_return / failed_intercept / recovered`；前两个是已接受的确认来球/防守次数，attempted 是可达请求，不是电机到位，returned 是视觉返回证据，不是碰撞传感器证明。`--record` 的 `plc_request` 也是请求而非执行确认，meta 标明 `dry_run / live / no_plc`。状态转换/计数保存在控制台，需持久保存可用终端日志或 Linux `| tee rally-console.log`。
+
+回合阻断原因、追踪 ID/状态或 PLC armed/safe 发生变化时立即打印，不再只靠五秒一次的周期状态。该行包含 track ID、hits、hard_hit、冰壶 table 位置/速度、frame_age_ms 和 plc_busy，可捕获一次来球中的短暂掉轨、方向错误、未回 READY 或不可达；不是每帧刷日志。若打球时坐标与速度仍不变，先看绿色检测标记是否确实跟随冰壶，不能仅凭停球后的 WAITING 截图判断来球阶段。
 
 故障归类：无 track→Detection；tentative/lost→Tracker；速度方向不符→Direction；无交点/状态不匹配→Predictor/intercept；`reachable=False`→Unreachable；`armed=False`→PLC authorization；实际位置赶不上且旅行时间超过到达时间→Motion too slow；A 的方向/坐标不符→Mapping；5 秒未确认返回→Return detection/missed intercept；回位超过 5 秒或反馈失效→Recovery。先定位阶段，不调 estimator/物理参数；本版不保证回击角度、复杂进攻、高难度来球或门柱特殊碰撞。
 

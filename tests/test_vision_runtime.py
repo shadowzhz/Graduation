@@ -19,8 +19,11 @@ import numpy as np
 
 from air_hockey import core_config as core
 from air_hockey.ai import AIDecision, AirHockeyAI
+from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
 from air_hockey.app.vision_runtime import AI_HOME_Y, VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
+from air_hockey.control import PlcControlAdapter
+from air_hockey.control.plc import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
 from game_state import CurlingState, GameState, StoneState
 from air_hockey.vision.tracker import StoneTracker
@@ -408,6 +411,55 @@ def test_vision_runtime_without_detection():
     assert result.trajectory is None
     assert result.ai_target is None
     assert result.ai_decision is None
+
+
+def test_low_fps_moving_puck_keeps_identity_and_requests_intercept():
+    from main import submit_rally_target
+
+    runtime = VisionRuntime(
+        table_roi=(0, 0, 1280, 720), table_calibration_file=None, disable_undistort=True,
+    )
+    controller = RallyController(hardware=True)
+    adapter = PlcControlAdapter()
+    identities = []
+    interceptions = []
+    for sequence, y in enumerate((600, 600, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150), 1):
+        timestamp = 10.0 + (sequence - 1) * 0.1
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.circle(image, (900, y), 30, (0, 0, 255), -1)
+        result = runtime.process_frame(Frame(image, timestamp=timestamp, sequence=sequence))
+        identities.append(result.track.track_id)
+        if sequence == 1:
+            assert result.track.state == TrackState.TENTATIVE and not result.track_confirmed
+        else:
+            assert result.track.state == TrackState.ACTIVE and result.track_confirmed
+        feedback = PLCFeedback(stamp=timestamp, valid=True, x=READY_POSITION[0], y=READY_POSITION[1])
+        result.rally = controller.update(result, now=timestamp + 0.001, feedback=feedback)
+        request = submit_rally_target(result, adapter, None)
+        if result.rally.state == RallyState.DEFENDING and result.rally.reachable:
+            assert result.curling_state.vy < -25
+            assert request.target_y == READY_POSITION[1]
+            assert request.target_x > READY_POSITION[0] + core.MALLET_RADIUS
+            interceptions.append(request)
+    assert set(identities) == {1}
+    assert {(round(request.target_x, 2), request.target_y) for request in interceptions} == {(407.25, READY_POSITION[1])}
+    assert controller.counters["intercept_attempted"] == 1
+    assert controller.counters["defense_entered"] == 1
+
+
+def test_low_fps_real_miss_revokes_candidate_confirmation():
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+    states = []
+    confirmed = []
+    for sequence, visible in enumerate((True, False, True, True), 1):
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        if visible:
+            cv2.circle(image, (640, 360), 30, (0, 0, 255), -1)
+        result = runtime.process_frame(Frame(image, timestamp=1.0 + (sequence - 1) * 0.1))
+        states.append(result.track.state)
+        confirmed.append(result.track_confirmed)
+    assert states == [TrackState.TENTATIVE, TrackState.LOST, TrackState.TENTATIVE, TrackState.ACTIVE]
+    assert confirmed == [False, False, False, True]
 
 
 def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():

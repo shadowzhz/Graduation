@@ -29,7 +29,7 @@ import cv2
 import tkinter as tk
 
 from air_hockey.app.renderer import format_status, render_preview
-from air_hockey.app.vision_runtime import VisionRuntime
+from air_hockey.app.vision_runtime import MAX_DETECTION_GAP, VisionRuntime
 from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
 from air_hockey.camera import CameraConfig, CameraManager
 from air_hockey.control import PLCLink, PlcControlAdapter
@@ -273,7 +273,8 @@ def run_vision(args):
             f"@ {info.negotiated_fps:g} FPS ({info.source_format} -> {info.output_format}); "
             "实际采集速度以帧计数为准"
         )
-    print(f"视觉管线：最新帧 + 每 {runtime.detection_interval} 帧检测，其余帧使用 tracker 预测")
+    print(f"视觉管线：最新帧 + 每 {runtime.detection_interval} 帧检测；"
+          f"距上次检测超过 {MAX_DETECTION_GAP * 1000:g} ms 时在下一可用帧补检测，其余帧使用 tracker 预测")
     print(f"Rally: READY={READY_POSITION}, mallet-speed estimate={args.mallet_speed:g} table units/s; "
           f"{'DRY-RUN：仅观察，不发送运动/使能/回零/复位' if args.dry_run else '轴运动仍需人工 E 授权'}")
     print("无 PLC 时球槌为 software fallback；--mallet-speed 不是 PLC 速度设置，需现场实测。")
@@ -292,6 +293,7 @@ def run_vision(args):
     def processing_loop():
         """处理线程：取最新帧 -> VisionRuntime 处理 -> 保存最新 VisionResult 与状态。"""
         last_sequence = -1
+        last_gate = None
         stats_timer = time.perf_counter()
 
         window_closed = (lambda: window.closed) if window is not None else (lambda: False)
@@ -332,10 +334,6 @@ def run_vision(args):
                 plc_request = submit_rally_target(result, plc_adapter, plc, dry_run=args.dry_run)
                 if samples is not None:
                     samples.add("plc_prepare_submit_ms", (time.perf_counter() - plc_prepare_start) * 1000.0)
-                for transition in result.rally.transitions:
-                    print(f"[rally] {transition} | target={result.rally.target} "
-                          f"| intercept ETA lower bound={result.rally.time_to_intercept} | {rally.counters}")
-
                 if recorder is not None:
                     recorder.record(result, ai_decision=decision, plc_request=plc_request)
 
@@ -345,11 +343,14 @@ def run_vision(args):
                 )
                 if args.dry_run:
                     status_text += " | DRY-RUN: motion blocked"
+                plc_gate = None
                 if plc is not None:
                     safe = (feedback is not None and PLCLink._motion_safe(feedback)
                             and 0 <= time.monotonic() - feedback.stamp <= TARGET_MAX_AGE
                             and plc.connected)
-                    status_text += f" | PLC armed={plc.armed} safe={safe}"
+                    armed = plc.armed
+                    plc_gate = armed, safe
+                    status_text += f" | PLC armed={armed} safe={safe}"
                     if (not plc.connected or feedback is None or not feedback.valid
                             or time.monotonic() - feedback.stamp > TARGET_MAX_AGE):
                         status_text += " | PLC 未连接/反馈失效：禁止运动"
@@ -359,10 +360,22 @@ def run_vision(args):
                         status_text += f" | PLC 轴报警 {feedback.kinematics_error} / 停止位 {feedback.group_stop}：禁止运动"
                     elif not feedback.axes_ready or not feedback.plc_echo_ok or feedback.comm_lost:
                         status_text += " | PLC 轴未就绪或心跳异常：禁止运动"
-                    elif not plc.armed:
+                    elif not armed:
                         status_text += " | PLC 未授权：请现场按 E 使能"
                     else:
                         status_text += f" | PLC 实际位置 ({feedback.x:.0f},{feedback.y:.0f})"
+                track = result.track
+                track_key = None if track is None else (track.track_id, track.state)
+                gate = result.rally.state, result.rally.reason, track_key, plc_gate
+                if gate != last_gate:
+                    track_text = "none" if track is None else f"{track.track_id}/{track.state.value} hits={track.hits}"
+                    position = None if result.curling_state is None else tuple(round(v, 1) for v in result.curling_state.position)
+                    prefix = "; ".join(result.rally.transitions) or "gate changed"
+                    print(f"[rally] {prefix} | {status_text} | track={track_text} "
+                          f"hard_hit={result.detection is not None} puck={position} "
+                          f"frame_age_ms={(time.perf_counter() - frame.timestamp) * 1000:.1f} "
+                          f"plc_busy={None if feedback is None else feedback.busy} | counters={rally.counters}")
+                    last_gate = gate
                 if not headless:
                     with preview_lock:
                         shared["result"] = result
