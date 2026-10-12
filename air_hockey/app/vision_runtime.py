@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .rally import RallyDecision
 
 DETECTION_INTERVAL = 3
+MAX_DETECTION_GAP = 0.08
 AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
 
 
@@ -124,6 +125,7 @@ class VisionRuntime:
             self.camera_geometry = self.vision_pipeline.geometry
 
         self.last_timestamp = None
+        self._last_detection_timestamp = None
         self._kalman_track_id = None
         self.frame_index = 0
         self.display_fps = 0.0
@@ -171,7 +173,9 @@ class VisionRuntime:
         detection = None
         t_detect_start = time.perf_counter()
 
-        if self.frame_index == 1 or self.frame_index % self.detection_interval == 0:
+        if (self._last_detection_timestamp is None
+                or self.frame_index % self.detection_interval == 0
+                or now - self._last_detection_timestamp >= MAX_DETECTION_GAP):
             dynamic_roi = None
             box_size = 140
 
@@ -185,6 +189,7 @@ class VisionRuntime:
                 dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
 
             detection = self.detector.detect(processed_frame, dynamic_roi=dynamic_roi)
+            self._last_detection_timestamp = now
             detected_ms = (time.perf_counter() - t_detect_start) * 1000
             self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
             if self.profile:
