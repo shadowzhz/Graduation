@@ -171,10 +171,10 @@ class VisionWindow:
 
 
 def submit_rally_target(result, adapter, plc, *, dry_run=False):
-    """READY 不依赖冰壶；动态拦截保留 confirmed/AI/state 资格。"""
+    """直接发布防守/击球意图，PLCLink 仍负责人工授权和实机互锁。"""
     rally = result.rally
     if (rally is None or rally.target is None or
-            (rally.state == RallyState.DEFENDING and
+            (rally.state in (RallyState.DEFENDING, RallyState.ATTACKING) and
              (not result.track_confirmed or result.ai_decision is None or result.curling_state is None))):
         if plc is not None:
             plc.clear_target()
@@ -242,9 +242,8 @@ def run_vision(args):
             recorder = RuntimeRecorder(
                 args.record,
                 source="runtime",
-                meta={"mode": "headless" if headless else "display", "control": "single_rally",
-                      "plc_mode": "dry_run" if args.dry_run else "live" if args.plc else "no_plc",
-                      "mallet_speed_estimate": args.mallet_speed},
+                meta={"mode": "headless" if headless else "display", "control": "direct_play",
+                      "plc_mode": "dry_run" if args.dry_run else "live" if args.plc else "no_plc"},
             )
     except Exception as exc:
         try:
@@ -256,7 +255,7 @@ def run_vision(args):
 
     plc = None
     plc_adapter = PlcControlAdapter()
-    rally = RallyController(mallet_speed=args.mallet_speed, hardware=bool(args.plc and not args.dry_run))
+    rally = RallyController()
     if args.plc:
         plc = PLCLink(args.plc, period=1.0 / args.plc_rate)
         plc.start()
@@ -275,9 +274,9 @@ def run_vision(args):
         )
     print(f"视觉管线：最新帧 + 每 {runtime.detection_interval} 帧检测；"
           f"距上次检测超过 {MAX_DETECTION_GAP * 1000:g} ms 时在下一可用帧补检测，其余帧使用 tracker 预测")
-    print(f"Rally: READY={READY_POSITION}, mallet-speed estimate={args.mallet_speed:g} table units/s; "
+    print(f"Direct play: READY={READY_POSITION}; 检测到就防守/击球，不等二次确认；"
           f"{'DRY-RUN：仅观察，不发送运动/使能/回零/复位' if args.dry_run else '轴运动仍需人工 E 授权'}")
-    print("无 PLC 时球槌为 software fallback；--mallet-speed 不是 PLC 速度设置，需现场实测。")
+    print("机器半场主动击球/回收，真人半场准备防守；无 PLC 时球槌为 software fallback。")
     print("视觉校正:")
     print(f"  camera calibration: {args.calibration}")
     print(f"  undistort: {'OFF' if args.disable_undistort else 'ON'}")
@@ -329,7 +328,8 @@ def run_vision(args):
 
                 # PLC 只接收 AI 半场目标；轴反馈在本帧 AI 计算前更新。
                 decision = result.ai_decision
-                result.rally = rally.update(result, now=time.perf_counter(), feedback=feedback)
+                result.rally = rally.update(result, now=time.perf_counter(), feedback=feedback,
+                                            mallet_position=runtime.ai_current_pos)
                 plc_prepare_start = time.perf_counter() if samples is not None else 0.0
                 plc_request = submit_rally_target(result, plc_adapter, plc, dry_run=args.dry_run)
                 if samples is not None:
@@ -368,13 +368,13 @@ def run_vision(args):
                 track_key = None if track is None else (track.track_id, track.state)
                 gate = result.rally.state, result.rally.reason, track_key, plc_gate
                 if gate != last_gate:
-                    track_text = "none" if track is None else f"{track.track_id}/{track.state.value} hits={track.hits}"
+                    track_text = "none" if track is None else f"{track.track_id}/{track.state.value}"
                     position = None if result.curling_state is None else tuple(round(v, 1) for v in result.curling_state.position)
                     prefix = "; ".join(result.rally.transitions) or "gate changed"
                     print(f"[rally] {prefix} | {status_text} | track={track_text} "
                           f"hard_hit={result.detection is not None} puck={position} "
                           f"frame_age_ms={(time.perf_counter() - frame.timestamp) * 1000:.1f} "
-                          f"plc_busy={None if feedback is None else feedback.busy} | counters={rally.counters}")
+                          f"plc_busy={None if feedback is None else feedback.busy}")
                     last_gate = gate
                 if not headless:
                     with preview_lock:
@@ -385,7 +385,7 @@ def run_vision(args):
                 stats_interval = 1.0 if headless else STATS_INTERVAL
                 if time.perf_counter() - stats_timer >= stats_interval:
                     stats_timer = time.perf_counter()
-                    print(f"[rally] {status_text} | counters={rally.counters}")
+                    print(f"[rally] {status_text}")
                     capture = camera.get_stats()
                     track_state = result.track.state.value if result.track else "none"
                     if headless:
@@ -466,7 +466,6 @@ def run_vision(args):
         pass
     finally:
         stop.set()
-        print(f"[rally] session counters (observed/requested, not contact-sensor proof): {rally.counters}")
         if plc is not None:
             plc.clear_target()
             if not plc.stop():
@@ -531,7 +530,6 @@ def main():
     parser.add_argument("--perf-json", default=None, metavar="PATH", help="退出时保存最近 4096 样本的阶段耗时分布")
     parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
     parser.add_argument("--dry-run", action="store_true", help="完整回合影子运行：显示/记录请求目标，不发送 PLC 运动或现场轴命令")
-    parser.add_argument("--mallet-speed", type=float, default=500.0, metavar="PX_PER_SEC", help="球槌可达性速度估计（场地逻辑单位/秒；默认 500，非 PLC 轴速度设置）")
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
@@ -546,8 +544,6 @@ def main():
 
     args = parser.parse_args()
 
-    if not math.isfinite(args.mallet_speed) or args.mallet_speed <= 0:
-        parser.error("--mallet-speed 必须为有限正数（场地逻辑单位/秒）")
     if args.sim and args.dry_run:
         parser.error("--dry-run 只适用于实时视觉回合；仿真不接受该安全开关")
 

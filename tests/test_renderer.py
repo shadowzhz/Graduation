@@ -99,10 +99,6 @@ def _assert_requested_target(preview_width, rally_present, rally_target):
             direction="incoming",
             mallet_position=(300.0, 100.0),
             mallet_source="software",
-            intercept=(150.0, 180.0),
-            time_to_intercept=0.5,
-            time_to_mallet=0.2,
-            reachable=True,
         )
     geometry = MockGeometry()
     roi = (5, 50, 580, 340)

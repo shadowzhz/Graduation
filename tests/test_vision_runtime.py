@@ -5,7 +5,6 @@ frame -> detection -> track -> table StoneState -> predictor -> AI
 """
 
 from contextlib import ExitStack
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -36,13 +35,18 @@ class MockDetector:
     def __init__(self, detections):
         self._detections = list(detections)
         self._index = 0
+        self._frame = None
+        self._cached = None
 
     def detect(self, frame, dynamic_roi=None):
+        if self._frame is frame:
+            return self._cached
+        self._frame = frame
+        self._cached = None
         if self._index < len(self._detections):
-            det = self._detections[self._index]
+            self._cached = self._detections[self._index]
             self._index += 1
-            return det
-        return None
+        return self._cached
 
 
 class CountingPredictor(TrajectoryPredictor):
@@ -120,6 +124,8 @@ def test_vision_runtime_dataflow_track_to_ai():
 
     detector = MockDetector([det1, det2])
     runtime = VisionRuntime(
+        detection_interval=3,
+        tracker=StoneTracker(min_confirmed_hits=2),
         table_roi=(350, 0, 580, 650),
         calibration_file=str(CALIB_FILE),
         table_calibration_file=None,
@@ -196,7 +202,7 @@ def _assert_vision_runtime_threat_predicts_once(stone_y):
     assert result.prediction.source_state is result.curling_state
     assert isinstance(result.ai_decision, AIDecision)
     assert result.ai_target == (result.ai_decision.target_x, result.ai_decision.target_y)
-    assert abs(result.ai_decision.reaction_timer - (core.DIFFICULTIES["普通"].reaction_delay - 0.001)) < 1e-9
+    assert abs(result.ai_decision.reaction_timer + 0.001) < 1e-9
 
     baseline_ai = AirHockeyAI()
     baseline_ai._random.seed(120)
@@ -212,7 +218,7 @@ def _assert_vision_runtime_threat_predicts_once(stone_y):
         serve_phase="idle",
         stalled_stone_phase="idle",
         reaction_timer=0.0,
-        difficulty=replace(core.DIFFICULTIES["普通"], aim_error=0.0),
+        difficulty=runtime._ai_difficulty,
     )
     baseline = baseline_ai.update(baseline_state, 0.001)
     assert result.ai_target == (baseline.target_x, baseline.target_y)
@@ -247,9 +253,39 @@ def test_vision_runtime_threat_behind_ai_predicts_once():
     _assert_vision_runtime_threat_predicts_once(AI_HOME_Y - 50.0)
 
 
-def test_vision_runtime_does_not_confirm_single_detection():
+def test_default_runtime_accepts_and_moves_on_first_machine_half_detection():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    for x, y, vy in (
+        (260.0, 250.0, 0.0),
+        (260.0, core.RINK_CENTER_Y - 50.0, 100.0),
+        (core.RINK_CENTER_X, AI_HOME_Y - 30.0, 0.0),
+    ):
+        estimator = FixedKalman(x, y)
+        estimator.state = CurlingState(x, y, vx=0.0, vy=vy)
+        runtime = VisionRuntime(
+            table_calibration_file=None, disable_undistort=True, kalman=estimator,
+            detector=MockDetector([
+                Detection(center_x=500.0, center_y=300.0, radius=25.0,
+                          area=1960.0, timestamp=timestamp)
+                for timestamp in (1.0, 1.01)
+            ]),
+        )
+        result = runtime.process_frame(Frame(image, timestamp=1.0))
+        assert result.track.state == TrackState.ACTIVE and result.track_confirmed
+        assert result.ai_target != READY_POSITION
+        if y < AI_HOME_Y:
+            assert result.ai_decision.stalled_stone_phase == "sidestepping"
+            assert result.ai_target[1] == AI_HOME_Y
+        else:
+            assert result.ai_target == (x, y)
+        second = runtime.process_frame(Frame(image, timestamp=1.01))
+        assert second.detection is not None and second.track_confirmed
+
+
+def test_explicit_two_hit_tracker_keeps_first_detection_tentative():
     runtime = VisionRuntime(
         table_calibration_file=None, disable_undistort=True,
+        tracker=StoneTracker(min_confirmed_hits=2),
         detector=MockDetector([
             Detection(center_x=500.0, center_y=300.0, radius=25.0,
                       area=1960.0, timestamp=1.0),
@@ -262,9 +298,10 @@ def test_vision_runtime_does_not_confirm_single_detection():
     assert not result.track_confirmed
 
 
-def test_vision_runtime_confirms_after_second_hard_detection():
+def test_explicit_two_hit_tracker_confirms_on_detection_not_prediction():
     runtime = VisionRuntime(
         table_calibration_file=None, disable_undistort=True, detection_interval=3,
+        tracker=StoneTracker(min_confirmed_hits=2),
         detector=MockDetector([
             Detection(center_x=500.0, center_y=300.0, radius=25.0,
                       area=1960.0, timestamp=1.0),
@@ -286,7 +323,7 @@ def test_vision_runtime_confirms_after_second_hard_detection():
     assert [result.track_confirmed for result in results] == [False, False, True]
 
 
-def test_new_far_identity_revokes_confirmation():
+def test_new_far_identity_is_immediately_confirmed():
     detections = [
         Detection(center_x=x, center_y=300.0, radius=25.0, area=1960.0,
                   timestamp=1.0 + index * 0.033)
@@ -307,10 +344,8 @@ def test_new_far_identity_revokes_confirmation():
         states.append(result.track.state)
 
     assert identities == [1, 1, 2, 2]
-    assert states == [
-        TrackState.TENTATIVE, TrackState.ACTIVE, TrackState.TENTATIVE, TrackState.ACTIVE,
-    ]
-    assert [result.track_confirmed for result in results] == [False, True, False, True]
+    assert states == [TrackState.ACTIVE] * 4
+    assert [result.track_confirmed for result in results] == [True] * 4
 
 
 def test_vision_runtime_threat_outside_attack_zone_predicts_once():
@@ -380,7 +415,7 @@ def test_plc_track_confirmation_stops_on_missed_detection_and_recovers():
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     results = [runtime.process_frame(Frame(image=image, timestamp=1 + (i - 1) * 0.03, sequence=i))
                for i in range(1, 5)]
-    assert not results[0].track_confirmed
+    assert results[0].track_confirmed
     assert results[1].track_confirmed
     assert results[2].ai_decision is not None and not results[2].track_confirmed
     assert results[3].track_confirmed
@@ -409,45 +444,53 @@ def test_vision_runtime_without_detection():
     assert result.track is None
     assert result.stone_state is None
     assert result.trajectory is None
-    assert result.ai_target is None
+    assert result.ai_target == READY_POSITION
     assert result.ai_decision is None
 
 
-def test_low_fps_moving_puck_keeps_identity_and_requests_intercept():
+def test_low_fps_moving_puck_keeps_identity_and_pursues_ai_target():
     from main import submit_rally_target
 
     runtime = VisionRuntime(
         table_roi=(0, 0, 1280, 720), table_calibration_file=None, disable_undistort=True,
+        detection_interval=3,
     )
-    controller = RallyController(hardware=True)
+    controller = RallyController()
     adapter = PlcControlAdapter()
     identities = []
-    interceptions = []
+    active_targets = []
+    states = []
     for sequence, y in enumerate((600, 600, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150), 1):
         timestamp = 10.0 + (sequence - 1) * 0.1
         image = np.zeros((720, 1280, 3), dtype=np.uint8)
         cv2.circle(image, (900, y), 30, (0, 0, 255), -1)
         result = runtime.process_frame(Frame(image, timestamp=timestamp, sequence=sequence))
         identities.append(result.track.track_id)
-        if sequence == 1:
-            assert result.track.state == TrackState.TENTATIVE and not result.track_confirmed
-        else:
-            assert result.track.state == TrackState.ACTIVE and result.track_confirmed
+        assert result.detection is not None
+        assert result.track.state == TrackState.ACTIVE and result.track_confirmed
         feedback = PLCFeedback(stamp=timestamp, valid=True, x=READY_POSITION[0], y=READY_POSITION[1])
         result.rally = controller.update(result, now=timestamp + 0.001, feedback=feedback)
         request = submit_rally_target(result, adapter, None)
-        if result.rally.state == RallyState.DEFENDING and result.rally.reachable:
-            assert result.curling_state.vy < -25
-            assert request.target_y == READY_POSITION[1]
+        states.append(result.rally.state)
+        if result.rally.state in (RallyState.DEFENDING, RallyState.ATTACKING):
+            if sequence <= 3:
+                assert result.curling_state.vy == 0.0
+                assert result.rally.state == RallyState.DEFENDING
+                assert result.ai_target == (result.curling_state.x, READY_POSITION[1])
+            else:
+                assert result.curling_state.vy < -25
+            assert request is not None
+            assert (request.target_x, request.target_y) == result.ai_target
             assert request.target_x > READY_POSITION[0] + core.MALLET_RADIUS
-            interceptions.append(request)
+            active_targets.append((request.target_x, request.target_y))
     assert set(identities) == {1}
-    assert {(round(request.target_x, 2), request.target_y) for request in interceptions} == {(407.25, READY_POSITION[1])}
-    assert controller.counters["intercept_attempted"] == 1
-    assert controller.counters["defense_entered"] == 1
+    assert RallyState.DEFENDING in states and RallyState.ATTACKING in states
+    targets = {(round(x, 2), round(y, 2)) for x, y in active_targets}
+    assert (407.25, READY_POSITION[1]) in targets
+    assert (407.25, core.RINK_CENTER_Y - core.MALLET_RADIUS) in targets
 
 
-def test_low_fps_real_miss_revokes_candidate_confirmation():
+def test_low_fps_real_miss_revokes_confirmation():
     runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
     states = []
     confirmed = []
@@ -458,8 +501,25 @@ def test_low_fps_real_miss_revokes_candidate_confirmation():
         result = runtime.process_frame(Frame(image, timestamp=1.0 + (sequence - 1) * 0.1))
         states.append(result.track.state)
         confirmed.append(result.track_confirmed)
-    assert states == [TrackState.TENTATIVE, TrackState.LOST, TrackState.TENTATIVE, TrackState.ACTIVE]
-    assert confirmed == [False, False, False, True]
+    assert states == [TrackState.ACTIVE, TrackState.LOST, TrackState.ACTIVE, TrackState.ACTIVE]
+    assert confirmed == [True, False, True, True]
+
+
+def test_fast_reversal_reacquires_outside_local_roi_without_confirmation_wait():
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+    old_identity = None
+    for sequence, y in enumerate((500, 450, 570), 1):
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.circle(image, (640, y), 30, (0, 0, 255), -1)
+        result = runtime.process_frame(Frame(image, timestamp=1.0 + (sequence - 1) * 0.1))
+        if sequence == 2:
+            old_identity = result.track.track_id
+    assert abs(result.detection.center_y - 570) < 1
+    assert result.track.track_id != old_identity
+    assert result.track.state == TrackState.ACTIVE and result.track.hits == 1
+    assert result.track_confirmed
+    expected = runtime.camera_geometry.undistorted_to_table(640, 570)
+    assert math.dist(result.curling_state.position, expected) < 1e-6
 
 
 def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
@@ -512,12 +572,56 @@ def test_estimator_reset_on_no_track_preserves_new_observation_initialization():
     runtime.process_frame(Frame(image=image, timestamp=1.0))
     moving = runtime.process_frame(Frame(image=image, timestamp=1.005))
     assert moving.curling_state.vx > 0.0
+    runtime.stalled_phase = "striking"
+    runtime.reaction_timer = 0.35
     missing = runtime.process_frame(Frame(image=image, timestamp=1.01))
     assert missing.track is None and missing.curling_state is None
+    assert missing.ai_target == READY_POSITION
+    assert runtime.stalled_phase == "idle" and runtime.reaction_timer == 0.0
     new = runtime.process_frame(Frame(image=image, timestamp=1.015))
     expected = runtime.camera_geometry.undistorted_to_table(800.0, 300.0)
     assert math.dist(new.curling_state.position, expected) < 1e-6
     assert new.curling_state.vx == new.curling_state.vy == 0.0
+
+
+def test_new_identity_does_not_inherit_recovery_phase_or_reaction_timer():
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image, (500, 300), 30, (0, 0, 255), -1)
+    first = runtime.process_frame(Frame(image, timestamp=1.0))
+    old_identity = first.track.track_id
+    runtime.stalled_phase = "striking"
+    runtime.reaction_timer = 10.0
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
+    new = runtime.process_frame(Frame(image, timestamp=1.1))
+    assert new.track.track_id != old_identity and new.track_confirmed
+    assert new.ai_target == new.curling_state.position
+    assert new.ai_decision.stalled_stone_phase == "idle"
+
+
+def test_no_puck_updates_feedback_pose_and_smoothly_returns_fallback_to_ready():
+    runtime = VisionRuntime(
+        table_calibration_file=None, disable_undistort=True,
+    )
+    runtime.stalled_phase = "striking"
+    runtime.reaction_timer = 0.35
+    runtime.target[:] = (400.0, 200.0)
+    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.monotonic(), x=210.0, y=160.0))
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    result = runtime.process_frame(Frame(image, timestamp=1.0))
+    assert result.track is None and result.ai_decision is None
+    assert result.ai_target == READY_POSITION
+    assert runtime.ai_current_pos == [210.0, 160.0]
+
+    runtime.set_ai_feedback(None)
+    for index in range(1, 31):
+        result = runtime.process_frame(Frame(image, timestamp=1.0 + index * 0.02))
+    assert result.ai_target == READY_POSITION
+    assert math.dist(runtime.ai_current_pos, READY_POSITION) < core.STONE_RADIUS
+    cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
+    new = runtime.process_frame(Frame(image, timestamp=1.7))
+    assert new.ai_target == new.curling_state.position
 
 
 def test_camera_calibration_capture_failure_exits_and_cleans_up():
