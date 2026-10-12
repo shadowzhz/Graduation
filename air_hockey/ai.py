@@ -75,6 +75,9 @@ class AirHockeyAI:
             predicted_x = self._predict_stone_x(state, state.ai_home_y, prediction)
             blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
             target_x = clamp(blended_x + error, safe_left, safe_right)
+        elif difficulty.attack_line >= core.RINK_CENTER_Y:
+            # 实时首帧速度尚未知，先按当前位置对齐防守；仿真难度不变。
+            target_x = clamp(state.stone.x + error, safe_left, safe_right)
         else:
             target_x = clamp(core.RINK_CENTER_X + error * 0.35, safe_left, safe_right)
         return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)

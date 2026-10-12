@@ -108,19 +108,13 @@ def format_status(result: VisionResult, correction_enabled: bool = False) -> str
             f"({result.stone_state.vx:.0f}, {result.stone_state.vy:.0f})"
             if result.stone_state is not None else "none"
         )
-        intercept = (
-            f"({rally.intercept[0]:.0f}, {rally.intercept[1]:.0f})"
-            if rally.intercept is not None else "none"
-        )
-        arrival = f">={rally.time_to_intercept:.2f}s" if rally.time_to_intercept is not None else "none"
-        travel = f"{rally.time_to_mallet:.2f}s" if rally.time_to_mallet is not None else "none"
         target = f"({rally.target[0]:.0f}, {rally.target[1]:.0f})" if rally.target is not None else "none"
+        phase = result.ai_decision.stalled_stone_phase if result.ai_decision is not None else "idle"
         return (
             f"FPS {result.fps:.1f} | 校正 {corr_status} | {rally.state.name}: {rally.reason} "
-            f"| confirmed={result.track_confirmed} | {rally.direction} | 速度 {velocity} "
-            f"| intercept {intercept} / {arrival}; travel {travel}; reachable={rally.reachable} "
+            f"| track_valid={result.track_confirmed} | {rally.direction} | 速度 {velocity} "
             f"| mallet ({rally.mallet_position[0]:.0f}, {rally.mallet_position[1]:.0f}) {rally.mallet_source} "
-            f"| target {target}"
+            f"| target {target} | hit phase {phase}"
         )
     if result.track is not None and result.stone_state is not None:
         target_str = (

@@ -25,7 +25,7 @@ from ..vision.types import Detection, ROI, Track
 if TYPE_CHECKING:
     from .rally import RallyDecision
 
-DETECTION_INTERVAL = 3
+DETECTION_INTERVAL = 1
 MAX_DETECTION_GAP = 0.08
 AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
 
@@ -103,13 +103,18 @@ class VisionRuntime:
             # ponytail: rink-line overlaps reach 0.578; lower values risk matching red markings.
             min_circularity=0.55,
         )
-        self.tracker = tracker or StoneTracker(max_missed_frames=self.detection_interval * 4)
+        self.tracker = tracker or StoneTracker(
+            max_missed_frames=self.detection_interval * 4, min_confirmed_hits=1,
+        )
         self.kalman = kalman or KalmanFilter()
         self.predictor = predictor or TrajectoryPredictor()
         self._reuse_prediction_for_ai = ai is None
         self.ai = AirHockeyAI(predictor=self.predictor) if ai is None else ai
-        # Random aim noise is useful in simulation, but makes real PLC setpoints wander.
-        self._ai_difficulty = replace(core.DIFFICULTIES["普通"], aim_error=0.0)
+        # Real hardware follows each observation without simulation reaction or aim noise.
+        self._ai_difficulty = replace(
+            core.DIFFICULTIES["普通"], aim_error=0.0, prediction=1.0,
+            reaction_delay=0.0, attack_line=core.RINK_CENTER_Y,
+        )
 
         if vision_pipeline is not None:
             self.vision_pipeline = vision_pipeline
@@ -189,6 +194,8 @@ class VisionRuntime:
                 dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
 
             detection = self.detector.detect(processed_frame, dynamic_roi=dynamic_roi)
+            if detection is None and dynamic_roi is not None:
+                detection = self.detector.detect(processed_frame)
             self._last_detection_timestamp = now
             detected_ms = (time.perf_counter() - t_detect_start) * 1000
             self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
@@ -208,9 +215,14 @@ class VisionRuntime:
         ai_target = None
         decision = None
 
+        if self._ai_feedback_position is not None:
+            self.ai_current_pos[:] = self._ai_feedback_position
+
         if track is not None:
             if self._kalman_track_id is not None and self._kalman_track_id != track.track_id:
                 self.kalman.reset()
+                self.stalled_phase = "idle"
+                self.reaction_timer = 0.0
             self._kalman_track_id = track.track_id
             # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
             undist_x, undist_y = self.camera_geometry.raw_to_undistorted(track.center_x, track.center_y)
@@ -251,9 +263,6 @@ class VisionRuntime:
                 predicted_endpoint=prediction_state.endpoint,
             )
 
-            if self._ai_feedback_position is not None:
-                self.ai_current_pos[:] = self._ai_feedback_position
-
             state = GameState(
                 ai_x=self.ai_current_pos[0],
                 ai_y=self.ai_current_pos[1],
@@ -280,16 +289,20 @@ class VisionRuntime:
             self.reaction_timer = decision.reaction_timer
             self.stalled_phase = decision.stalled_stone_phase
 
-            if self._ai_feedback_position is None:
-                smooth_alpha = min(1.0, dt * 12.0)
-                self.ai_current_pos[0] += (self.target[0] - self.ai_current_pos[0]) * smooth_alpha
-                self.ai_current_pos[1] += (self.target[1] - self.ai_current_pos[1]) * smooth_alpha
-
             ai_target = (decision.target_x, decision.target_y)
         else:
             # 轨迹丢失时清空估计器，避免下一个冰壶被旧状态污染
             self.kalman.reset()
             self._kalman_track_id = None
+            self.stalled_phase = "idle"
+            self.reaction_timer = 0.0
+            self.target[:] = (core.RINK_CENTER_X, self.ai_home_y)
+            ai_target = tuple(self.target)
+
+        if self._ai_feedback_position is None:
+            smooth_alpha = min(1.0, dt * 12.0)
+            self.ai_current_pos[0] += (self.target[0] - self.ai_current_pos[0]) * smooth_alpha
+            self.ai_current_pos[1] += (self.target[1] - self.ai_current_pos[1]) * smooth_alpha
 
         self.frame_ms = self.frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
 
