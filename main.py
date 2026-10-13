@@ -30,7 +30,12 @@ import tkinter as tk
 
 from air_hockey.app.renderer import format_status, render_preview
 from air_hockey.app.vision_runtime import MAX_DETECTION_GAP, VisionRuntime
-from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
+from air_hockey.app.rally import (
+    DEFAULT_DEFENSE_FORWARD_LIMIT,
+    READY_POSITION,
+    RallyController,
+    RallyState,
+)
 from air_hockey.camera import CameraConfig, CameraManager
 from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.control.adapter import PlcTarget
@@ -220,6 +225,9 @@ def run_vision(args):
         calibration_file=args.calibration,
         table_calibration_file=table_calibration_file,
         disable_undistort=args.disable_undistort,
+        # 球槌速度估计，用来做"提前量"（补偿轴的反应延迟）。
+        # 0 或负数 = 不做提前量，等于原来"直接瞄冰壶当前位置"的行为。
+        mallet_speed=args.mallet_speed if args.mallet_speed > 0 else None,
         profile=samples is not None,
     )
 
@@ -235,7 +243,12 @@ def run_vision(args):
             "fatal": None,
         }
 
-    camera = CameraManager(CameraConfig(device=args.camera_device))
+    camera = CameraManager(CameraConfig(
+        device=args.camera_device,
+        # --camera-fast 才会在 open 阶段真的把格式协商成 MJPG。
+        # 不加这个开关时行为与原来完全一致（yu yv422 10 fps）。
+        fourcc="MJPG" if args.camera_fast else None,
+    ))
     try:
         camera.start()
         if args.record:
@@ -255,9 +268,10 @@ def run_vision(args):
 
     plc = None
     plc_adapter = PlcControlAdapter()
-    rally = RallyController()
+    rally = RallyController(defense_forward_limit=args.defense_forward_limit)
     if args.plc:
-        plc = PLCLink(args.plc, period=1.0 / args.plc_rate)
+        plc = PLCLink(args.plc, period=1.0 / args.plc_rate,
+                      trigger_low_time=args.trigger_low_ms / 1000.0)
         plc.start()
         if window is not None and not args.dry_run:
             window.attach_plc(plc)
@@ -357,7 +371,23 @@ def run_vision(args):
                     elif feedback.comm_lost_latch:
                         status_text += " | PLC 通信丢失锁存：请现场检查并复位"
                     elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
-                        status_text += f" | PLC 轴报警 {feedback.kinematics_error} / 停止位 {feedback.group_stop}：禁止运动"
+                        # ★ 把"轴自己的故障"和"运动学的错误码"分开显示。
+                        #   这两个是独立的东西（DB18.0.4/DB18.4.0 vs DB18.56）：
+                        #     只有 801、轴位为 0  → 多半是"轴未使能/未就绪"，不是过冲
+                        #     轴位为 1          → 轴真的故障（撞软限位、跟随误差等）
+                        #   以前这里合成一句"PLC 轴报警 801"，分不出来。
+                        parts = []
+                        if feedback.x_err or feedback.y_err:
+                            which = ("X" if feedback.x_err else "") + ("Y" if feedback.y_err else "")
+                            parts.append(f"轴故障位={which} ← 轴真的报错了，去 TIA 轴诊断看代码")
+                        else:
+                            parts.append("轴故障位=无")
+                        if feedback.kinematics_error:
+                            note = "（未使能/未就绪类，按 C 清除再按 E）" if not feedback.axis_fault else ""
+                            parts.append(f"运动学错误码={feedback.kinematics_error}{note}")
+                        if feedback.group_stop:
+                            parts.append("停止位=1")
+                        status_text += " | PLC " + " / ".join(parts) + "：禁止运动"
                     elif not feedback.axes_ready or not feedback.plc_echo_ok or feedback.comm_lost:
                         status_text += " | PLC 轴未就绪或心跳异常：禁止运动"
                     elif not armed:
@@ -401,9 +431,11 @@ def run_vision(args):
                             f"| Tracker {track_state} | {timing}"
                         )
                     else:
+                        plc_line = f" | [plc] {plc.diagnostics()}" if plc is not None else ""
                         print(
                             f"[stats] 处理 {result.fps:.1f} FPS | 单帧 {runtime.frame_ms:.1f} ms "
                             f"(检测 {runtime.detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
+                            f"{plc_line}"
                         )
         except Exception as exc:
             processing_failure[0] = exc
@@ -532,8 +564,30 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="完整回合影子运行：显示/记录请求目标，不发送 PLC 运动或现场轴命令")
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
+    parser.add_argument("--trigger-low-ms", type=float, default=10.0, metavar="MS",
+                        help="每个周期把运动触发压低多久（毫秒，默认 10）。"
+                             "这是**固定开销**：它加上约 8.3ms 的 S7 往返就是一个周期的最短时间 —— "
+                             "10ms 时实际只能跑到约 55Hz（即使 --plc-rate 填 100），"
+                             "而周期越长每周期步距越大，超过 10mm 就切成 BufferMode=0（中止重开），"
+                             "表现就是机械臂一个点一个点走。调小到 3~5 可以明显提高实际频率；"
+                             "下限取决于 PLC 的 OB1 扫描周期，至少要保证 P 沿被扫到（一般 2~3ms 够）")
+    parser.add_argument("--mallet-speed", type=float, default=500.0, metavar="UNITS_PER_SEC",
+                        help="球槌可达速度估计（球台单位/秒，默认 500）。用来算提前量："
+                             "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
+                             "不然轴总是慢一拍、球走了才追到。设 0 关闭提前量。"
+                             "这不是 PLC 轴速度设置，需要在现场实测后调准")
+    parser.add_argument("--defense-forward-limit", type=float,
+                        default=DEFAULT_DEFENSE_FORWARD_LIMIT, metavar="UNITS",
+                        help="冰壶在机器半场还在运动时，机械臂最多离开防守线往前多少"
+                             "（球台单位，1 单位≈1.317mm）；冰壶停住（死球）时不受此限。"
+                             "**默认不限制**（= ai.py 自身的上限，现场选的是「全部追球」）。"
+                             "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
+                             "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
+    parser.add_argument("--camera-fast", action="store_true",
+                        help="在打开设备时就把像素格式协商成 MJPG。这台相机不加该开关会停在 yuyv422 的 10 fps，"
+                             "加了约为 100 FPS；但 MJPG 模式的视野/清晰度需现场核对，故默认关闭")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正（必须同时 --disable-homography）")

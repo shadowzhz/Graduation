@@ -58,12 +58,48 @@ def test_first_machine_half_detection_is_immediately_attacked():
     assert (request.target_x, request.target_y) == (420, 250)
 
 
-def test_entire_machine_half_including_center_and_outgoing_is_active():
-    for y, vy in ((340, 0), (core.RINK_CENTER_Y, 0), (250, 200)):
+def test_stopped_machine_half_puck_is_retrieved():
+    """自己半场里**已经停住**的冰壶必须上去回收，否则回合会停住。"""
+    for y, vy in ((340, 0), (core.RINK_CENTER_Y, 0)):
         result = observation(1, x=420, y=y, vy=vy)
         decision = tick(RallyController(), result)
         assert decision.state == RallyState.ATTACKING
         assert decision.target == (420, min(y, core.RINK_CENTER_Y - core.MALLET_RADIUS))
+
+
+def test_moving_machine_half_puck_pursuit_is_capped_by_depth_limit():
+    """主防御：冰壶在自己半场还在运动时，追击深度被 defense_forward_limit 截住。
+
+    注意 Y 仍然会动 —— 这是"把 Y 钉死在防守线上"那一版的回归点，
+    完全固定 Y 会让轴看起来像不动。
+    """
+    controller = RallyController(defense_forward_limit=90.0)
+    decision = tick(controller, observation(1, x=420, y=250, vy=200))
+    assert decision.state == RallyState.ATTACKING
+    assert decision.target == (420.0, READY_POSITION[1] + 90.0)
+
+
+def test_zero_forward_limit_pins_to_defense_line():
+    """上限为 0 时等价于钉死在防守线上（Y 完全不动）。"""
+    controller = RallyController(defense_forward_limit=0.0)
+    decision = tick(controller, observation(1, x=420, y=250, vy=200))
+    assert decision.target == (420.0, READY_POSITION[1])
+
+
+def test_unlimited_pursuit_matches_ai_target():
+    """不设上限时等于原来的主动追球行为。"""
+    decision = tick(RallyController(defense_forward_limit=None),
+                    observation(1, x=420, y=250, vy=200))
+    assert decision.target == (420.0, 250.0)
+
+
+def test_depth_limit_does_not_block_dead_ball_retrieve():
+    """冰壶停在自己半场（死球）必须能回收 —— 深度上限不能让它够不着。"""
+    for limit in (0.0, 90.0, None):
+        controller = RallyController(defense_forward_limit=limit)
+        decision = tick(controller, observation(1, x=420, y=320, vy=0))
+        assert decision.state == RallyState.ATTACKING
+        assert decision.target == (420.0, 320.0), f"limit={limit} 挡住了回收"
 
 
 def test_human_half_unknown_velocity_prepares_defense_immediately():
@@ -71,6 +107,31 @@ def test_human_half_unknown_velocity_prepares_defense_immediately():
     decision = tick(RallyController(), result)
     assert decision.state == RallyState.DEFENDING
     assert decision.target == (420, READY_POSITION[1])
+
+
+def test_stationary_human_half_puck_does_not_flip_state_every_frame():
+    """静止冰壶在人类半场时，状态与目标不能每帧翻转。
+
+    回归：这一支原来判的是 `stone.vy <= 0`，而 stone.vy 是卡尔曼滤波的估计值 ——
+    静止冰壶的 vy 会在 0 附近抖正负。vy 略正时走 else（状态留在 RECOVERING、
+    target 保持 READY），vy 略负时走 if（状态 DEFENDING、target 换成 AI 目标），
+    于是每帧翻转。
+
+    实机 165 FPS 下实测：DEFENDING<->RECOVERING 各 119/118 次，
+    目标 (300,140)<->(338,140) 交替 207/102 次；机械臂被反复中止而几乎不动。
+    """
+    controller = RallyController()
+    current = (364, 344)          # 不在 READY 位，所以每帧会先被置为 RECOVERING
+    states, targets = set(), set()
+    for i in range(80):
+        vy = 0.5 if i % 2 == 0 else -0.5      # 模拟卡尔曼估计在 0 附近抖动
+        result = observation(1 + i * 0.01, x=338, y=536, vx=0.0, vy=vy, mallet=current)
+        decision = tick(controller, result, mallet=current)
+        states.add(decision.state)
+        targets.add(decision.target)
+
+    assert states == {RallyState.DEFENDING}, f"状态在每帧抖动：{states}"
+    assert len(targets) == 1, f"目标在每帧抖动：{targets}"
 
 
 def test_incoming_can_interrupt_recovery_without_ready_busy_or_rearm_wait():

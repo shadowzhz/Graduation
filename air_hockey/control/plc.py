@@ -60,8 +60,29 @@ COMM_X_ERR_BIT = 4
 COMM_Y_ERR_OFFSET = 4
 COMM_Y_ERR_BIT = 0
 ECHO_TIMEOUT = 1.0
-PHYSICAL_X_MIN, PHYSICAL_X_MAX = -185.0, 195.0
-PHYSICAL_Y_MIN, PHYSICAL_Y_MAX = -120.0, 190.0
+# ⚠️ 两套常量，用途不同，不要混：
+#   PHYSICAL_* = 轴的行程安全限位（绝不能命令越过）
+#   TABLE_*    = 球台真实边缘在【轴坐标】里的位置（只用于游戏<->机器坐标映射）
+#
+# 2026-10-13 现场实测（PLC 绝对位置读数 + 卷尺）：
+#   球台（墙内）480mm x 880mm，球槌半径实测约 26.5mm
+#   在轴 X=-188 / 219 处球槌边缘离左右墙各约 10mm
+#   Y 最前处（185）球槌边缘离中线约 30mm
+# 由此反推球台边缘（轴坐标）：
+#   左墙 -188 - 26.5 - 10 = -224.5    右墙 219 + 26.5 + 10 = 255.5   （差 480 ✓）
+#   中线  185 + 26.5 + 30 =  241.5    后墙 241.5 - 880/2   = -198.5   （差 440 ✓）
+# TABLE_* 只由这些**几何测量**决定，与轴限位无关，所以改限位时不要动它们。
+#
+# 2026-10-13 稍后：X 轴冲得太猛撞到左右限位，现场把 X 的限位收到 -180 / 215
+# （左右各留 8mm / 4mm 余量）。TABLE_X_* 保持不变 —— 球台边缘没变，
+# 只是球槌现在停在离墙 18mm 而不是 10mm 处。
+#
+# 也就是说：球台比轴的行程大 —— 球槌边缘在 X 上离墙十几毫米，
+# 在 Y 上离后墙差 47mm、离中线差 30mm。这是机械事实，软件只能如实反映。
+PHYSICAL_X_MIN, PHYSICAL_X_MAX = -180.0, 215.0
+PHYSICAL_Y_MIN, PHYSICAL_Y_MAX = -125.0, 185.0
+TABLE_X_MIN, TABLE_X_MAX = -224.5, 255.5
+TABLE_Y_MIN, TABLE_Y_MAX = -198.5, 241.5
 COORD_EPSILON = 1e-6
 DEAD_ZONE_MM = 3.0
 # Measured on the machine: 50mm with BufferMode=5 stalled streaming motion.
@@ -93,10 +114,17 @@ def _finite_pair(x, y):
 
 
 def _game_to_physical(zone, x, y):
+    """游戏场地坐标 -> 机器坐标。
+
+    映射用 TABLE_*（球台真实边缘在轴坐标里的位置），
+    夹取用 PHYSICAL_*（轴的行程安全限位）—— 这两件事必须分开：
+    球台比轴的行程大，映射到球台边缘时会被安全限位截住，
+    这正是"球从边角过去、轴到不了"的物理事实。
+    """
     x, y = _validate_game_point(zone, x, y)
     left, right, top, bottom = zone
-    px = PHYSICAL_X_MIN + (x - left) * (PHYSICAL_X_MAX - PHYSICAL_X_MIN) / (right - left)
-    py = PHYSICAL_Y_MIN + (y - top) * (PHYSICAL_Y_MAX - PHYSICAL_Y_MIN) / (bottom - top)
+    px = TABLE_X_MIN + (x - left) * (TABLE_X_MAX - TABLE_X_MIN) / (right - left)
+    py = TABLE_Y_MIN + (y - top) * (TABLE_Y_MAX - TABLE_Y_MIN) / (bottom - top)
     return (max(PHYSICAL_X_MIN, min(PHYSICAL_X_MAX, px)),
             max(PHYSICAL_Y_MIN, min(PHYSICAL_Y_MAX, py)))
 
@@ -111,10 +139,11 @@ def _validate_game_point(zone, x, y):
 
 
 def _physical_to_game(zone, x, y):
+    """机器坐标 -> 游戏场地坐标（_game_to_physical 的逆，用同一套 TABLE_*）。"""
     x, y = _finite_pair(x, y)
     left, right, top, bottom = zone
-    return (left + (x - PHYSICAL_X_MIN) * (right - left) / (PHYSICAL_X_MAX - PHYSICAL_X_MIN),
-            top + (y - PHYSICAL_Y_MIN) * (bottom - top) / (PHYSICAL_Y_MAX - PHYSICAL_Y_MIN))
+    return (left + (x - TABLE_X_MIN) * (right - left) / (TABLE_X_MAX - TABLE_X_MIN),
+            top + (y - TABLE_Y_MIN) * (bottom - top) / (TABLE_Y_MAX - TABLE_Y_MIN))
 
 
 @dataclass(frozen=True)
@@ -160,6 +189,10 @@ class PLCInterface:
         self._last_phys_y = None
         self.last_send_state = "unknown"
         self.last_buffer_mode = None
+        # 必须初始化：它原本只在 send_linear_move 里、且从**第二次**下发才开始赋值
+        # （第一次下发时 _last_phys_x 还是 None，那个分支不成立）。
+        # 读它的诊断代码会在第一次下发时抛 AttributeError。
+        self.last_send_dist_mm = 0.0
         self.last_error = ""
         self._multi_read_failed = False
         self.round_trips = 0
@@ -393,12 +426,23 @@ class PLCLink:
     """Single-owner worker; start/stop and target publication do no network I/O."""
 
     def __init__(self, ip, rack=0, slot=1, period=DEFAULT_PERIOD,
-                 client_factory=None, zone=None):
+                 client_factory=None, zone=None, trigger_low_time=TRIGGER_LOW_TIME):
         self.ip = ip
         self.zone = _validated_zone(DEFAULT_ZONE if zone is None else zone)
         self.period = max(0.005, float(period))
         if not math.isfinite(self.period):
             raise ValueError("PLC period must be finite")
+        # 每个周期清掉运动触发之后，至少要压低这么久，PLC 的 P 沿才抓得到。
+        #
+        # ⚠️ 这个值是**每个周期的固定开销**：它 + 4 次 S7 往返(≈8.3ms) 就是最短周期。
+        # 10ms 时实际只能跑到约 55Hz —— 即使 --plc-rate 填 100。
+        # 而周期越长，每周期目标步距越大；步距一旦超过 BUFFER_MODE_IMMEDIATE_MM
+        # 就会切成 BufferMode=0（中止重开），表现就是"一个点一个点走"。
+        # 调小它可以直接提高实际指令频率。下限取决于 PLC 的 OB1 扫描周期，
+        # 至少要保证 P 沿能在一低一高之间被扫到（一般 2~3ms 够）。
+        self.trigger_low_time = max(0.0, float(trigger_low_time))
+        if not math.isfinite(self.trigger_low_time):
+            raise ValueError("trigger_low_time must be finite")
         self._requires_snap7 = client_factory is None
         self._client = (PLCInterface(ip, rack, slot, zone=self.zone) if client_factory is None
                         else client_factory(ip, rack, slot))
@@ -423,6 +467,16 @@ class PLCLink:
         self._echo_change_at = 0.0
         self._echo_seen = False
         self.cycle_count = 0
+        # 现场诊断：实际周期频率、下发频率、BufferMode 分布、步距。
+        #
+        # "机械臂一个点一个点走"就是 BufferMode=0（中止当前运动、立刻重开）占比高：
+        # 每来一条指令轴就被中止一次，速度反复归零。这个统计能把"顿"量出来，
+        # 也能验证 --trigger-low-ms / --plc-rate 调了到底有没有用。
+        self._stats_at = time.monotonic()
+        self._stats_cycles = 0
+        self._stats_counters = {"sent": 0, "deadzone": 0, "other": 0,
+                                "mode0": 0, "mode5": 0}
+        self._stats_dists = []
 
     def start(self):
         with self._lock:
@@ -478,6 +532,46 @@ class PLCLink:
     @property
     def last_send_state(self):
         return self._client.last_send_state
+
+    def diagnostics(self):
+        """返回并重置"上一次调用以来"的 PLC 侧实测统计。
+
+        现场判断"顿"还是"顺"用：BufferMode=0 是中止重开，占比高就是
+        "一个点一个点走"；同时还能验证 --trigger-low-ms / --plc-rate
+        调了到底有没有真的提高周期频率。
+        """
+        with self._lock:
+            now = time.monotonic()
+            elapsed = max(1e-9, now - self._stats_at)
+            counters = dict(self._stats_counters)
+            dists = self._stats_dists
+            cycles = self.cycle_count - self._stats_cycles
+            self._stats_at = now
+            self._stats_cycles = self.cycle_count
+            self._stats_counters = {"sent": 0, "deadzone": 0, "other": 0,
+                                    "mode0": 0, "mode5": 0}
+            self._stats_dists = []
+
+        mode_total = counters["mode0"] + counters["mode5"]
+        dists.sort()
+        median = dists[len(dists) // 2] if dists else 0.0
+        p95 = dists[min(len(dists) - 1, int(len(dists) * 0.95))] if dists else 0.0
+
+        text = (f"周期 {cycles / elapsed:5.1f}Hz | 下发 {counters['sent'] / elapsed:5.1f}Hz | "
+                f"死区跳过 {counters['deadzone']}")
+        if mode_total:
+            abort_pct = 100.0 * counters["mode0"] / mode_total
+            text += (f" | BufferMode 混合 {counters['mode5']} / 中止 {counters['mode0']}"
+                     f"（中止 {abort_pct:.0f}%）")
+        else:
+            text += " | BufferMode 无下发"
+        text += f" | 步距中位 {median:.1f}mm p95 {p95:.1f}mm"
+        if counters["other"]:
+            text += f" | 其它状态 {counters['other']}"
+        if mode_total and 100.0 * counters["mode0"] / mode_total > 20.0:
+            text += "  ← 中止占比偏高，轴会一顿一顿；试试 --trigger-low-ms 3"
+        return text
+
 
     @property
     def connect_attempted(self):
@@ -684,8 +778,11 @@ class PLCLink:
             client.disconnect()
             self._invalidate_feedback()
             return
-        if self._stop_event.wait(TRIGGER_LOW_TIME):
-            return
+        # 触发必须是"先低够久、再抬起来"，PLC 的 P 沿才抓得到。
+        # 但读状态/发心跳本来就要花约 3.3ms，那段时间触发也是低的 —— 所以
+        # 只在真正要下发时才把**剩余**的压低时间等满，不要无条件等一整个
+        # trigger_low_time（那会让每个周期白白多花掉这段时间）。
+        cleared_at = time.monotonic()
         status = client.read_status_and_position()
         if status is None or not client.connected:
             self._invalidate_feedback()
@@ -720,7 +817,28 @@ class PLCLink:
         # Network I/O is never under the lock. Cancellation of an already executing
         # db_write cannot be guaranteed; no subsequent target remains queued.
         if target is not None:
+            # 把"触发低电平"的剩余时间补满，然后才抬起来下发。
+            remaining_low = self.trigger_low_time - (time.monotonic() - cleared_at)
+            if remaining_low > 0.0 and self._stop_event.wait(remaining_low):
+                return
             client.send_linear_move(*target)
+            # 现场诊断累计。整个累计块必须容错 —— 诊断是"非必要"的，
+            # 绝不能让它的任何异常把 worker 线程打死（那会让后续命令全部失效）。
+            try:
+                state = client.last_send_state
+                if state == "sent":
+                    self._stats_counters["sent"] += 1
+                    mode = getattr(client, "last_buffer_mode", None)
+                    if mode in (0, 5):
+                        self._stats_counters["mode0" if mode == 0 else "mode5"] += 1
+                        self._stats_dists.append(
+                            float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
+                elif state == "deadzone":
+                    self._stats_counters["deadzone"] += 1
+                else:
+                    self._stats_counters["other"] += 1
+            except Exception:
+                pass
         if not client.connected:
             self._invalidate_feedback()
         self.cycle_count += 1

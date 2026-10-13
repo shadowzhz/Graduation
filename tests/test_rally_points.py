@@ -11,6 +11,7 @@ from air_hockey.app.rally import ARRIVAL_TOLERANCE, READY_POSITION
 from air_hockey.control import PLCFeedback, PLCLink
 from air_hockey.control.plc import (
     PHYSICAL_X_MIN, PHYSICAL_X_MAX, PHYSICAL_Y_MIN, PHYSICAL_Y_MAX,
+    TABLE_X_MIN, TABLE_X_MAX, TABLE_Y_MIN, TABLE_Y_MAX,
     PLCInterface, TARGET_MAX_AGE,
 )
 from air_hockey.tools import test_rally_points as points_tool
@@ -200,12 +201,16 @@ def test_point_sequence_uses_shared_ready_and_reachable_physical_mapping():
         px, py = link.game_to_physical(target.target_x, target.target_y)
         assert PHYSICAL_X_MIN <= px <= PHYSICAL_X_MAX
         assert PHYSICAL_Y_MIN <= py <= PHYSICAL_Y_MAX
+        # 映射用的是"球台真实边缘" TABLE_*，不是轴的行程限位 PHYSICAL_*。
+        # 这两者必须分开：球台比轴的行程大（现场实测 480x880mm 的台面，
+        # 而轴只有 407x310mm），所以映射到球台边缘时会被安全限位截住 ——
+        # 那正是"球从边角过去、轴到不了"的物理事实。
         assert math.isclose(
-            (px - PHYSICAL_X_MIN) / (PHYSICAL_X_MAX - PHYSICAL_X_MIN),
+            (px - TABLE_X_MIN) / (TABLE_X_MAX - TABLE_X_MIN),
             (target.target_x - core.RINK_LEFT) / (core.RINK_RIGHT - core.RINK_LEFT),
         )
         assert math.isclose(
-            (py - PHYSICAL_Y_MIN) / (PHYSICAL_Y_MAX - PHYSICAL_Y_MIN),
+            (py - TABLE_Y_MIN) / (TABLE_Y_MAX - TABLE_Y_MIN),
             (target.target_y - core.RINK_TOP) / (core.RINK_CENTER_Y - core.RINK_TOP),
         )
 
