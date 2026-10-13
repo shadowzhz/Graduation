@@ -30,6 +30,14 @@ class CameraConfig:
     # 请求帧率
     requested_fps: float = 200.0
 
+    # 可选：在 open 阶段就把像素格式协商成这个 FOURCC（如 "MJPG"）。
+    #
+    # 为 None 时保持原行为：先打开再 set —— 对这台球台相机是无声失败的，
+    # 会停在 yuyv422 的 10 fps。设成 "MJPG" 才真的切到 MJPG 高速模式
+    # （实测约 100 FPS 进管线），但该模式的视野/清晰度需现场核对，
+    # 所以主程序用 --camera-fast 显式打开，默认不变。
+    fourcc: Optional[str] = None
+
 @dataclass
 class CameraInfo:
     """后端协商出的实际模式。

@@ -13,6 +13,11 @@ from .prediction import PredictionState, TrajectoryPredictor
 
 AI_SERVE_SETUP_GAP = 6.0
 
+# 近门保护：冰壶离自家球门太近（y <= back_line）时按兵不动，避免把它推进自家门。
+#
+# 2026-10-13 现场要求"全部追球"，所以关掉。想恢复防守式保护把它改回 True。
+GUARD_OWN_GOAL_NEAR_LINE = False
+
 
 @dataclass
 class AIDecision:
@@ -25,9 +30,12 @@ class AIDecision:
 class AirHockeyAI:
     """只根据状态快照给目标，不直接改游戏实体。"""
 
-    def __init__(self, predictor=None) -> None:
+    def __init__(self, predictor=None, mallet_speed=None) -> None:
         self.predictor = predictor or TrajectoryPredictor()
         self._random = random.Random()
+        # 球槌速度估计（球台单位/秒）。给了才做"提前量"：目标瞄冰壶再走 lead_time
+        # 之后的位置，而不是它现在的位置。不给（None）= 保持原行为，仿真不受影响。
+        self.mallet_speed = float(mallet_speed) if mallet_speed else None
 
     def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
         """按难度反应延迟刷新目标。"""
@@ -47,6 +55,11 @@ class AirHockeyAI:
         error = self._random.uniform(-difficulty.aim_error, difficulty.aim_error)
         safe_left = core.RINK_LEFT + core.MALLET_RADIUS
         safe_right = core.RINK_RIGHT - core.MALLET_RADIUS
+        # 允许退到防守线后方：下限放到"球槌边缘正好贴到后墙"。
+        # 原来下限是 state.ai_home_y，物理上从防守线(-33.2mm)往后到 -120mm
+        # 那 87mm 的轴行程一直用不到。2026-10-13 现场要求"全部追"，改为放开。
+        safe_top = core.RINK_TOP + core.MALLET_RADIUS
+        safe_bottom = core.RINK_CENTER_Y - core.MALLET_RADIUS
         stone_speed = math.hypot(state.stone.vx, state.stone.vy)
         stone_near_center = state.stone.y <= core.RINK_CENTER_Y + core.STONE_RADIUS + 2.0
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
@@ -59,25 +72,30 @@ class AirHockeyAI:
         if stone_speed <= core.STONE_STOP_SPEED and stone_near_center:
             return AIDecision(
                 clamp(state.stone.x + error, safe_left, safe_right),
-                clamp(state.stone.y, core.RINK_TOP + core.MALLET_RADIUS, core.RINK_CENTER_Y - core.MALLET_RADIUS),
+                clamp(state.stone.y, safe_top, safe_bottom),
                 stalled_stone_phase,
             )
 
-        # 冰壶在自己前方且进了攻击区才主动追
+        # 冰壶在自己前方且进了攻击区才主动追。
+        # 这里原来直接瞄冰壶当前位置 → 球动了轴才追，永远慢一拍；
+        # 现在过一遍 _lead_target 加上球槌响应延迟的提前量。
         if stone_in_attack_zone and not stone_behind_ai:
+            lead_x, lead_y = self._lead_target(state, state.stone.x, state.stone.y)
             return AIDecision(
-                clamp(state.stone.x + error, safe_left, safe_right),
-                clamp(state.stone.y, state.ai_home_y, core.RINK_CENTER_Y - core.MALLET_RADIUS),
+                clamp(lead_x + error, safe_left, safe_right),
+                clamp(lead_y, safe_top, safe_bottom),
                 stalled_stone_phase,
             )
 
         if stone_threatening_goal:
+            # 冲门的球：预判它会从防守线哪个 X 穿过（这一支本来就有提前量）。
             predicted_x = self._predict_stone_x(state, state.ai_home_y, prediction)
             blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
             target_x = clamp(blended_x + error, safe_left, safe_right)
         elif difficulty.attack_line >= core.RINK_CENTER_Y:
             # 实时首帧速度尚未知，先按当前位置对齐防守；仿真难度不变。
-            target_x = clamp(state.stone.x + error, safe_left, safe_right)
+            lead_x, _lead_y = self._lead_target(state, state.stone.x, state.stone.y)
+            target_x = clamp(lead_x + error, safe_left, safe_right)
         else:
             target_x = clamp(core.RINK_CENTER_X + error * 0.35, safe_left, safe_right)
         return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)
@@ -121,7 +139,9 @@ class AirHockeyAI:
                 return AIDecision(staging_x, state.ai_y, "sidestepping")
             return AIDecision(state.ai_x, staging_y, "positioning")
         # ponytail: below the post-clearance line, hold off rather than push toward our goal.
-        if state.stone.y <= back_line:
+        # 2026-10-13 现场要求"全部追球"，这条近门保护由 GUARD_OWN_GOAL_NEAR_LINE 控制，
+        # 默认已关闭。想恢复防守式保护把它改回 True。
+        if GUARD_OWN_GOAL_NEAR_LINE and state.stone.y <= back_line:
             return AIDecision(staging_x, staging_y, "positioning")
         if not striking and abs(state.ai_x - state.stone.x) > tolerance:
             return AIDecision(clamp(state.stone.x, safe_left, safe_right), staging_y, "aligning")
@@ -130,6 +150,55 @@ class AirHockeyAI:
             clamp(state.stone.y + core.MALLET_RADIUS, core.RINK_TOP + core.MALLET_RADIUS, core.RINK_CENTER_Y - core.MALLET_RADIUS),
             "striking",
         )
+
+    # 提前量的上限（秒）。再长没有意义 —— 球早就变向或被撞了。
+    MAX_LEAD_TIME = 0.6
+
+    def _lead_target(self, state: GameState, lead_x: float, lead_y: float):
+        """把目标从"冰壶现在的位置"提前到"球槌赶到时冰壶的位置"。
+
+        现场反馈：轴总是慢一拍 —— 球离开一个位置之后轴才追到那里。
+        原因是原来的目标就是冰壶的当前位置，完全没有提前量。
+
+        做法是解拦截时间 t（球槌以速度 s 直线赶去拦截匀速运动的冰壶）：
+            |d + v·t| = s·t     →     (v·v − s²)t² + 2(d·v)t + d·d = 0
+        取最小的正根。
+
+        ⚠️ 不能用"反复迭代距离/速度"的写法：当冰壶比球槌快时那个迭代会发散，
+        目标会被一路推到场地角落（实测 mallet_speed=300、球速 447 时目标变成
+        (533, 77) 那个远角，比直接瞄当前位置还差）。这里用闭式解，
+        无正根（即追不上）时直接退回瞄当前位置。
+
+        没有球槌速度模型时原样返回 —— 仿真与不传该参数时行为不变。
+        """
+        if self.mallet_speed is None or self.mallet_speed <= 0.0:
+            return lead_x, lead_y
+        stone = state.stone
+        if math.hypot(stone.vx, stone.vy) <= core.STONE_STOP_SPEED:
+            return lead_x, lead_y          # 基本静止，提前量没有意义
+
+        dx = stone.x - state.ai_x
+        dy = stone.y - state.ai_y
+        s = self.mallet_speed
+        a = stone.vx * stone.vx + stone.vy * stone.vy - s * s
+        b = 2.0 * (dx * stone.vx + dy * stone.vy)
+        c = dx * dx + dy * dy
+
+        t = None
+        if abs(a) < 1e-9:
+            if abs(b) > 1e-9:
+                t = -c / b
+        else:
+            disc = b * b - 4.0 * a * c
+            if disc >= 0.0:
+                root = math.sqrt(disc)
+                for candidate in ((-b - root) / (2.0 * a), (-b + root) / (2.0 * a)):
+                    if candidate > 0.0 and (t is None or candidate < t):
+                        t = candidate
+        if t is None or not math.isfinite(t) or t <= 0.0:
+            return lead_x, lead_y          # 追不上：不外推，直接瞄现在的位置
+        t = min(t, self.MAX_LEAD_TIME)
+        return stone.x + stone.vx * t, stone.y + stone.vy * t
 
     def _predict_stone_x(
         self, state: GameState, target_y: float, prediction: PredictionState | None = None

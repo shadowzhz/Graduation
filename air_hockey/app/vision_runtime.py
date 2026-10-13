@@ -87,6 +87,7 @@ class VisionRuntime:
         kalman: Optional[KalmanFilter] = None,
         predictor: Optional[TrajectoryPredictor] = None,
         ai: Optional[AirHockeyAI] = None,
+        mallet_speed: Optional[float] = None,
         vision_pipeline: Optional[VisionPipeline] = None,
         profile: bool = False,
     ) -> None:
@@ -109,7 +110,10 @@ class VisionRuntime:
         self.kalman = kalman or KalmanFilter()
         self.predictor = predictor or TrajectoryPredictor()
         self._reuse_prediction_for_ai = ai is None
-        self.ai = AirHockeyAI(predictor=self.predictor) if ai is None else ai
+        # mallet_speed 给了才会做"提前量"（球槌响应延迟补偿）；None 时行为与原来一致。
+        self.mallet_speed = float(mallet_speed) if mallet_speed else None
+        self.ai = (AirHockeyAI(predictor=self.predictor, mallet_speed=self.mallet_speed)
+                   if ai is None else ai)
         # Real hardware follows each observation without simulation reaction or aim noise.
         self._ai_difficulty = replace(
             core.DIFFICULTIES["普通"], aim_error=0.0, prediction=1.0,

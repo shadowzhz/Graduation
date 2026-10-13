@@ -18,7 +18,12 @@ import numpy as np
 
 from air_hockey import core_config as core
 from air_hockey.ai import AIDecision, AirHockeyAI
-from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
+from air_hockey.app.rally import (
+    DEFAULT_DEFENSE_FORWARD_LIMIT,
+    READY_POSITION,
+    RallyController,
+    RallyState,
+)
 from air_hockey.app.vision_runtime import AI_HOME_Y, VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PlcControlAdapter
@@ -448,7 +453,7 @@ def test_vision_runtime_without_detection():
     assert result.ai_decision is None
 
 
-def test_low_fps_moving_puck_keeps_identity_and_pursues_ai_target():
+def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limit():
     from main import submit_rally_target
 
     runtime = VisionRuntime(
@@ -480,14 +485,22 @@ def test_low_fps_moving_puck_keeps_identity_and_pursues_ai_target():
             else:
                 assert result.curling_state.vy < -25
             assert request is not None
-            assert (request.target_x, request.target_y) == result.ai_target
+            # 默认不限制深入（现场选的是"全部追"），x/y 都跟 AI 目标走。
+            # ⚠️ 回归点：默认曾经是 90，把 Y 卡在 AI_HOME_Y+90 = 229.52，
+            # 而 ai.py 允许到 349 —— 少了 111mm 前向行程，症状是"左右能到极限、Y 到不了"。
+            assert DEFAULT_DEFENSE_FORWARD_LIMIT is None
+            assert request.target_x == result.ai_target[0]
+            assert request.target_y == result.ai_target[1]
             assert request.target_x > READY_POSITION[0] + core.MALLET_RADIUS
             active_targets.append((request.target_x, request.target_y))
     assert set(identities) == {1}
-    assert RallyState.DEFENDING in states and RallyState.ATTACKING in states
+    assert RallyState.ATTACKING in states and RallyState.DEFENDING in states
+    # 关键回归点：Y 必须真的在动，而且要用满 ai.py 允许的行程。
+    ys = {round(y, 2) for _x, y in active_targets}
+    assert len(ys) > 1, f"Y 没有动，只有 {ys}"
+    assert max(ys) > AI_HOME_Y + 100.0, f"Y 的前向行程被压掉了：最大只有 {max(ys)}"
     targets = {(round(x, 2), round(y, 2)) for x, y in active_targets}
     assert (407.25, READY_POSITION[1]) in targets
-    assert (407.25, core.RINK_CENTER_Y - core.MALLET_RADIUS) in targets
 
 
 def test_low_fps_real_miss_revokes_confirmation():

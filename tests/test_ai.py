@@ -1,4 +1,4 @@
-from dataclasses import replace
+﻿from dataclasses import replace
 import math
 
 from air_hockey import core_config as layout
@@ -77,12 +77,62 @@ def test_moving_behind_puck_is_bypassed_and_outgoing_puck_ends_recovery():
 
 
 def test_recovery_does_not_strike_toward_goal_below_safe_back_line():
+    """近门保护：冰壶离自家球门太近时不要对齐去推它（否则可能踢进自家门）。
+
+    2026-10-13 现场要求"全部追球"，所以默认把 GUARD_OWN_GOAL_NEAR_LINE 关掉了。
+    两种状态都测：保护开着必须侧移避让，关掉时才允许对齐出击。
+    """
+    from air_hockey import ai as ai_module
+
     state = make_state(300, 70, ai_y=91)
     state.ai_x = 353
     state.stalled_stone_phase = "positioning"
+
+    original = ai_module.GUARD_OWN_GOAL_NEAR_LINE
+    try:
+        ai_module.GUARD_OWN_GOAL_NEAR_LINE = True
+        decision = AirHockeyAI().choose_target(state)
+        assert decision.target_y == state.ai_y
+        assert abs(decision.target_x - state.stone.x) > layout.STONE_RADIUS + layout.MALLET_RADIUS
+    finally:
+        ai_module.GUARD_OWN_GOAL_NEAR_LINE = original
+
+    # 默认关闭 = 全部追：允许把 X 对齐到冰壶
+    assert ai_module.GUARD_OWN_GOAL_NEAR_LINE is False
     decision = AirHockeyAI().choose_target(state)
-    assert decision.target_y == state.ai_y
-    assert abs(decision.target_x - state.stone.x) > layout.STONE_RADIUS + layout.MALLET_RADIUS
+    assert abs(decision.target_x - state.stone.x) <= layout.STONE_RADIUS + layout.MALLET_RADIUS
+
+
+def test_mallet_speed_adds_lead_in_front_of_moving_puck():
+    """提前量：目标要落在冰壶**行进方向的前方**，而不是它现在的位置。
+
+    回归现场反馈："球离开这个位置，轴才追上去"。
+    """
+    state = make_state(420.0, 250.0, vx=400.0, vy=-200.0)
+    plain = AirHockeyAI().choose_target(state)
+    lead = AirHockeyAI(mallet_speed=500.0).choose_target(state)
+    assert (plain.target_x, plain.target_y) == (420.0, 250.0)           # 无参数 = 原行为
+    assert lead.target_x > plain.target_x + 20.0                        # 球在往右跑
+    assert lead.target_y < plain.target_y - 10.0                        # 球在往上跑
+
+
+def test_mallet_speed_does_not_lead_a_still_puck():
+    state = make_state(420.0, 250.0, vx=0.0, vy=0.0)
+    lead = AirHockeyAI(mallet_speed=500.0).choose_target(state)
+    assert (lead.target_x, lead.target_y) == (420.0, 250.0)
+
+
+def test_lead_does_not_diverge_when_puck_outruns_mallet():
+    """球比球槌快时必须退回瞄当前位置，不能把目标推到场地角落。
+
+    回归：最初用"反复迭代 距离/速度"的写法，球速 447、mallet_speed 300 时
+    迭代发散，目标变成 (533, 77) 这种远角 —— 比不提前还差。
+    """
+    state = make_state(420.0, 250.0, vx=400.0, vy=-200.0)
+    decision = AirHockeyAI(mallet_speed=300.0).choose_target(state)     # 比球慢
+    assert (decision.target_x, decision.target_y) == (420.0, 250.0)
+    assert decision.target_x < layout.RINK_RIGHT - layout.MALLET_RADIUS
+    assert decision.target_y > layout.RINK_TOP + layout.MALLET_RADIUS
 
 
 def test_defense_uses_injected_predictor():

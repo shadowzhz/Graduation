@@ -34,15 +34,47 @@ class OpenCVBackend:
         self.info = None
         self.last_read_ms = self.last_convert_ms = 0.0
         self.last_pts_ns = None
-        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+
+        # config.fourcc 为空时保持原来的行为：先打开，再 set 各项。
+        #
+        # 注意（实测）：这台球台相机在同一分辨率下同时提供
+        #     mjpeg   1280x720 fps=200
+        #     yuyv422 1280x720 fps=10
+        # 而"打开之后再 set(CAP_PROP_FOURCC)"是**无声失败**的 —— 驱动不会重新协商，
+        # 于是永远停在 yuyv422 的 10 fps（实测 read 中位 97ms）。
+        # 只有在 VideoCapture() 构造时把 FOURCC 一起传进去，才能真正切到 MJPG
+        # （实测 read 中位约 6ms，约 100 FPS 进管线）。
+        #
+        # 但该格式的实际视野/清晰度需要在现场核对后再决定是否默认启用，
+        # 所以这里做成显式开关（main.py --camera-fast），默认不变。
+        fast_fourcc = getattr(self.config, "fourcc", None)
+        if fast_fourcc:
+            params = [
+                cv2.CAP_PROP_FRAME_WIDTH, int(self.config.width),
+                cv2.CAP_PROP_FRAME_HEIGHT, int(self.config.height),
+                cv2.CAP_PROP_FPS, int(round(self.config.requested_fps)),
+                cv2.CAP_PROP_FOURCC, int(cv2.VideoWriter_fourcc(*fast_fourcc)),
+            ]
+            try:
+                capture = cv2.VideoCapture(index, cv2.CAP_DSHOW, params)
+            except (cv2.error, TypeError):
+                # 旧版 OpenCV 没有三参重载；退回下面的"打开后再设"
+                capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fast_fourcc))
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
+                capture.set(cv2.CAP_PROP_FPS, self.config.requested_fps)
+        else:
+            capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         try:
             if not capture.isOpened():
                 raise RuntimeError(f"DirectShow 无法打开摄像头 {index}；检查设备编号和占用情况")
-            # This camera needs MJPG for its high-speed capture mode.
-            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
-            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
-            capture.set(cv2.CAP_PROP_FPS, self.config.requested_fps)
+            if not fast_fourcc:
+                # This camera needs MJPG for its high-speed capture mode.
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
+                capture.set(cv2.CAP_PROP_FPS, self.config.requested_fps)
         except Exception:
             capture.release()
             raise

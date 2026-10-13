@@ -172,7 +172,11 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
         plc.zone = (core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_CENTER_Y)
         assert plc.send_linear_move(core.RINK_RIGHT, core.RINK_CENTER_Y)
         move = plc.transport.moves[-1]
-        assert struct.unpack_from(">ddddi", move) == (195.0, 0.0, 190.0, 0.0, 5)
+        # 用符号常量而不是写死数值：这个断言的本意是验证**分量顺序**
+        # （X, 0, Y, 0 —— 实机 TO_Kinematics 用的是分量 1 和 3），
+        # 而不是验证行程的具体毫米数。写死数值会在改行程时误报。
+        assert struct.unpack_from(">ddddi", move) == (
+            protocol.PHYSICAL_X_MAX, 0.0, protocol.PHYSICAL_Y_MAX, 0.0, 5)
         assert len(move) == 36
         assert plc.transport.operations[-2:] == [
             ("payload", 1, 20, move), ("bit", 1, 56, 0, True)]
