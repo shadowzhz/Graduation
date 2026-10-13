@@ -30,12 +30,13 @@ class AIDecision:
 class AirHockeyAI:
     """只根据状态快照给目标，不直接改游戏实体。"""
 
-    def __init__(self, predictor=None, mallet_speed=None) -> None:
+    def __init__(self, predictor=None, mallet_speed=None, recovery_bounds=None) -> None:
         self.predictor = predictor or TrajectoryPredictor()
         self._random = random.Random()
         # 球槌速度估计（球台单位/秒）。给了才做"提前量"：目标瞄冰壶再走 lead_time
         # 之后的位置，而不是它现在的位置。不给（None）= 保持原行为，仿真不受影响。
         self.mallet_speed = float(mallet_speed) if mallet_speed else None
+        self.recovery_bounds = recovery_bounds
 
     def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
         """按难度反应延迟刷新目标。"""
@@ -64,7 +65,11 @@ class AirHockeyAI:
         stone_near_center = state.stone.y <= core.RINK_CENTER_Y + core.STONE_RADIUS + 2.0
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
         if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
-            return self._choose_stalled_stone_target(state, safe_left, safe_right)
+            if self.recovery_bounds is not None:
+                left, right, top, bottom = self.recovery_bounds
+                safe_left, safe_right = max(safe_left, left), min(safe_right, right)
+                safe_top, safe_bottom = max(safe_top, top), min(safe_bottom, bottom)
+            return self._choose_stalled_stone_target(state, safe_left, safe_right, safe_top, safe_bottom)
         stalled_stone_phase = "idle"
         stone_threatening_goal = state.stone.vy < -25.0
 
@@ -121,33 +126,37 @@ class AirHockeyAI:
             target_y = state.ai_home_y
         return AIDecision(core.RINK_CENTER_X, target_y, state.stalled_stone_phase)
 
-    @staticmethod
-    def _choose_stalled_stone_target(state, safe_left, safe_right) -> AIDecision:
+    def _choose_stalled_stone_target(self, state, safe_left, safe_right, safe_top, safe_bottom) -> AIDecision:
         """先侧移、后退、对齐，避免穿过身后的冰壶造成乌龙球。"""
         minimum_distance = core.STONE_RADIUS + core.MALLET_RADIUS
         clearance = minimum_distance + 8.0
         tolerance = max(3.0, minimum_distance * 0.1)
-        side = 1.0 if state.ai_x >= state.stone.x else -1.0
+        # 侧移途中沿用已经选择的方向，不因球心在球槌左右抖动而反复换边。
+        side_x = state.target_x if state.stalled_stone_phase == "sidestepping" else state.ai_x
+        side = 1.0 if side_x >= state.stone.x else -1.0
         if not safe_left <= state.stone.x + side * clearance <= safe_right:
             side = -side
         staging_x = clamp(state.stone.x + side * clearance, safe_left, safe_right)
         back_line = core.RINK_TOP + core.MALLET_RADIUS + core.GOAL_POST_RADIUS + 8.0
-        staging_y = max(back_line, state.stone.y - clearance)
+        staging_y = clamp(max(back_line, state.stone.y - clearance), safe_top, safe_bottom)
+        striking_x = clamp(state.stone.x, safe_left, safe_right)
         striking = state.stalled_stone_phase == "striking" and state.stone.y >= state.ai_y
         if not striking and state.ai_y > staging_y + tolerance:
             if abs(state.ai_x - state.stone.x) < clearance - tolerance:
                 return AIDecision(staging_x, state.ai_y, "sidestepping")
-            return AIDecision(state.ai_x, staging_y, "positioning")
+            return AIDecision(staging_x, staging_y, "positioning")
         # ponytail: below the post-clearance line, hold off rather than push toward our goal.
         # 2026-10-13 现场要求"全部追球"，这条近门保护由 GUARD_OWN_GOAL_NEAR_LINE 控制，
         # 默认已关闭。想恢复防守式保护把它改回 True。
-        if GUARD_OWN_GOAL_NEAR_LINE and state.stone.y <= back_line:
+        # 实机若连球心后方都退不到，不能对齐后从前侧把球推向自家门。
+        if ((self.recovery_bounds is not None and state.stone.y <= safe_top)
+                or (GUARD_OWN_GOAL_NEAR_LINE and state.stone.y <= back_line)):
             return AIDecision(staging_x, staging_y, "positioning")
-        if not striking and abs(state.ai_x - state.stone.x) > tolerance:
-            return AIDecision(clamp(state.stone.x, safe_left, safe_right), staging_y, "aligning")
+        if not striking and abs(state.ai_x - striking_x) > tolerance:
+            return AIDecision(striking_x, staging_y, "aligning")
         return AIDecision(
-            clamp(state.stone.x, safe_left, safe_right),
-            clamp(state.stone.y + core.MALLET_RADIUS, core.RINK_TOP + core.MALLET_RADIUS, core.RINK_CENTER_Y - core.MALLET_RADIUS),
+            striking_x,
+            clamp(state.stone.y + core.MALLET_RADIUS, safe_top, safe_bottom),
             "striking",
         )
 

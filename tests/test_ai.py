@@ -3,6 +3,7 @@ import math
 
 from air_hockey import core_config as layout
 from air_hockey.ai import AirHockeyAI
+from air_hockey.control.plc import PLCLink
 from air_hockey.prediction import TrajectoryPredictor
 from game_state import GameState, StoneState
 
@@ -63,6 +64,52 @@ def test_behind_puck_recovery_avoids_crossing_and_contacts_from_goal_side():
                 break
         else:
             raise AssertionError("AI did not reach the behind puck")
+
+
+def test_rear_recovery_contacts_from_reachable_goal_side():
+    link = PLCLink("offline")
+    bounds = link.reachable_bounds
+    minimum_distance = layout.STONE_RADIUS + layout.MALLET_RADIUS
+    for x, y, mallet_x in ((300, 140, 300), (480, 180, 480), (70, 180, 150)):
+        ai = AirHockeyAI(recovery_bounds=bounds)
+        state = make_state(x, y, ai_y=250)
+        state.ai_x = mallet_x
+        for _ in range(1000):
+            decision = ai.choose_target(state)
+            actual_target = link.physical_to_game(*link.game_to_physical(decision.target_x, decision.target_y))
+            assert math.dist(actual_target, (decision.target_x, decision.target_y)) < 1e-8
+            dx, dy = actual_target[0] - state.ai_x, actual_target[1] - state.ai_y
+            distance = math.hypot(dx, dy)
+            travel = min(distance, state.difficulty.ai_speed / 240)
+            state.ai_x += dx * travel / distance if distance else 0.0
+            state.ai_y += dy * travel / distance if distance else 0.0
+            state.target_x, state.target_y = decision.target_x, decision.target_y
+            state.stalled_stone_phase = decision.stalled_stone_phase
+            if math.hypot(x - state.ai_x, y - state.ai_y) < minimum_distance:
+                assert state.ai_y < y
+                break
+        else:
+            raise AssertionError(("Rear recovery never contacted puck", (x, y), state))
+
+
+def test_recovery_keeps_chosen_side_while_observation_crosses_mallet_center():
+    ai = AirHockeyAI(recovery_bounds=PLCLink("offline").reachable_bounds)
+    state = make_state(300, 180, ai_y=250)
+    first = ai.choose_target(state)
+    assert first.target_x > state.stone.x
+    state.target_x, state.target_y = first.target_x, first.target_y
+    state.stalled_stone_phase = first.stalled_stone_phase
+    state.stone.x = 301
+    following = ai.choose_target(state)
+    assert following.target_x > state.stone.x
+    assert following.stalled_stone_phase == "sidestepping"
+
+
+def test_front_interception_is_unchanged_by_recovery_travel_limits():
+    state = make_state(420, 250, vx=100, vy=-80)
+    free = AirHockeyAI(mallet_speed=500)
+    bounded = AirHockeyAI(mallet_speed=500, recovery_bounds=PLCLink("offline").reachable_bounds)
+    assert bounded.choose_target(state) == free.choose_target(state)
 
 
 def test_moving_behind_puck_is_bypassed_and_outgoing_puck_ends_recovery():
