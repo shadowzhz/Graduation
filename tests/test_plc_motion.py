@@ -310,13 +310,18 @@ def test_real_motion_requires_manual_arm_and_revokes_on_801_alarm():
         # DB1.1.4/1.5 是 MC_HOME.Done 瞬态脉冲：均为零时仍允许轴就绪运动。
         assert client.transport.db[1][1] & 0x30 == 0
 
+        link.drain_messages()
         client.transport.db[18][56:58] = (801).to_bytes(2, "big", signed=True)
         assert until(lambda: not link.armed and link.feedback.kinematics_error == 801)
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count > cycles)
+        assert len(link.drain_messages()) == 1
         before = len(client.transport.moves)
         link.set_target(400, 180)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count >= cycles + 3)
         assert len(client.transport.moves) == before
+        assert link.drain_messages() == []
         client.transport.db[18][56:58] = b"\x00\x00"
         assert until(lambda: link.feedback.kinematics_error == 0)
         link.set_target(450, 180)
@@ -325,7 +330,8 @@ def test_real_motion_requires_manual_arm_and_revokes_on_801_alarm():
         assert len(client.transport.moves) == before  # 报警清除不能自动复发运动
         assert link.enable_axes()
         assert until(lambda: link.armed)
-        link.set_target(450, 180)
+        # 报警中断的旧目标没有完成；人工重新授权后，同一目标也必须能重发。
+        link.set_target(300, 180)
         assert until(lambda: len(client.transport.moves) > before)
     finally:
         assert link.stop(timeout=2.0)
@@ -664,3 +670,120 @@ def test_native_motion_error_invalidates_worker_feedback_and_arm():
             assert client._last_phys_x is None and client.last_buffer_mode is None
         finally:
             client.disconnect()
+
+
+@contextmanager
+def _clocked_plc(period=0.01, pulse=0.01):
+    clock = [2.0]
+    edges = []
+
+    class ClockEvent:
+        callback = None
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, seconds):
+            clock[0] += max(0.0, seconds)
+            callback, self.callback = self.callback, None
+            if callback is not None:
+                callback()
+            return self.stopped
+
+    class TimedS7(MemoryS7):
+        def write_area(self, *args):
+            clock[0] += 0.002
+            result = super().write_area(*args)
+            _area, db, bit_offset, data, _word = args
+            if (db, bit_offset) == (1, 56 * 8):
+                edges.append((clock[0], bool(data[0]), bytes(self.db[1][20:56])))
+            return result
+
+        def read_multi_vars(self, items):
+            clock[0] += 0.002
+            return super().read_multi_vars(items)
+
+        def db_write(self, *args):
+            clock[0] += 0.002
+            return super().db_write(*args)
+
+    with memory_binding(), patch.object(protocol.time, "monotonic", side_effect=lambda: clock[0]):
+        client = MemoryPLC()
+        client.transport = TimedS7()
+        assert client.connect()
+        link = PLCLink("memory", period=period, trigger_low_time=pulse,
+                       client_factory=lambda *args: client)
+        link._stop_event = ClockEvent()
+        link._echo_seen = True
+        link._echo_change_at = clock[0]
+        link._last_plc_heartbeat = False
+        link._armed = True
+        try:
+            yield link, client, clock, edges
+        finally:
+            client.disconnect()
+
+
+def test_native_trigger_pulses_survive_asynchronous_plc_scans():
+    with _clocked_plc() as (link, client, clock, edges):
+        points = [(200 + step * 10, 250) for step in range(20)]
+        expected = [client.game_to_physical(*point) for point in points]
+        for point in points:
+            assert link.set_target(*point)
+            start = clock[0]
+            link._cycle()
+            clock[0] += max(0.0, link.period - (clock[0] - start))
+        link.clear_target()
+        link._cycle()
+
+        for phase in (0.0, 0.001, 0.003, 0.009):
+            captured = []
+            index = 0
+            current = previous = False
+            payload = None
+            tick = 2.0 + phase
+            while tick <= edges[-1][0] + 0.010:
+                while index < len(edges) and edges[index][0] <= tick:
+                    _stamp, current, payload = edges[index]
+                    index += 1
+                if current and not previous:
+                    x, _unused1, y, _unused2 = struct.unpack_from(">dddd", payload)
+                    captured.append((x, y))
+                previous = current
+                tick += 0.010
+            assert captured == expected, (phase, len(captured), len(expected))
+
+
+def test_target_changed_during_trigger_wait_sends_latest_position():
+    with _clocked_plc() as (link, client, _clock, _edges):
+        assert link.set_target(200, 250)
+        link._stop_event.callback = lambda: link.set_target(400, 200)
+        link._cycle()
+        expected_x, expected_y = client.game_to_physical(400, 200)
+        assert struct.unpack_from(">dddd", client.transport.moves[0]) == (expected_x, 0.0, expected_y, 0.0)
+
+
+def test_target_cleared_during_trigger_wait_never_generates_motion():
+    with _clocked_plc() as (link, client, _clock, _edges):
+        assert link.set_target(200, 250)
+        link._stop_event.callback = link.clear_target
+        link._cycle()
+        assert client.transport.moves == []
+        assert client.transport.pending_payload is None
+        assert client.transport.db[1][56] & 1 == 0
+
+
+def test_stop_during_high_pulse_hold_prevents_the_next_command():
+    with _clocked_plc() as (link, client, _clock, _edges):
+        assert link.set_target(200, 250)
+        link._cycle()
+        before = list(client.transport.moves)
+        assert link.set_target(400, 200)
+        link._stop_event.callback = link.stop
+        link._cycle()
+        assert not link.armed and link._target is None
+        assert client.transport.moves == before

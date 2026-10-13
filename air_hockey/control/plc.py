@@ -432,17 +432,11 @@ class PLCLink:
         self.period = max(0.005, float(period))
         if not math.isfinite(self.period):
             raise ValueError("PLC period must be finite")
-        # 每个周期清掉运动触发之后，至少要压低这么久，PLC 的 P 沿才抓得到。
-        #
-        # ⚠️ 这个值是**每个周期的固定开销**：它 + 4 次 S7 往返(≈8.3ms) 就是最短周期。
-        # 10ms 时实际只能跑到约 55Hz —— 即使 --plc-rate 填 100。
-        # 而周期越长，每周期目标步距越大；步距一旦超过 BUFFER_MODE_IMMEDIATE_MM
-        # 就会切成 BufferMode=0（中止重开），表现就是"一个点一个点走"。
-        # 调小它可以直接提高实际指令频率。下限取决于 PLC 的 OB1 扫描周期，
-        # 至少要保证 P 沿能在一低一高之间被扫到（一般 2~3ms 够）。
+        # 高、低电平都要跨过 PLC 扫描；仅保证低电平会在高通信频率下漏掉上升沿。
         self.trigger_low_time = max(0.0, float(trigger_low_time))
         if not math.isfinite(self.trigger_low_time):
             raise ValueError("trigger_low_time must be finite")
+        self._trigger_high_at = None
         self._requires_snap7 = client_factory is None
         self._client = (PLCInterface(ip, rack, slot, zone=self.zone) if client_factory is None
                         else client_factory(ip, rack, slot))
@@ -467,11 +461,7 @@ class PLCLink:
         self._echo_change_at = 0.0
         self._echo_seen = False
         self.cycle_count = 0
-        # 现场诊断：实际周期频率、下发频率、BufferMode 分布、步距。
-        #
-        # "机械臂一个点一个点走"就是 BufferMode=0（中止当前运动、立刻重开）占比高：
-        # 每来一条指令轴就被中止一次，速度反复归零。这个统计能把"顿"量出来，
-        # 也能验证 --trigger-low-ms / --plc-rate 调了到底有没有用。
+        # 统计实际频率、中止重规划次数和目标步距；不把它们直接当作 801 的原因。
         self._stats_at = time.monotonic()
         self._stats_cycles = 0
         self._stats_counters = {"sent": 0, "deadzone": 0, "other": 0,
@@ -487,6 +477,7 @@ class PLCLink:
             self._feedback = PLCFeedback()
             self._armed = False
             self._arm_pending = False
+            self._trigger_high_at = None
             while not self._commands.empty():
                 try:
                     self._commands.get_nowait()
@@ -534,12 +525,7 @@ class PLCLink:
         return self._client.last_send_state
 
     def diagnostics(self):
-        """返回并重置"上一次调用以来"的 PLC 侧实测统计。
-
-        现场判断"顿"还是"顺"用：BufferMode=0 是中止重开，占比高就是
-        "一个点一个点走"；同时还能验证 --trigger-low-ms / --plc-rate
-        调了到底有没有真的提高周期频率。
-        """
+        """返回并重置通信频率、BufferMode 分布和相邻目标步距，不代表电机执行确认。"""
         with self._lock:
             now = time.monotonic()
             elapsed = max(1e-9, now - self._stats_at)
@@ -569,7 +555,7 @@ class PLCLink:
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
         if mode_total and 100.0 * counters["mode0"] / mode_total > 20.0:
-            text += "  ← 中止占比偏高，轴会一顿一顿；试试 --trigger-low-ms 3"
+            text += "  ← 中止占比偏高；核对目标跳变与轴动态，未测 PLC 扫描周期不要缩短脉宽"
         return text
 
 
@@ -626,6 +612,8 @@ class PLCLink:
     def _enable_on_worker(self):
         if not self._client.enable_axes():
             return False
+        # 报警/回零可能中断旧目标；人工重新授权后不能把未完成目标当作已到达。
+        self._client.reset_tracking()
         with self._lock:
             if not self._stop_event.is_set():
                 # Arming awaits a healthy fresh status, never a cached snapshot.
@@ -697,6 +685,7 @@ class PLCLink:
             self._target_at = 0.0
             self._armed = False
             self._arm_pending = False
+            self._trigger_high_at = None
             if self._feedback.valid:
                 self._feedback = PLCFeedback()
             # Commands from the old connection must not be replayed on reconnect.
@@ -771,6 +760,10 @@ class PLCLink:
 
     def _cycle(self):
         client = self._client
+        if self._trigger_high_at is not None:
+            remaining_high = self.trigger_low_time - (time.monotonic() - self._trigger_high_at)
+            if remaining_high > 0.0 and self._stop_event.wait(remaining_high):
+                return
         try:
             client.clear_trigger()
         except Exception as exc:
@@ -778,10 +771,8 @@ class PLCLink:
             client.disconnect()
             self._invalidate_feedback()
             return
-        # 触发必须是"先低够久、再抬起来"，PLC 的 P 沿才抓得到。
-        # 但读状态/发心跳本来就要花约 3.3ms，那段时间触发也是低的 —— 所以
-        # 只在真正要下发时才把**剩余**的压低时间等满，不要无条件等一整个
-        # trigger_low_time（那会让每个周期白白多花掉这段时间）。
+        self._trigger_high_at = None
+        # 状态读取与心跳的耗时已算在低电平内，只补剩余的脉宽。
         cleared_at = time.monotonic()
         status = client.read_status_and_position()
         if status is None or not client.connected:
@@ -791,10 +782,13 @@ class PLCLink:
         if not client.connected or self._stop_event.is_set():
             self._invalidate_feedback()
             return
+        previous = self.feedback
         feedback = self._publish(status)
         if feedback is None:
             return
         safe = self._motion_safe(feedback)
+        revoked = False
+        interrupted_target = None
         with self._lock:
             # Serious faults revoke even a pending arm request. During the initial
             # heartbeat/enable ramp, hold pending without allowing any movement.
@@ -804,6 +798,8 @@ class PLCLink:
                          and time.monotonic() - self._echo_change_at >= ECHO_TIMEOUT)
                      or (self._armed and not safe))
             if fault:
+                revoked = self._armed or self._arm_pending
+                interrupted_target = self._target
                 self._armed = False
                 self._arm_pending = False
                 self._target = None
@@ -814,6 +810,22 @@ class PLCLink:
             target = (self._target if safe and self._armed
                       and not self._stop_event.is_set()
                       and time.monotonic() - self._target_at <= TARGET_MAX_AGE else None)
+        if revoked:
+            self._messages.put(
+                f"运动撤销快照: kin={feedback.kinematics_error} "
+                f"en=({feedback.x_en},{feedback.y_en}) ready={feedback.axes_ready} "
+                f"err=({feedback.x_err},{feedback.y_err}) busy={feedback.busy} "
+                f"echo={feedback.plc_echo_ok} comm_lost={feedback.comm_lost} "
+                f"stop={feedback.group_stop} latch={feedback.comm_lost_latch} "
+                f"physical=({status['x_pos']:.3f},{status['y_pos']:.3f}) "
+                f"prev_valid={previous.valid} prev_kin={previous.kinematics_error} "
+                f"prev_en=({previous.x_en},{previous.y_en}) prev_ready={previous.axes_ready} "
+                f"prev_err=({previous.x_err},{previous.y_err}) prev_busy={previous.busy} "
+                f"intent={interrupted_target} "
+                f"last_sent=({getattr(client, '_last_phys_x', None)},{getattr(client, '_last_phys_y', None)}) "
+                f"mode={getattr(client, 'last_buffer_mode', None)} "
+                f"step_mm={getattr(client, 'last_send_dist_mm', None)}"
+            )
         # Network I/O is never under the lock. Cancellation of an already executing
         # db_write cannot be guaranteed; no subsequent target remains queued.
         if target is not None:
@@ -821,22 +833,33 @@ class PLCLink:
             remaining_low = self.trigger_low_time - (time.monotonic() - cleared_at)
             if remaining_low > 0.0 and self._stop_event.wait(remaining_low):
                 return
+            # 等待脉宽期间生产者可能更新、清除目标或撤销授权，发送前取最新意图。
+            with self._lock:
+                target = (self._target if self._armed and not self._stop_event.is_set()
+                          and time.monotonic() - self._target_at <= TARGET_MAX_AGE
+                          and time.monotonic() - feedback.stamp <= TARGET_MAX_AGE else None)
+            if target is None:
+                self.cycle_count += 1
+                return
             client.send_linear_move(*target)
+            if client.connected and client.last_send_state == "sent":
+                self._trigger_high_at = time.monotonic()
             # 现场诊断累计。整个累计块必须容错 —— 诊断是"非必要"的，
             # 绝不能让它的任何异常把 worker 线程打死（那会让后续命令全部失效）。
             try:
                 state = client.last_send_state
-                if state == "sent":
-                    self._stats_counters["sent"] += 1
-                    mode = getattr(client, "last_buffer_mode", None)
-                    if mode in (0, 5):
-                        self._stats_counters["mode0" if mode == 0 else "mode5"] += 1
-                        self._stats_dists.append(
-                            float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
-                elif state == "deadzone":
-                    self._stats_counters["deadzone"] += 1
-                else:
-                    self._stats_counters["other"] += 1
+                with self._lock:
+                    if state == "sent":
+                        self._stats_counters["sent"] += 1
+                        mode = getattr(client, "last_buffer_mode", None)
+                        if mode in (0, 5):
+                            self._stats_counters["mode0" if mode == 0 else "mode5"] += 1
+                            self._stats_dists.append(
+                                float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
+                    elif state == "deadzone":
+                        self._stats_counters["deadzone"] += 1
+                    else:
+                        self._stats_counters["other"] += 1
             except Exception:
                 pass
         if not client.connected:
