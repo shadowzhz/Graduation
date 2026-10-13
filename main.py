@@ -272,6 +272,7 @@ def run_vision(args):
     if args.plc:
         plc = PLCLink(args.plc, period=1.0 / args.plc_rate,
                       trigger_low_time=args.trigger_low_ms / 1000.0)
+        runtime.ai.recovery_bounds = plc.reachable_bounds
         plc.start()
         if window is not None and not args.dry_run:
             window.attach_plc(plc)

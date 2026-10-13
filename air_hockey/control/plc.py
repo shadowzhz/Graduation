@@ -586,6 +586,13 @@ class PLCLink:
     def physical_to_game(self, x, y):
         return _physical_to_game(self.zone, x, y)
 
+    @property
+    def reachable_bounds(self):
+        """球槌中心的实际机械行程，使用与轴反馈相同的场地坐标映射。"""
+        left, top = self.physical_to_game(PHYSICAL_X_MIN, PHYSICAL_Y_MIN)
+        right, bottom = self.physical_to_game(PHYSICAL_X_MAX, PHYSICAL_Y_MAX)
+        return left, right, top, bottom
+
     def set_target(self, game_x, game_y):
         try:
             x, y = _validate_game_point(self.zone, game_x, game_y)
