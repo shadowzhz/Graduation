@@ -371,11 +371,7 @@ def run_vision(args):
                     elif feedback.comm_lost_latch:
                         status_text += " | PLC 通信丢失锁存：请现场检查并复位"
                     elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
-                        # ★ 把"轴自己的故障"和"运动学的错误码"分开显示。
-                        #   这两个是独立的东西（DB18.0.4/DB18.4.0 vs DB18.56）：
-                        #     只有 801、轴位为 0  → 多半是"轴未使能/未就绪"，不是过冲
-                        #     轴位为 1          → 轴真的故障（撞软限位、跟随误差等）
-                        #   以前这里合成一句"PLC 轴报警 801"，分不出来。
+                        # 运动学报警与轴故障位分开显示；具体原因看报警瞬间快照与 TIA。
                         parts = []
                         if feedback.x_err or feedback.y_err:
                             which = ("X" if feedback.x_err else "") + ("Y" if feedback.y_err else "")
@@ -383,7 +379,7 @@ def run_vision(args):
                         else:
                             parts.append("轴故障位=无")
                         if feedback.kinematics_error:
-                            note = "（未使能/未就绪类，按 C 清除再按 E）" if not feedback.axis_fault else ""
+                            note = "（参与轴未就绪；查看运动撤销快照/TIA）" if feedback.kinematics_error == 801 else ""
                             parts.append(f"运动学错误码={feedback.kinematics_error}{note}")
                         if feedback.group_stop:
                             parts.append("停止位=1")
@@ -565,12 +561,9 @@ def main():
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     parser.add_argument("--trigger-low-ms", type=float, default=10.0, metavar="MS",
-                        help="每个周期把运动触发压低多久（毫秒，默认 10）。"
-                             "这是**固定开销**：它加上约 8.3ms 的 S7 往返就是一个周期的最短时间 —— "
-                             "10ms 时实际只能跑到约 55Hz（即使 --plc-rate 填 100），"
-                             "而周期越长每周期步距越大，超过 10mm 就切成 BufferMode=0（中止重开），"
-                             "表现就是机械臂一个点一个点走。调小到 3~5 可以明显提高实际频率；"
-                             "下限取决于 PLC 的 OB1 扫描周期，至少要保证 P 沿被扫到（一般 2~3ms 够）")
+                        help="运动触发高、低电平均保持的最小脉宽（毫秒，默认 10）。"
+                             "实际通信频率受 S7 往返和两相脉宽限制；"
+                             "未测 PLC 扫描周期不要调小，否则 PLC 可能漏掉上升沿")
     parser.add_argument("--mallet-speed", type=float, default=500.0, metavar="UNITS_PER_SEC",
                         help="球槌可达速度估计（球台单位/秒，默认 500）。用来算提前量："
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "

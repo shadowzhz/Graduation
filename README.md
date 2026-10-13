@@ -157,6 +157,10 @@ Windows 将 `python3` 改为 `python`，相机用 `--camera-device 0`。标定�
 
 GUI/控制台显示当前动作、track_valid、球速度、目标、球槌实际位置、身后球击打阶段及 PLC armed/safe。动作/追踪/授权变化立即打印，不按每帧刷。没有反应时核对检测标记是否跟球、目标是否变化、PLC 是否授权及实际位置是否跟上；不能用仿真成功替代实机接触验证。
 
+`--trigger-low-ms`（默认 10）现在同时保证运动触发位的高、低电平最小保持时间；状态读取和心跳耗时计入低电平，不额外重复等待。只保证低电平时，高通信频率可能把高电平缩短到一次 S7 往返，导致 PLC 扫描漏掉上升沿。等待结束后只发送最新有效目标，期间被清除的目标不会继续下发。实际频率可能低于 `--plc-rate` 请求值；未测 PLC 扫描周期不要缩短脉宽。DB 地址、BIT、BufferMode、轴速度/加速度和报警互锁不变。
+
+运动中报警撤销授权时，工作线程只打印一条 `运动撤销快照`，包含前后使能/就绪/轴故障/busy 状态、当前运动学错误码、原始机械位置、最后已发送的物理目标及 BufferMode。801 表示参与运动系统的轴未就绪，具体原因仍需结合这条快照和 TIA 诊断；不会自动复位或重新授权。人工 E 重新授权会清除本地已发送目标的死区缓存，避免把报警中断的目标当作已完成；报警清除本身不重发目标。Windows 现场可用 `python -u main.py --camera-device 0 --camera-fast --plc 192.168.0.64 --plc-rate 30 --trigger-low-ms 10 2>&1 | Tee-Object -FilePath play_console.log` 保留控制台；故障时提供这条快照而不是仅截取“禁止运动”。
+
 PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在 Windows 或实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
 
 常用参数：`--camera-device`、`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。冰壶 HSV 默认阈值为 `--lower 170 100 80 --upper 10 255 255`，会同时覆盖红色在 HSV 色调 0 和 179 两端的范围；灯光、曝光或壶颜色不同需用实拍图重新调。
