@@ -7,7 +7,13 @@ import numpy as np
 
 from air_hockey import core_config as core
 from air_hockey.ai import AirHockeyAI
-from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
+from air_hockey.app.rally import (
+    OCCLUSION_HOLD_SECONDS,
+    OCCLUSION_KEEP_RADIUS,
+    READY_POSITION,
+    RallyController,
+    RallyState,
+)
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
 from air_hockey.control import PLCLink, PlcControlAdapter
@@ -241,3 +247,55 @@ def test_dry_run_and_manual_plc_arm_remain_independent_of_play():
     result.rally = replace(result.rally, state=RallyState.RECOVERING, target=READY_POSITION)
     assert submit_rally_target(result, adapter, plc) is not None
     assert plc._target == READY_POSITION and not plc.armed
+
+
+def test_occluded_puck_keeps_target_while_mallet_is_on_it():
+    """★ 遮挡保持：球槌压到球上、检测消失时，不该放弃目标退回 READY。
+
+    现场症状（相机斜视，球槌挡住冰壶）：逼近球 → ATTACKING->RECOVERING(no puck)
+    → 目标回 READY → 退开 → 球又可见 → 再去 → 再次遮挡，来回好几轮
+    （日志里 mallet 239→175→143 退开 → 246→…→143 再来）。
+    """
+    controller = RallyController()
+    # 1) 球停在自己半场 → 正常追击，拿到目标
+    decision = tick(controller, observation(1, x=420, y=250, vy=0))
+    assert decision.state == RallyState.ATTACKING
+    held = decision.target
+    assert held is not None
+
+    # 2) 球槌正压在那个目标上（就是它挡住了球），这一帧没有检测
+    occluded = observation(1.05, x=420, y=250, vy=0, hard=False, confirmed=False,
+                           mallet=held)
+    decision = tick(controller, occluded, now=1.05, mallet=held)
+    assert decision.state == RallyState.ATTACKING, "遮挡时不该退回 RECOVERING"
+    assert decision.target == held, "遮挡时应保持原目标"
+    assert "hidden by mallet" in decision.reason
+
+    # 2b) ★ 回归：**连续多帧**遮挡也必须一直保持。
+    #     现场实测收紧参数时会"只保持一帧、下一帧就放弃"，然后又冲回去。
+    for i in range(1, 6):
+        t = 1.05 + i * 0.006
+        near = (held[0] + i * 3.0, held[1] + 2.0)
+        decision = tick(controller,
+                        observation(t, x=420, y=250, vy=0, hard=False, confirmed=False,
+                                    mallet=near),
+                        now=t, mallet=near)
+        assert decision.target == held, f"第 {i} 帧遮挡保持断了"
+        assert decision.state == RallyState.ATTACKING
+
+    # 3) 球槌离得很远时不能保持 —— 那是真丢了，该回 READY
+    far = (READY_POSITION[0] + 400.0, READY_POSITION[1])
+    assert math.dist(far, held) > OCCLUSION_KEEP_RADIUS, "用例本身要足够远"
+    decision = tick(controller,
+                    observation(1.1, x=420, y=250, vy=0, hard=False, confirmed=False,
+                                mallet=far),
+                    now=1.1, mallet=far)
+    assert decision.target == READY_POSITION
+
+    # 4) 超过保持窗口之后也必须放弃
+    late = 1.0 + OCCLUSION_HOLD_SECONDS + 0.15
+    decision = tick(controller,
+                    observation(late, x=420, y=250, vy=0, hard=False, confirmed=False,
+                                mallet=held),
+                    now=late, mallet=held)
+    assert decision.target == READY_POSITION

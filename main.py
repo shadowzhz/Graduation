@@ -40,6 +40,7 @@ from air_hockey.camera import CameraConfig, CameraManager
 from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.control.adapter import PlcTarget
 from air_hockey.control.plc import TARGET_MAX_AGE
+from air_hockey.control import plc as plc_module
 from air_hockey.recording import RuntimeRecorder
 
 DISPLAY_WIDTH = 640         # 窗口图片最大宽度 640
@@ -122,16 +123,70 @@ class VisionWindow:
         self._shared = None
 
     def attach_plc(self, link):
-        """轴命令由现场操作员主动触发；连接成功不自动使能。"""
+        """轴命令由现场操作员主动触发；连接成功不自动使能。
+
+        ★ 单轴按钮：某个轴报 801 / 撞限位之后可以**只把那个轴**撤下来，
+          另一个继续用；也能单独回零 / 单独复位。
+        ★ 单轴使能**不会**让程序开始追球 —— 运动需要 X、Y 同时使能
+          （PLCLink._motion_safe 要求 x_en and y_en）。
+        ⚠️ 回零会让该轴动（去找参考点），是刻意的人工动作。
+        """
+        self._plc = link
         controls = tk.Frame(self.root)
         controls.pack(fill="x")
-        for label, command in (("E 轴使能", link.enable_axes),
-                               ("H 轴回零", link.home_axes),
-                               ("C 轴复位", link.axes_reset)):
-            tk.Button(controls, text=label, command=command).pack(side="left", expand=True)
+        self._axis_buttons = {}
+        for axis, name in (("x", "X"), ("y", "Y")):
+            button = tk.Button(
+                controls, text=f"{name} 轴使能 ( {name.lower()} )",
+                command=lambda a=axis: self._toggle_axis(a))
+            button.pack(side="left", expand=True)
+            self._axis_buttons[axis] = button
+            tk.Button(controls, text=f"{name} 回零 ( {name} )",
+                      command=lambda a=axis: self._home_axis(a)).pack(side="left", expand=True)
+            tk.Button(controls, text=f"{name} 复位",
+                      command=lambda a=axis: self._reset_axis(a)).pack(side="left", expand=True)
+        second = tk.Frame(self.root)
+        second.pack(fill="x")
+        for label, command in (("E 双轴使能", link.enable_axes),
+                               ("H 双轴回零", link.home_axes),
+                               ("C 全部复位", link.axes_reset)):
+            tk.Button(second, text=label, command=command).pack(side="left", expand=True)
         for key, command in (("e", link.enable_axes), ("h", link.home_axes),
                              ("c", link.axes_reset)):
             self.root.bind(key, lambda _event, callback=command: callback())
+        # ★ 大小写区分：小写 = 单轴使能/撤销，大写(Shift) = 单轴回零
+        self.root.bind("x", lambda _event: self._toggle_axis("x"))
+        self.root.bind("y", lambda _event: self._toggle_axis("y"))
+        self.root.bind("X", lambda _event: self._home_axis("x"))
+        self.root.bind("Y", lambda _event: self._home_axis("y"))
+
+    def _toggle_axis(self, axis):
+        """单轴使能 / 撤销。切换后立刻刷新按钮文字。"""
+        link = getattr(self, "_plc", None)
+        if link is None:
+            return
+        sent, wanted = link.toggle_axis_enable(axis)
+        if not sent:
+            return
+        button = (self._axis_buttons or {}).get(axis)
+        if button is not None:
+            name = axis.upper()
+            button.config(text=(f"{name} 轴撤销 ( {axis} )" if wanted
+                                else f"{name} 轴使能 ( {axis} )"))
+        if not wanted:
+            # 撤下一个轴 → 程序立刻停止发运动（_motion_safe 需要两个都使能）
+            print(f"[PLC] {axis.upper()} 轴已撤销使能 —— 在它重新使能前不会下发运动")
+
+    def _home_axis(self, axis):
+        link = getattr(self, "_plc", None)
+        if link is not None:
+            print(f"[PLC] {axis.upper()} 轴回零 —— 该轴会移动，注意手别在行程里")
+            link.home_axis(axis)
+
+    def _reset_axis(self, axis):
+        link = getattr(self, "_plc", None)
+        if link is not None:
+            link.reset_axis(axis)
 
     def start(self, lock, shared):
         self._lock = lock
@@ -270,8 +325,21 @@ def run_vision(args):
     plc_adapter = PlcControlAdapter()
     rally = RallyController(defense_forward_limit=args.defense_forward_limit)
     if args.plc:
+        # ★ 命令余量必须在建 PLCLink 之前设好 —— 夹取用的 COMMAND_* 是
+        #   模块常量，_prepare_move 每次下发时直接读它。
+        if args.motion_margin_mm is not None:
+            plc_module.set_motion_margin(args.motion_margin_mm)
+        print(f"[PLC] 命令余量 {plc_module.MOTION_MARGIN_MM:.0f}mm → "
+              f"X {plc_module.COMMAND_X_MIN:.0f}..{plc_module.COMMAND_X_MAX:.0f} "
+              f"Y {plc_module.COMMAND_Y_MIN:.0f}..{plc_module.COMMAND_Y_MAX:.0f}"
+              f"（软限位 {plc_module.PHYSICAL_X_MIN:.0f}..{plc_module.PHYSICAL_X_MAX:.0f} / "
+              f"{plc_module.PHYSICAL_Y_MIN:.0f}..{plc_module.PHYSICAL_Y_MAX:.0f}）")
         plc = PLCLink(args.plc, period=1.0 / args.plc_rate,
-                      trigger_low_time=args.trigger_low_ms / 1000.0)
+                      trigger_low_time=args.trigger_low_ms / 1000.0,
+                      blend_threshold_mm=args.blend_threshold_mm,
+                      target_slew_mm=args.target_slew_mm,
+                      target_accel_mm_s2=args.target_accel_mm_s2,
+                      sequence_trigger=(args.trigger_mode == "sequence"))
         plc.start()
         if window is not None and not args.dry_run:
             window.attach_plc(plc)
@@ -371,16 +439,12 @@ def run_vision(args):
                     elif feedback.comm_lost_latch:
                         status_text += " | PLC 通信丢失锁存：请现场检查并复位"
                     elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
-                        # 运动学报警与轴故障位分开显示；具体原因看报警瞬间快照与 TIA。
-                        parts = []
-                        if feedback.x_err or feedback.y_err:
-                            which = ("X" if feedback.x_err else "") + ("Y" if feedback.y_err else "")
-                            parts.append(f"轴故障位={which} ← 轴真的报错了，去 TIA 轴诊断看代码")
-                        else:
-                            parts.append("轴故障位=无")
-                        if feedback.kinematics_error:
-                            note = "（参与轴未就绪；查看运动撤销快照/TIA）" if feedback.kinematics_error == 801 else ""
-                            parts.append(f"运动学错误码={feedback.kinematics_error}{note}")
+                        # ★ 三个来源的错误码全部打出来，不要再靠猜：
+                        #   轴自己的码（DB18.2 / DB18.6）
+                        #   运动指令 MC_MoveLinearAbsolute 的码（DB18.58.3 / DB18.60）
+                        #   运动学的 ErrorDetail.Number（DB18.56，就是那个 801）
+                        which = ("X" if feedback.x_err else "") + ("Y" if feedback.y_err else "")
+                        parts = [f"轴故障位={which or '无'}", feedback.fault_detail()]
                         if feedback.group_stop:
                             parts.append("停止位=1")
                         status_text += " | PLC " + " / ".join(parts) + "：禁止运动"
@@ -576,6 +640,52 @@ def main():
                              "**默认不限制**（= ai.py 自身的上限，现场选的是「全部追球」）。"
                              "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
                              "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
+    parser.add_argument("--trigger-mode", choices=("pulse", "sequence"), default="pulse",
+                        help="运动触发方式。pulse（默认）= 抬 DB1.56.0 的 P 沿，"
+                             "脉宽必须跨过 PLC 扫描周期（实测 2~3ms、偶发 5ms，"
+                             "所以高低各要 10ms）→ 周期被锁在约 28ms（35Hz），"
+                             "快球时步距超过混合阈值就只能中止重开（一顿一顿）。"
+                             "sequence = 写 DB1.DBD60 序号，PLC 比较序号后执行，"
+                             "**不需要脉宽** → 周期只剩 4 次 S7 往返（约 6.6ms，~150Hz）。"
+                             "⚠️ 用 sequence 之前必须先在 PLC 里加序号比较逻辑（见 plc.py 注释）")
+    parser.add_argument("--blend-threshold-mm", type=float, default=10.0, metavar="MM",
+                        help="相邻两条目标之间步距超过它就改用 BufferMode=0（中止重开），"
+                             "否则用 5（混合）。实测 50mm + 混合会「卡住」，所以默认 10。"
+                             "★ 卡住的原因是 TO「作业序列 → 最大舍入间距」= 100%%："
+                             "混合半径吃掉整个运动。把舍入间距调到 30%% 左右之后，"
+                             "可以把这个阈值放宽（例如 40），让快球也走混合、真正平滑")
+    parser.add_argument("--target-slew-mm", type=float, default=0.0, metavar="MM",
+                        help="目标限速（mm/周期，默认 0 = 关闭）。"
+                             "★★★ 这个治的是「顿」：rally 状态机切换时目标会**瞬间跳变**"
+                             "（现场实测 p95 步距 192.8mm，中止占比 48%%），"
+                             "每跳一次就 BufferMode=0 中止重开一次。"
+                             "★ 光提高 --blend-threshold-mm **没用** —— "
+                             "实测 192mm 的跳变即使阈值提到 40 也照样中止。"
+                             "必须把跳变削成斜坡：设成和 --blend-threshold-mm **相同的值**，"
+                             "步距就永远不超阈值 → 永不中止 → 运动连续。"
+                             "推荐组合：--blend-threshold-mm 40 --target-slew-mm 40"
+                             "（40mm/周期 × 63Hz ≈ 2500mm/s，够拦截快球）")
+    parser.add_argument("--motion-margin-mm", type=float, default=None, metavar="MM",
+                        help="命令余量：下发目标时离 TIA 软限位再内缩多少毫米（默认 15）。"
+                             "★★★ 轴报 801「运动学未就绪」多半就是撞软限位。"
+                             "现场实测日志：AI 目标长期卡在夹取角点 game(67,349) → "
+                             "物理正好是命令包络角点，A 轴先 801、后来 Y 轴也 801"
+                             "（last_sent=(-172,177)、busy=True、intent=(67,349)）。"
+                             "★ 撞了就把这个调大（例如 25），比改代码方便；"
+                             "但**根治是在 TIA 里把该轴加速度/急停斜坡调柔** —— "
+                             "软件只限制指令，管不了轴自己的过冲")
+    parser.add_argument("--target-accel-mm-s2", type=float, default=25000.0, metavar="MM_S2",
+                        help="目标加速度限幅（mm/s²，默认 25000；0 = 关闭）。"
+                             "★★★ 治的是**跟随误差 801**：只限步长（--target-slew-mm）"
+                             "管不住「目标突然反向」——限速器只看步长大小、不看方向。"
+                             "现场 TIA 工艺对象 Y轴「状态位和错误位」实测："
+                             "错误=跟随误差(红)、警告=动态限值(黄)、已归位=绿、驱动装置=灰，"
+                             "快照 physical Y=110.49（行程正中间、prev_busy=True）——"
+                             "**轴在正常位置自由运动途中跟不上指令，不是撞限位**。"
+                             "算下来 40mm/周期 @65Hz 需要约 169,000 mm/s²，"
+                             "而轴的能力只有 106N/3kg ≈ 35,000 mm/s²，差约 5 倍。"
+                             "限加速度后急转时目标自己拐大弯、直线时仍可全速。"
+                             "★ 调大更跟手但更容易报跟随误差；调小更稳但急转变慢")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
     parser.add_argument("--camera-fast", action="store_true",

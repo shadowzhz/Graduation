@@ -39,6 +39,24 @@ class TrajectoryDebug:
     predicted_endpoint: tuple[float, float]
 
 
+def _track_usable(track) -> bool:
+    """轨道是否可用于下游决策（**含漏检宽限期内**）。
+
+    ★ 为什么不能用 `track.state == TrackState.ACTIVE`：
+    追踪器在**漏检第一帧**就把 state 置成 LOST（见 tracker._handle_missing_detection），
+    而"真正丢弃"（`_track = None`）要等 missed_frames 超过 max_missed_frames。
+    也就是说 `state` 不是"还有没有球"的判据，`track is not None` 才是。
+
+    现场后果：用 state 判断会让下游**每两帧翻一次** —— rally 在
+    DEFENDING/ATTACKING 与 RECOVERING(READY) 之间反复横跳，机械臂刚起步
+    就被叫回 (300,140)，**永远接不到球**。
+
+    宽限期内的位置是 Kalman 按模型外推的（管线里 detection is None 走 predict），
+    不是新鲜观测，但对"球还在往哪走"的判断依然有效。
+    """
+    return track is not None and track.state != TrackState.TENTATIVE
+
+
 @dataclass
 class VisionResult:
     """单帧视觉与 AI 处理的完整结果快照。
@@ -105,7 +123,11 @@ class VisionRuntime:
             min_circularity=0.55,
         )
         self.tracker = tracker or StoneTracker(
-            max_missed_frames=self.detection_interval * 4, min_confirmed_hits=1,
+            # ★ 宽限期：漏检这么多帧之内仍然算"有球"（位置由 Kalman 外推）。
+            # 原来 ×4（≈24ms@165fps）太短 —— 球被球槌挡住、或被撞飞的瞬间
+            # 很容易连丢好几帧，轨道一断 rally 就切回 READY、机械臂被叫回去，
+            # 表现就是"接不到球"。×8 ≈ 48ms 更实际。
+            max_missed_frames=self.detection_interval * 8, min_confirmed_hits=1,
         )
         self.kalman = kalman or KalmanFilter()
         self.predictor = predictor or TrajectoryPredictor()
@@ -188,7 +210,7 @@ class VisionRuntime:
             dynamic_roi = None
             box_size = 140
 
-            if self.tracker.track is not None and self.tracker.track.state == TrackState.ACTIVE:
+            if _track_usable(self.tracker.track):
                 pred_raw_x, pred_raw_y = self.tracker.predict_position(processed_frame.timestamp)
                 img_h, img_w = processed_frame.image.shape[:2]
                 rx = max(0, min(int(pred_raw_x - box_size / 2), img_w - 1))
@@ -314,7 +336,7 @@ class VisionRuntime:
             frame=processed_frame,
             detection=detection,
             track=track,
-            track_confirmed=bool(track is not None and track.state == TrackState.ACTIVE),
+            track_confirmed=_track_usable(track),
             curling_state=curling,
             prediction=prediction_state,
             trajectory=table_trajectory,

@@ -406,7 +406,12 @@ def test_vision_runtime_ai_uses_fresh_axis_feedback_not_software_position():
     assert runtime.ai_current_pos != [999.0, 999.0]
 
 
-def test_plc_track_confirmation_stops_on_missed_detection_and_recovers():
+def test_plc_track_confirmation_survives_one_missed_detection():
+    """漏检一帧时 PLC 侧确认**保持**（宽限期内），状态估计继续可用。
+
+    ★ 这是"接不到球"的直接回归点：原来这里 results[2].track_confirmed 是 False，
+    rally 会立刻切 RECOVERING、把目标设回 READY，机械臂被叫回去。
+    """
     detector = MockDetector([
         Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0),
         Detection(center_x=501.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.03),
@@ -422,8 +427,10 @@ def test_plc_track_confirmation_stops_on_missed_detection_and_recovers():
                for i in range(1, 5)]
     assert results[0].track_confirmed
     assert results[1].track_confirmed
-    assert results[2].ai_decision is not None and not results[2].track_confirmed
+    # ★ 漏检那一帧：AI 仍然给出决策，而且确认保持
+    assert results[2].ai_decision is not None and results[2].track_confirmed
     assert results[3].track_confirmed
+    # tracking_state 仍如实报告"这一帧没有新观测"
     assert [result.curling_state.tracking_state.value for result in results] == [
         "active", "active", "lost", "active",
     ]
@@ -503,7 +510,14 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
     assert (407.25, READY_POSITION[1]) in targets
 
 
-def test_low_fps_real_miss_revokes_confirmation():
+def test_low_fps_real_miss_keeps_confirmation_within_grace_period():
+    """漏检一帧**不再撤销**确认 —— 只要还在 max_missed_frames 宽限期内。
+
+    ★ 回归现场问题：追踪器在漏检第一帧就把 state 置 LOST，而 track_confirmed
+    原来绑在 `state == ACTIVE` 上 → 漏检一帧就 False → rally 每两帧切回 READY
+    → 机械臂刚起步就被叫回 (300,140) → **接不到球**。
+    宽限期内位置由 Kalman 外推，对"球往哪走"的判断依然有效。
+    """
     runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
     states = []
     confirmed = []
@@ -514,8 +528,30 @@ def test_low_fps_real_miss_revokes_confirmation():
         result = runtime.process_frame(Frame(image, timestamp=1.0 + (sequence - 1) * 0.1))
         states.append(result.track.state)
         confirmed.append(result.track_confirmed)
+    # state 仍然是 LOST（追踪器语义没动），但确认必须保持
     assert states == [TrackState.ACTIVE, TrackState.LOST, TrackState.ACTIVE, TrackState.ACTIVE]
-    assert confirmed == [True, False, True, True]
+    assert confirmed == [True, True, True, True]
+
+
+def test_confirmation_is_revoked_after_the_grace_period_expires():
+    """宽限期用完、轨道被真正丢弃之后必须撤销确认 —— 不能永远认为有球。"""
+    detector = MockDetector([
+        Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0),
+    ] + [None] * 20)
+    runtime = VisionRuntime(
+        calibration_file=str(CALIB_FILE), table_calibration_file=None,
+        disable_undistort=True, detection_interval=1, detector=detector,
+    )
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    results = [runtime.process_frame(Frame(image=image, timestamp=1 + i * 0.03, sequence=i))
+               for i in range(1, 22)]
+    assert results[0].track_confirmed
+    # 宽限期内（detection_interval * 8 = 8 帧）仍然确认
+    assert results[5].track_confirmed
+    assert results[7].track_confirmed
+    # 超过宽限期之后必须撤销，且轨道被丢弃
+    assert not results[20].track_confirmed
+    assert results[20].track is None
 
 
 def test_fast_reversal_reacquires_outside_local_roi_without_confirmation_wait():
