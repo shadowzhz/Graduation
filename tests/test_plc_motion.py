@@ -38,6 +38,7 @@ class MemoryS7:
         self.before_bit = None
         self.fail_bit = None
         self.fail_payload = False
+        self.fail_transition = False
         self.echo = True
 
     def Cli_WriteArea(self, pointer, area, db, start, amount, wordlen, buffer):
@@ -94,6 +95,14 @@ class MemoryS7:
             assert self.pending_payload is not None
             self.moves.append(self.pending_payload)
             self.pending_payload = None
+            return
+        if (db, start, len(data)) == (1, protocol.COMM_TRANSITION_OFFSET, 8):
+            # ★ 精磨距离（TransitionParameter[1]，DB1.DBD150）：随步距自适应写回。
+            #   它不触发运动，只是给 PLC 一个"混合起点"的值，所以单独记一类操作。
+            self.operations.append(("transition", db, start, data))
+            if self.fail_transition:
+                raise RuntimeError("transition write failed")
+            self.db[db][start:start + len(data)] = data
             return
         assert (db, start, len(data)) == (1, 20, 36)
         self.operations.append(("payload", db, start, data))
@@ -228,7 +237,11 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
     client = MemoryPLC()
     try:
         assert client.connect()
-        for x, expected_mode in ((0.0, 5), (2.0, None), (8.0, 5), (25.0, 0)):
+        # ★ buffer_mode 只允许 TO_Kinematics 认的 1/2/5：
+        #     1 = 附加运动（先走完当前、停下、再走新的）
+        #     5 = 滤波处理（达到混合距离时混合，较高速度）
+        #   ⚠️ 轴版的 0（立即中止）在运动机构版里是**非法值**，作业会被拒绝。
+        for x, expected_mode in ((0.0, 5), (2.0, None), (8.0, 5), (25.0, 1)):
             game = client.physical_to_game(x, 0.0)
             before = len(client.transport.moves)
             client.clear_trigger()
@@ -570,7 +583,12 @@ def test_payload_or_native_trigger_failure_does_not_publish_or_cache_success():
             assert (client._last_phys_x, client._last_phys_y,
                     client.last_buffer_mode) == previous
             operations = client.transport.operations[start:]
-            assert len(operations) == (1 if failure == "payload" else 2)
+            # 每次下发会按顺序写三个东西：目标块 → 精磨距离 → 触发位。
+            #   · payload 失败在第 1 步 → 只有 1 次操作
+            #   · trigger 失败在第 3 步 → 前 2 次都已经写出去
+            # 关键是**没有多出一次运动**（上面断言 moves 不变），精磨距离只是
+            # 一个"混合起点"的数值、幂等，写出去不影响安全。
+            assert len(operations) == (1 if failure == "payload" else 3)
             assert client.transport.db[1][56] & 1 == 0
         finally:
             client.disconnect()
@@ -957,5 +975,36 @@ def test_single_axis_disable_clears_only_that_axis_and_disarms():
         assert until(lambda: (client.transport.db[1][0] >> 7) & 1 == 0)
         assert (client.transport.db[1][0] >> 6) & 1 == 1, "撤 Y 不该动 X"
         assert until(lambda: not link.armed)
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_diagnostics_runs_without_client_local_and_reports_transition():
+    """★ 回归：diagnostics() 里把 client 当局部变量用过 → NameError。
+
+    后果比看上去严重：它是在**每个 [stats] 行**上崩，现场表现成
+    "实时处理失败：name 'client' is not defined"，看起来像整条视觉管线坏了。
+    """
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, target_slew_mm=20.0,
+                   blend_threshold_mm=20.0, client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        # 离线、还没下发过：不能崩，且要如实说"未发"
+        text = link.diagnostics()
+        assert "精磨 未发" in text, text
+
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(300, 180)
+        assert until(lambda: len(client.transport.moves) >= 1)
+        text = link.diagnostics()
+        # 下发过之后必须报出实际的精磨距离（步距 20mm 以内 → 0.75 倍，且 < 步距）
+        assert "精磨" in text and "关（" not in text, text
+        value = client.last_transition_mm
+        assert value is not None and 0.0 < value < 20.0, value
+        # 精磨距离必须严格小于步距 —— 等于或大于就会把整段圆掉、到不了目标
+        assert value < client.last_send_dist_mm + 1e-9, (value, client.last_send_dist_mm)
     finally:
         assert link.stop(timeout=2.0)

@@ -299,3 +299,63 @@ def test_occluded_puck_keeps_target_while_mallet_is_on_it():
                                 mallet=held),
                     now=late, mallet=held)
     assert decision.target == READY_POSITION
+
+
+def test_rally_gives_up_on_puck_it_cannot_get_behind():
+    """★ 停在自己半场死角的球：绕不过去时必须退回 READY，不能赖在夹取角点。
+
+    现场实测（2026-10）：球停在 game y≈112，`--motion-margin-mm 30` 把可达下限
+    卡在 y=125，球槌圆心得退到 112-45-12=55 才推得动 → **物理上做不到**。
+    旧代码假设"停住的球一定回收得动"，于是 target 恒为夹取角点 (217,125)、
+    hit phase 恒为 positioning、rally 永远是 ATTACKING —— 一局就此卡死。
+
+    从前面推是不行的（那是推自家门 = 乌龙球），所以唯一正确的动作是放弃退场。
+    """
+    bounds = (118.0, 486.0, 125.0, 314.0)
+    controller = RallyController(reachable_bounds=bounds)
+    state = make_game_state(stone_y=112.0)
+    decision = controller.update(make_vision_result(state), now=1.0)
+    assert decision.target == READY_POSITION, decision
+    assert decision.state is RallyState.RECOVERING, decision
+    assert "unreachable" in decision.reason, decision.reason
+
+    # 没有 bounds（仿真 / 没接 PLC）时行为不变 —— 不引入回归
+    plain = RallyController()
+    assert plain.can_retrieve(make_game_state(stone_y=112.0).stone)
+    assert plain.update(make_vision_result(make_game_state(stone_y=112.0)),
+                        now=1.0).state is RallyState.ATTACKING
+def test_rally_gives_up_on_puck_it_cannot_get_behind():
+    """★ 停在自己半场死角的球：绕不过去时必须退回 READY，不能赖在夹取角点。
+
+    现场实测（2026-10）：球停在 game y≈112，`--motion-margin-mm 30` 把可达下限
+    卡在 y=125，而球槌圆心要退到 112-45-12=55 才推得动 → **物理上做不到**。
+    旧代码假设"停住的球一定回收得动"，于是 target 恒为夹取角点 (217,125)、
+    hit phase 恒为 positioning、rally 永远是 ATTACKING —— 一局就此卡死。
+
+    从前面推是不行的（那是推向自家门 = 乌龙球），所以唯一正确的动作是放弃退场。
+    """
+    bounds = (118.0, 486.0, 125.0, 314.0)
+    controller = RallyController(reachable_bounds=bounds)
+    # 停住的球（vy=0 → direction "still"），位置贴着可达下限
+    result = observation(1, x=217, y=112, vx=0, vy=0)
+    decision = tick(controller, result)
+    assert decision.target == READY_POSITION, decision
+    assert decision.state is RallyState.RECOVERING, decision
+    assert "unreachable" in decision.reason, decision.reason
+
+
+def test_rally_without_bounds_still_retrieves_stopped_puck():
+    """没有 bounds（仿真 / 没接 PLC）时行为完全不变 —— 不引入回归。"""
+    controller = RallyController()
+    assert controller.can_retrieve(observation(1, x=217, y=112, vx=0, vy=0).curling_state)
+    result = observation(1, x=217, y=112, vx=0, vy=0)
+    assert tick(controller, result).state is RallyState.ATTACKING
+
+
+def test_rally_retrieves_stopped_puck_that_is_deep_enough():
+    """够得着的停球仍然照常回收 —— 不要把正常回收一起挡掉。"""
+    controller = RallyController(reachable_bounds=(118.0, 486.0, 125.0, 314.0))
+    result = observation(1, x=217, y=250, vx=0, vy=0)
+    decision = tick(controller, result)
+    assert decision.state is RallyState.ATTACKING, decision
+    assert "retrieve" in decision.reason, decision.reason

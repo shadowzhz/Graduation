@@ -62,20 +62,54 @@ DEFAULT_DEFENSE_FORWARD_LIMIT = None
 OCCLUSION_HOLD_SECONDS = 1.0       # 刚丢多久之内算"可能只是被挡"
 OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡的"（球台单位，约 139mm）
 
+# 回收一颗停住的冰壶时，球槌**圆心**必须能到的位置 = 球心 - (两半径之和) - 这个余量。
+# 余量不是凑数：刚好贴住球是推不动的，必须还能再从那儿往前走一段。
+RETRIEVE_BACK_MARGIN = 12.0
+
 
 class RallyController:
-    def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT):
+    def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT,
+                 reachable_bounds: tuple | None = None):
         """defense_forward_limit: 主防御的"深入上限"，单位是球台坐标（1 单位 ≈ 0.928mm）。
 
         传 None = 不限制（等于原来的主动追球行为）。
         见模块常量 DEFAULT_DEFENSE_FORWARD_LIMIT 的物理对照表。
+
+        reachable_bounds: (left, right, top, bottom) —— 球槌**真能到**的范围（游戏坐标），
+        来自 `plc.reachable_bounds`。用来判断"这颗停住的球还回不回收得动"。
         """
         self.state = RallyState.WAITING
         self.defense_forward_limit = defense_forward_limit
+        self.reachable_bounds = reachable_bounds
         # ★ 遮挡保持用的记忆（见 update 里的说明）
         self._last_target = None
         self._last_seen_at = 0.0
         self._last_active_state = RallyState.WAITING
+
+    def can_retrieve(self, stone) -> bool:
+        """停住的冰壶还回收得动吗 —— 球槌能不能绕到它**后面**去推。
+
+        ★★★ 现场卡死的就是这一条：球停在 game y≈112，要推它球槌圆心得退到
+        y ≈ 112 - (14+31) - 12 = 55；而 `--motion-margin-mm 30` 把可达下限卡在
+        y = 125。**物理上绕不过去** —— 于是 AI 停在夹取角点 (217,125) 一动不动，
+        rally 保持 ATTACKING 永不退场，一局就此停住。
+
+        为什么不能"从前面推"：从前面推会把它推向 **y 更小**的一侧，那正是
+        机器自己的球门方向 —— 那是乌龙球。所以这一支只能**放弃并退回 READY**，
+        让真人把球拿出来。
+
+        没有 bounds 时返回 True（保持原行为，仿真和没接 PLC 时不受影响）。
+        """
+        if self.reachable_bounds is None:
+            return True
+        try:
+            _left, _right, top, _bottom = self.reachable_bounds
+            behind = (stone.y
+                      - (core.STONE_RADIUS + core.MALLET_RADIUS)
+                      - RETRIEVE_BACK_MARGIN)
+            return behind >= top
+        except (TypeError, ValueError, IndexError):
+            return True
 
     def update(self, result: VisionResult, *, now: float, feedback=None,
                mallet_position=READY_POSITION) -> RallyDecision:
@@ -127,7 +161,19 @@ class RallyController:
                     reason = "invalid/missing AI target; target cleared"
                 else:
                     target_y = decision.target_y
-                    if machine_half and puck_stopped:
+                    unreachable = machine_half and puck_stopped and not self.can_retrieve(stone)
+                    if unreachable:
+                        # ★★★ 停住的球在轴**绕不过去**的死角（贴着自己那侧的墙）。
+                        #   回收需要绕到球后面推；绕不过去时：
+                        #     · 从前面推 = 推向自家门 = 乌龙球，绝不允许
+                        #     · 原地赖着 = 现场实测卡死（target 恒为夹取角点 (217,125)、
+                        #       hit phase 恒为 positioning、永不退场，一局就此停住）
+                        #   所以只能放弃、退回 READY，让真人把球拿出来。
+                        self.state = RallyState.RECOVERING
+                        reason = (f"puck unreachable (stopped at y={stone.y:.0f}, "
+                                  f"can't get behind it): READY")
+                        self._last_target = None
+                    elif machine_half and puck_stopped:
                         # 死球（冰壶在自己半场停住）必须上去回收，否则回合停住 —— 不设上限。
                         reason = "machine-half puck stopped: retrieve"
                     elif machine_half:
@@ -139,10 +185,13 @@ class RallyController:
                         reason = "machine-half puck moving: limited pursuit"
                     else:
                         reason = "human-half puck: defend/prepare"
-                    target = (decision.target_x, target_y)
-                    # ★ 记下这次的有效目标 —— 供"球槌遮挡"时保持用
-                    self._last_target = target
-                    self._last_active_state = self.state
+                    if unreachable:
+                        target = READY_POSITION
+                    else:
+                        target = (decision.target_x, target_y)
+                        # ★ 记下这次的有效目标 —— 供"球槌遮挡"时保持用
+                        self._last_target = target
+                        self._last_active_state = self.state
             else:
                 reason = "puck on human side moving away; READY"
                 # ★ 主动回 READY 时清掉旧目标 —— 否则后面一次遮挡会把一个

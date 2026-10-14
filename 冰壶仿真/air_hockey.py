@@ -88,6 +88,8 @@ class AirHockeyGame:
         self.plc_axis_alarm = False
         self.plc_feedback_ready = False
         self.plc = PLCLink(plc_ip, period=1.0 / plc_rate, zone=(RINK_LEFT, RINK_RIGHT, RINK_TOP, RINK_CENTER_Y)) if plc_ip else None
+        if self.plc is not None:
+            self.ai_controller.recovery_bounds = self.plc.reachable_bounds
         self.difficulty = DIFFICULTIES["普通"]
         self.prediction_cache = []
         self.prediction_display_points = []
