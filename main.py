@@ -25,6 +25,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent  # 找到 main.py 所在文件夹
 SIM_ROOT = PROJECT_ROOT / "冰壶仿真"             # 仿真代码（仅 --sim 子进程使用）
 
+# ★★★ Windows 控制台默认是 GBK(936)，打印一个它编不出的字符（² ³ [!] OK …）
+#     就会抛 UnicodeEncodeError 把整个程序打断 —— 现场踩过：
+#         UnicodeEncodeError: 'gbk' codec can't encode character '\xb2'
+#     这里把 stdout/stderr 的编码错误策略改成 replace：编不出的字符显示成 "?"，
+#     但**永远不会再因为一句日志而崩**。改任何提示文案都不用再担心这件事。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass  # 老解释器 / 被重定向到不支持的对象：忽略，不影响运行
+
 import cv2
 import tkinter as tk
 
@@ -129,7 +140,7 @@ class VisionWindow:
           另一个继续用；也能单独回零 / 单独复位。
         ★ 单轴使能**不会**让程序开始追球 —— 运动需要 X、Y 同时使能
           （PLCLink._motion_safe 要求 x_en and y_en）。
-        ⚠️ 回零会让该轴动（去找参考点），是刻意的人工动作。
+        [!] 回零会让该轴动（去找参考点），是刻意的人工动作。
         """
         self._plc = link
         controls = tk.Frame(self.root)
@@ -329,6 +340,10 @@ def run_vision(args):
         #   模块常量，_prepare_move 每次下发时直接读它。
         if args.motion_margin_mm is not None:
             plc_module.set_motion_margin(args.motion_margin_mm)
+        # ★ TIA 的动力学预设值（改了 TIA 就用这三个参数同步，否则自检是拿旧数字算的）
+        plc_module.set_axis_dynamics(accel_mm_s2=args.tia_accel_mm_s2,
+                                    decel_mm_s2=args.tia_decel_mm_s2,
+                                    speed_mm_s=args.tia_speed_mm_s)
         print(f"[PLC] 命令余量 {plc_module.MOTION_MARGIN_MM:.0f}mm → "
               f"X {plc_module.COMMAND_X_MIN:.0f}..{plc_module.COMMAND_X_MAX:.0f} "
               f"Y {plc_module.COMMAND_Y_MIN:.0f}..{plc_module.COMMAND_Y_MAX:.0f}"
@@ -340,6 +355,27 @@ def run_vision(args):
                       target_slew_mm=args.target_slew_mm,
                       target_accel_mm_s2=args.target_accel_mm_s2,
                       sequence_trigger=(args.trigger_mode == "sequence"))
+        # ★ 把轴的**实际可达范围**交给 AI：它据此限制"可覆盖范围"
+        #   （recovery_bounds），免得老是瞄到轴到不了的边角。
+        runtime.ai.recovery_bounds = plc.reachable_bounds
+        # ★★ rally 也要一份：用来判断"停在自己半场死角的那颗球还回不回收得动"。
+        #    回收要绕到球后面推，绕不过去时只能放弃退回 READY ——
+        #    否则会像现场那样停在夹取角点一动不动，一局卡死。
+        rally.reachable_bounds = plc.reachable_bounds
+        # ★★ 启动就自检"余量够不够刹得住"。现场撞死挡的根源就是没人会在跑之前
+        #    先算这一步：slew 40 @70Hz = 2800mm/s，而 a=15000 时需要 261mm 才
+        #    刹得住，包络到软限位只有 15mm → 几何上注定撞。
+        #    按 **--plc-rate** 估算；名义值和实测可能差很多，所以只作提示。
+        if args.target_slew_mm and args.target_slew_mm > 0.0:
+            brake, speed = plc_module.braking_distance_mm(
+                args.target_slew_mm, args.plc_rate)
+            print(f"[PLC] 目标限速 {args.target_slew_mm:g}mm/周期 × {args.plc_rate:g}Hz "
+                  f"→ 指令速度约 {speed:.0f}mm/s，按 TIA 预设加速度 "
+                  f"{plc_module.AXIS_ACCEL_LIMIT_MM_S2:.0f}mm/s^2 估算制动距离 {brake:.0f}mm")
+            for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate):
+                print(f"[PLC] [!] 安全自检：{warning}")
+        print(f"[PLC] 越界检测已启用：轴超出命令包络 "
+              f"{plc_module.ENVELOPE_ESCAPE_MM:.0f}mm 即撤销使能并报警")
         plc.start()
         if window is not None and not args.dry_run:
             window.attach_plc(plc)
@@ -640,52 +676,64 @@ def main():
                              "**默认不限制**（= ai.py 自身的上限，现场选的是「全部追球」）。"
                              "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
                              "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
-    parser.add_argument("--trigger-mode", choices=("pulse", "sequence"), default="pulse",
-                        help="运动触发方式。pulse（默认）= 抬 DB1.56.0 的 P 沿，"
-                             "脉宽必须跨过 PLC 扫描周期（实测 2~3ms、偶发 5ms，"
-                             "所以高低各要 10ms）→ 周期被锁在约 28ms（35Hz），"
-                             "快球时步距超过混合阈值就只能中止重开（一顿一顿）。"
-                             "sequence = 写 DB1.DBD60 序号，PLC 比较序号后执行，"
-                             "**不需要脉宽** → 周期只剩 4 次 S7 往返（约 6.6ms，~150Hz）。"
-                             "⚠️ 用 sequence 之前必须先在 PLC 里加序号比较逻辑（见 plc.py 注释）")
-    parser.add_argument("--blend-threshold-mm", type=float, default=10.0, metavar="MM",
+    parser.add_argument("--trigger-mode", choices=("pulse", "sequence"), default="sequence",
+                        help="运动触发方式，默认 sequence（序号握手）。"
+                             "sequence = 写 DB1.DBD142 序号，PLC 比较后执行，"
+                             "**不需要脉宽** → 不受 OB1 扫描周期限制（实测扫描最大 31.7ms，"
+                             "脉冲模式会静默丢指令）。"
+                             "pulse = 抬 DB1.56.0 的 P 沿，脉宽必须跨过扫描周期，"
+                             "周期被锁在约 28ms（35Hz），快球时只能中止重开（一顿一顿）。"
+                             "[!] 用 sequence 之前 PLC 里必须有序号比较逻辑（现场已加）")
+    parser.add_argument("--blend-threshold-mm", type=float, default=12.0, metavar="MM",
                         help="相邻两条目标之间步距超过它就改用 BufferMode=0（中止重开），"
-                             "否则用 5（混合）。实测 50mm + 混合会「卡住」，所以默认 10。"
-                             "★ 卡住的原因是 TO「作业序列 → 最大舍入间距」= 100%%："
-                             "混合半径吃掉整个运动。把舍入间距调到 30%% 左右之后，"
-                             "可以把这个阈值放宽（例如 40），让快球也走混合、真正平滑")
-    parser.add_argument("--target-slew-mm", type=float, default=0.0, metavar="MM",
-                        help="目标限速（mm/周期，默认 0 = 关闭）。"
+                             "否则用 5（混合）。默认 12，与 --target-slew-mm 默认值相同 —— "
+                             "步距永不超阈值 → 永不中止 → 运动连续。"
+                             "★ 太小会中止、太大会「卡住」（TO 舍入间距会吃掉运动）")
+    parser.add_argument("--target-slew-mm", type=float, default=12.0, metavar="MM",
+                        help="目标限速（mm/周期），默认 12。"
                              "★★★ 这个治的是「顿」：rally 状态机切换时目标会**瞬间跳变**"
-                             "（现场实测 p95 步距 192.8mm，中止占比 48%%），"
-                             "每跳一次就 BufferMode=0 中止重开一次。"
-                             "★ 光提高 --blend-threshold-mm **没用** —— "
-                             "实测 192mm 的跳变即使阈值提到 40 也照样中止。"
-                             "必须把跳变削成斜坡：设成和 --blend-threshold-mm **相同的值**，"
-                             "步距就永远不超阈值 → 永不中止 → 运动连续。"
-                             "推荐组合：--blend-threshold-mm 40 --target-slew-mm 40"
-                             "（40mm/周期 × 63Hz ≈ 2500mm/s，够拦截快球）")
-    parser.add_argument("--motion-margin-mm", type=float, default=None, metavar="MM",
-                        help="命令余量：下发目标时离 TIA 软限位再内缩多少毫米（默认 15）。"
-                             "★★★ 轴报 801「运动学未就绪」多半就是撞软限位。"
-                             "现场实测日志：AI 目标长期卡在夹取角点 game(67,349) → "
-                             "物理正好是命令包络角点，A 轴先 801、后来 Y 轴也 801"
-                             "（last_sent=(-172,177)、busy=True、intent=(67,349)）。"
-                             "★ 撞了就把这个调大（例如 25），比改代码方便；"
-                             "但**根治是在 TIA 里把该轴加速度/急停斜坡调柔** —— "
-                             "软件只限制指令，管不了轴自己的过冲")
-    parser.add_argument("--target-accel-mm-s2", type=float, default=25000.0, metavar="MM_S2",
-                        help="目标加速度限幅（mm/s²，默认 25000；0 = 关闭）。"
+                             "（现场实测 p95 步距 192.8mm，中止占比 48%%），每跳一次就 "
+                             "BufferMode=0 中止重开一次。把它削成斜坡就好了。"
+                             "★★★ 但它决定**指令速度**（= slew × 实测周期），"
+                             "所以直接决定刹不刹得住："
+                             "slew 40 @70Hz = 2800mm/s，a=15000 时需要 261mm 才刹停，"
+                             "而包络到软限位只有余量那么多 → 必撞硬限位。默认 12 "
+                             "（840mm/s、制动 24mm）配默认余量 40mm 是安全的。"
+                             "★ 想更快：先在 TIA 里把加速度 15000 提到 35000，再往上加")
+    parser.add_argument("--motion-margin-mm", type=float, default=40.0, metavar="MM",
+                        help="命令余量：下发目标时离 PHYSICAL_*（TIA 软限位）再内缩多少毫米，"
+                             "默认 40。包络 = PHYSICAL_* 内缩它。"
+                             "★★★ 它必须**大于制动距离**（见上面的 slew 说明），"
+                             "否则轴全速冲向限位时刹不住 → 撞硬限位。"
+                             "★ 程序启动时和运行中都会自检并报警，不用你自己算。"
+                             "★★ 改这个之前先确认 TIA「扩展参数 → 区域」里的软限位"
+                             "**真的生效**（不是「3D 显示中的表示」那一页）")
+    parser.add_argument("--target-accel-mm-s2", type=float, default=12000.0, metavar="MM_S2",
+                        help="目标加速度限幅（mm/s^2），默认 12000；0 = 关闭。"
                              "★★★ 治的是**跟随误差 801**：只限步长（--target-slew-mm）"
                              "管不住「目标突然反向」——限速器只看步长大小、不看方向。"
+                             "★★ 必须**低于 TIA「运动机构运动 → 加速度」的预设值**"
+                             "（现在是 15000），否则等于没限。"
                              "现场 TIA 工艺对象 Y轴「状态位和错误位」实测："
                              "错误=跟随误差(红)、警告=动态限值(黄)、已归位=绿、驱动装置=灰，"
                              "快照 physical Y=110.49（行程正中间、prev_busy=True）——"
                              "**轴在正常位置自由运动途中跟不上指令，不是撞限位**。"
-                             "算下来 40mm/周期 @65Hz 需要约 169,000 mm/s²，"
-                             "而轴的能力只有 106N/3kg ≈ 35,000 mm/s²，差约 5 倍。"
+                             "算下来 40mm/周期 @65Hz 需要约 169,000 mm/s^2，"
+                             "而轴的能力只有 106N/3kg ≈ 35,000 mm/s^2，差约 5 倍。"
                              "限加速度后急转时目标自己拐大弯、直线时仍可全速。"
                              "★ 调大更跟手但更容易报跟随误差；调小更稳但急转变慢")
+    parser.add_argument("--tia-decel-mm-s2", type=float, default=None, metavar="MM_S2",
+                        help="同步 TIA「运动机构运动 → 减速度」的预设值（默认按 35000）。"
+                             "★★★ 它决定**制动距离** = v^2/(2x减速度)，也就决定"
+                             "「这个 slew 会不会撞限位」。默认值是按现场已改好的 35000；"
+                             "**如果你其实没改减速度，就加 --tia-decel-mm-s2 15000** —— "
+                             "否则自检会说安全而实际会撞")
+    parser.add_argument("--tia-accel-mm-s2", type=float, default=None, metavar="MM_S2",
+                        help="同步 TIA「运动机构运动 → 加速度」的预设值（默认按 35000）。"
+                             "用来判断 --target-accel-mm-s2 有没有超过机器能力")
+    parser.add_argument("--tia-speed-mm-s", type=float, default=None, metavar="MM_S",
+                        help="同步 TIA「运动机构运动 → 速度」的预设值（默认按 3750）。"
+                             "用来判断指令速度会不会被 TO 截断")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
     parser.add_argument("--camera-fast", action="store_true",

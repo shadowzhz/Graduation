@@ -39,7 +39,7 @@ HOMING_BYTE = 1
 # ★ 单轴操作：DB1 里 X/Y 的位本来就是分开的（PLC 侧早就支持），只是代码一直两个一起写。
 #   有了单轴使能，就能在某个轴报 801 / 撞限位之后只把它撤下来，另一个继续用。
 #
-# ⚠️ 这几个映射是**从原来"两个一起写"的代码推出来的**：
+# [!] 这几个映射是**从原来"两个一起写"的代码推出来的**：
 #      enable_axes  → DB1.0 bit6(True) + bit7(True)
 #      disable_axes → DB1.0 bit6(False) + bit7(False)
 #      home_axes    → DB1.1 bit0(True) + bit1(True)
@@ -63,13 +63,13 @@ GROUP_COMM_LOST_LATCH_BIT = 4
 STATUS_READ_START = 0
 # DB1 读取长度：原来 141（0~140）。序号握手加的 上次序号 在 146，
 # 所以要读到 149 才拿得到 —— 150 字节正好覆盖 0~149。
-# ⚠️ 不能超过 DB1 实际长度（现场 DB1 最后一个变量是 气缸启动@150.0，共 151 字节）。
+# [!] 不能超过 DB1 实际长度（现场 DB1 最后一个变量是 气缸启动@150.0，共 151 字节）。
 STATUS_READ_SIZE = 150
 COMM_READ_START = 0
 # DB18 随现场变量表增长：58（原始）→ 62 → 66（加 Reaction）→ 92 → 96（RemainingDistance
 # 挪到 70、infoData 挪到 86）。从新到旧逐个尝试，读到哪个能用就用哪个 ——
 # 现场改 PLC 变量表时不该把整个连接判死（那会表现成"PLC 未连接"，很难查）。
-# ⚠️ 读**超过** DB 实际长度会失败，所以列表里必须含实际长度（或其以下的值）。
+# [!] 读**超过** DB 实际长度会失败，所以列表里必须含实际长度（或其以下的值）。
 COMM_READ_SIZES = (96, 92, 66, 62, 58)
 COMM_READ_SIZE_LEGACY = COMM_READ_SIZES[-1]
 COMM_KIN_ERROR_OFFSET = 56
@@ -111,7 +111,7 @@ COMM_KIN_REACTION_OFFSET = 62
 #     // Execute 输入改成:  #序号触发 OR "DB1".XY轴直线绝对启动
 # 这样两种模式都能跑，切换不用改 PLC。
 #
-# ⚠️ 偏移必须和 TIA 里【实际排布】一致，不是我们想放哪就放哪。
+# [!] 偏移必须和 TIA 里【实际排布】一致，不是我们想放哪就放哪。
 # 现场 DB1 里 TIA 把这两个变量追加到了末尾：
 #     指令序号   DInt   142.0
 #     上次序号   DInt   146.0
@@ -122,7 +122,7 @@ COMM_SEQ_ACK_OFFSET = 146     # DInt：PLC 写，已处理的序号（读回来�
 # ============================================================================
 # 补齐诊断用的 DB18 字段（全部用边界检查读，PLC 没加就显示"未读到"）
 # ============================================================================
-# ⚠️ 读错偏移比"没加"更糟：边界检查能挡住"没加"（显示"未读到"），
+# [!] 读错偏移比"没加"更糟：边界检查能挡住"没加"（显示"未读到"），
 #    但读错偏移会**静默返回垃圾值**。所以每个数字都必须对着 TIA 抄。
 #
 # 2026-10-13 现场实际布局（TIA 变量表，DB18 共 96 字节）：
@@ -152,7 +152,7 @@ COMM_X_ERR_BIT = 4
 COMM_Y_ERR_OFFSET = 4
 COMM_Y_ERR_BIT = 0
 ECHO_TIMEOUT = 1.0
-# ⚠️ 两套常量，用途不同，不要混：
+# [!] 两套常量，用途不同，不要混：
 #   PHYSICAL_* = 轴的行程安全限位（绝不能命令越过）
 #   TABLE_*    = 球台真实边缘在【轴坐标】里的位置（只用于游戏<->机器坐标映射）
 #
@@ -161,8 +161,8 @@ ECHO_TIMEOUT = 1.0
 #   在轴 X=-188 / 219 处球槌边缘离左右墙各约 10mm
 #   Y 最前处（185）球槌边缘离中线约 30mm
 # 由此反推球台边缘（轴坐标）：
-#   左墙 -188 - 26.5 - 10 = -224.5    右墙 219 + 26.5 + 10 = 255.5   （差 480 ✓）
-#   中线  185 + 26.5 + 30 =  241.5    后墙 241.5 - 880/2   = -198.5   （差 440 ✓）
+#   左墙 -188 - 26.5 - 10 = -224.5    右墙 219 + 26.5 + 10 = 255.5   （差 480 OK）
+#   中线  185 + 26.5 + 30 =  241.5    后墙 241.5 - 880/2   = -198.5   （差 440 OK）
 # TABLE_* 只由这些**几何测量**决定，与轴限位无关，所以改限位时不要动它们。
 #
 # 2026-10-13 稍后：X 轴冲得太猛撞到左右限位，现场把 X 的限位收到 -180 / 215
@@ -187,7 +187,7 @@ TABLE_Y_MIN, TABLE_Y_MAX = -198.5, 241.5
 #     代码命令限位（日常夹取）    -180+8 / 215-8 = -172 / 207
 #
 # 这样超调要先吃掉这些毫米的缓冲才会碰到软限位。
-# ⚠️ 调大它会更安全但行程更小；调小到 0 就等于把命令限位和软限位重合（不建议）。
+# [!] 调大它会更安全但行程更小；调小到 0 就等于把命令限位和软限位重合（不建议）。
 #
 # 2026-10 现场：8mm 不够。日志里 AI 的目标长期卡在夹取角点（game (67,349)），
 # 换算成物理正好是 COMMAND_X_MIN/COMMAND_Y_MAX —— 也就是每天贴着极限走。
@@ -218,6 +218,117 @@ def set_motion_margin(margin_mm: float) -> None:
     COMMAND_X_MAX = PHYSICAL_X_MAX - margin_mm
     COMMAND_Y_MIN = PHYSICAL_Y_MIN + margin_mm
     COMMAND_Y_MAX = PHYSICAL_Y_MAX - margin_mm
+
+
+# ============================================================================
+# 安全自检
+# ============================================================================
+# 一张表说清所有限值 —— 现场调参只看这一段。
+#
+#   ① 轴的真实机械行程（现场量的；TIA 工艺对象 XY轴 → 几何结构 →「3D 显示
+#      中的表示」。注意运动学里 x=X 轴、z=Y 轴，见 _write_payload 注释）
+#          X -192 .. 224        Y -129 .. 187
+#   ② TIA 软限位 —— 「扩展参数 → 区域」里配，必须是**故障保护**那一层。
+#      [!] 它必须比 ① 更靠内。现场踩过的坑：
+#         · X 软限位设成 -192，而 -191 就已碰到硬限位 → 软限位比硬限位还远，
+#           永远没机会报警
+#         · 软限位值改在了「3D 显示中的表示」那一页 —— 那页**不限制运动**
+#   ③ 代码命令包络 = PHYSICAL_* 再内缩 MOTION_MARGIN_MM
+#          X -165 .. 200        Y -110 .. 170
+#   ④ 制动距离 = v² / (2a)，v = target_slew_mm × 实际周期（不是 --plc-rate）
+#
+# ★★ 铁律：③ 到 ② 之间的余量必须 > ④ 的制动距离。
+#    实测 a=15000、70Hz、slew 40 → v=2800mm/s → 需要 261mm 才刹得住，
+#    而 ③→② 只有 15mm → 必然撞死挡。这不是偶发，是几何上注定的。
+#
+# TIA「工艺对象 XY轴 → 动力学 → 预设值和限值」里的**预设值**（不是右边的最大值）。
+# 现场实测（2026-10，运动机构运动）：
+#     速度    3750 mm/s      （最大值也是 3750，已经顶到）
+#     加速度  35000 mm/s^2   ← 决定起步 / 跟不跟得上，**跟随误差看它**
+#     减速度  35000 mm/s^2   ← ★★★ 决定**制动距离**，**撞不撞限位看它**
+#     加加速度 300000 mm/s^3
+#
+# ★★ 两者不是一回事，混了就会算错：
+#   · --target-accel-mm-s2（软件限幅器）要**低于加速度**，否则等于没限 → 跟随误差
+#   · 制动距离必须用**减速度**算 —— 用加速度算会**低估一半以上**
+#     （35000 算成 112mm，15000 才是 261mm），那正是"以为算过了、结果还是撞"
+#
+# ⚠️ 这三个值必须和 TIA 里一致。改了 TIA 就用 --tia-{accel,decel,speed}-* 同步，
+#    否则自检要么白丢速度、要么说安全却会撞（后者才要命）。
+AXIS_ACCEL_LIMIT_MM_S2 = 35000.0   # 加速度：给软件限幅器做上限参考
+AXIS_DECEL_LIMIT_MM_S2 = 35000.0   # ★ 减速度：制动距离 = v^2 / (2 x 这个)
+AXIS_SPEED_LIMIT_MM_S = 3750.0
+
+
+def set_axis_dynamics(accel_mm_s2=None, decel_mm_s2=None, speed_mm_s=None) -> None:
+    """运行期同步 TIA 的动力学预设值，供 --tia-accel-mm-s2 / --tia-decel-mm-s2 /
+    --tia-speed-mm-s 使用。
+
+    **改了 TIA 就必须同步这里**，否则安全自检拿旧数字算：
+      · 减速度填小了 → 明明安全的 slew 被误报"会撞"，白丢一半速度
+      · 减速度填大了 → 明明会撞却说安全 —— 那才是要命的
+    """
+    global AXIS_ACCEL_LIMIT_MM_S2, AXIS_DECEL_LIMIT_MM_S2, AXIS_SPEED_LIMIT_MM_S
+    if accel_mm_s2 is not None:
+        AXIS_ACCEL_LIMIT_MM_S2 = float(accel_mm_s2)
+    if decel_mm_s2 is not None:
+        AXIS_DECEL_LIMIT_MM_S2 = float(decel_mm_s2)
+    if speed_mm_s is not None:
+        AXIS_SPEED_LIMIT_MM_S = float(speed_mm_s)
+
+# 轴跑出命令包络多少毫米就判定"失控逃逸"并立刻撤销使能。
+# 取 10mm：命令包络到软限位留有 MOTION_MARGIN_MM 的余量，10 < 余量时
+# 检测会在碰到软限位**之前**先动作。
+ENVELOPE_ESCAPE_MM = 10.0
+
+# TransitionParameter[1]（精磨距离 = 混合起点离目标多远）在 DB1 里的字节偏移。
+# 现场在 DB1 建了 `TransitionParameter : Array[1..5] of LReal` @ 150.0，
+# FC1 用指针 P#DB1.DBX150.0 传给 MC_MoveLinearAbsolute 的 TransitionParameter。
+COMM_TRANSITION_OFFSET = 150
+
+# 精磨距离 = 步距 × 这个比例。必须 **< 1**：等于 1 时 TO 会把整段都圆掉、
+# 到不了目标点。0.75 是"最后四分之一才混合"的意思，实测既连续又走得准。
+TRANSITION_RATIO = 0.75
+
+
+def braking_distance_mm(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
+    """从指令速度刹停需要多长距离（mm）。返回 (制动距离, 指令速度mm/s)。"""
+    accel = AXIS_DECEL_LIMIT_MM_S2 if accel_mm_s2 is None else float(accel_mm_s2)
+    if accel <= 0.0 or rate_hz <= 0.0:
+        return 0.0, 0.0
+    speed = float(slew_mm_per_cycle) * float(rate_hz)
+    return speed * speed / (2.0 * accel), speed
+
+
+def safety_warnings(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
+    """按当前参数算出安全警告列表（空列表 = 安全）。
+
+    这是把"余量够不够刹得住"从人脑里搬到程序里 —— 现场踩过的撞死挡，
+    根源就是没人会在跑之前先算这一步。
+    """
+    warnings = []
+    brake, speed = braking_distance_mm(slew_mm_per_cycle, rate_hz, accel_mm_s2)
+    margin = min(COMMAND_X_MIN - PHYSICAL_X_MIN, PHYSICAL_X_MAX - COMMAND_X_MAX,
+                 COMMAND_Y_MIN - PHYSICAL_Y_MIN, PHYSICAL_Y_MAX - COMMAND_Y_MAX)
+    if margin <= 0.0:
+        warnings.append(
+            f"命令包络没有余量（MOTION_MARGIN_MM={MOTION_MARGIN_MM:.0f}）—— "
+            f"指令会直接落在软限位上，沿用会必撞限位")
+    if speed > AXIS_SPEED_LIMIT_MM_S:
+        warnings.append(
+            f"指令速度 {speed:.0f}mm/s 超过 TIA 预设最大速度 "
+            f"{AXIS_SPEED_LIMIT_MM_S:.0f}mm/s —— TO 会截断，轴跟不上 → 跟随误差")
+    if brake > margin:
+        # 要让制动距离塞进余量，slew 必须 ≤ sqrt(2·a·margin) / 周期
+        accel = AXIS_DECEL_LIMIT_MM_S2 if accel_mm_s2 is None else float(accel_mm_s2)
+        safe_slew = (2.0 * accel * margin) ** 0.5 / max(rate_hz, 1e-6)
+        warnings.append(
+            f"制动距离 {brake:.0f}mm > 包络到软限位的余量 {margin:.0f}mm"
+            f"（缺 {brake - margin:.0f}mm）—— 全速冲向限位时刹不住，会撞硬限位。"
+            f"三选一：① --target-slew-mm 降到 {safe_slew:.0f} 以下；"
+            f"② --motion-margin-mm 加到 {brake + 5:.0f}（会明显缩小可覆盖范围）；"
+            f"③ 在 TIA 里把加速度从 {accel:.0f} 提高（现按此值估算）")
+    return warnings
 
 # 现场诊断：有多少次目标被夹取（= 想去的点在轴能到的范围之外）。
 # 这个比例高说明"游戏场地比机器能覆盖的大"这件事在频繁发生，
@@ -269,6 +380,18 @@ def _finite_pair(x, y):
     if not math.isfinite(x) or not math.isfinite(y):
         raise ValueError("PLC coordinates must be finite")
     return x, y
+
+
+def _game_to_physical_raw(zone, x, y):
+    """不做夹取的换算 —— 只给"轴跑到哪了"这类检测用。
+
+    `_game_to_physical` 是给**下发**用的，会把结果夹进命令包络；拿它来判断
+    "轴是不是跑出去了"永远得到"没跑出去"，等于没检测。
+    """
+    left, right, top, bottom = zone
+    px = TABLE_X_MIN + (x - left) * (TABLE_X_MAX - TABLE_X_MIN) / (right - left)
+    py = TABLE_Y_MIN + (y - top) * (TABLE_Y_MAX - TABLE_Y_MIN) / (bottom - top)
+    return px, py
 
 
 def _game_to_physical(zone, x, y):
@@ -389,14 +512,14 @@ class PLCInterface:
                  blend_threshold_mm=BUFFER_MODE_IMMEDIATE_MM, target_slew_mm=0.0,
                  target_accel_mm_s2=0.0, period=0.0):
         self.ip, self.rack, self.slot = ip, rack, slot
-        # 步距超过它就用 BufferMode=0（中止重开）而不是 5（混合）。
+        # 步距超过它就用 BufferMode=1（附加运动：先走完当前再走新的）而不是 5（混合）。
         # 现场实测 50mm + 混合会"卡住"（TO 舍入间距 100%），所以默认 10mm。
         # 调小 TO 的舍入间距后可以放宽这个值让快球也平滑。
         self.blend_threshold_mm = float(blend_threshold_mm)
         # 目标限速（mm/周期）。0 = 关闭。
         # ★ 建议 = blend_threshold_mm：这样步距永远不超阈值 → 永不中止 → 不顿。
         self.target_slew_mm = float(target_slew_mm)
-        # ★★★ 目标加速度限幅（mm/s²），0 = 关闭；period 是这个限幅换算用的周期。
+        # ★★★ 目标加速度限幅（mm/s^2），0 = 关闭；period 是这个限幅换算用的周期。
         # 见 _prepare_move 里的说明 —— TIA 状态位显示 Y 轴报的是"跟随误差"，
         # 光限步长治不了（目标突然反向需要的加速度是轴能力的约 5 倍）。
         self.target_accel_mm_s2 = float(target_accel_mm_s2)
@@ -422,6 +545,12 @@ class PLCInterface:
         # （第一次下发时 _last_phys_x 还是 None，那个分支不成立）。
         # 读它的诊断代码会在第一次下发时抛 AttributeError。
         self.last_send_dist_mm = 0.0
+        # 精磨距离（TransitionParameter[1]）随步距自适应写回 DB1.DBD150。
+        # transition_enabled 会在写入失败（DB 里没这个变量）时自动关掉，
+        # 之后退回由 TO「最大舍入间距」决定混合距离 —— 不会影响运动本身。
+        self.transition_enabled = True
+        self._last_transition = None
+        self.last_transition_mm = None
         self.last_error = ""
         self._multi_read_failed = False
         # DB18 当前用哪种长度读（66 / 62 / 58），见 COMM_READ_SIZES
@@ -576,7 +705,7 @@ class PLCInterface:
             return False
 
     def home_axis(self, axis):
-        """单轴回零。⚠️ 回零**会让该轴动**（去找参考点），是刻意的人工动作。"""
+        """单轴回零。[!] 回零**会让该轴动**（去找参考点），是刻意的人工动作。"""
         if not self.connected:
             return False
         bit = AXIS_HOME_BITS.get(axis)
@@ -648,7 +777,7 @@ class PLCInterface:
         # Y 轴 16#8001 → 整机撤销使能。快照 prev_en=(True,True) prev_busy=True
         # 正是"刚使能、第一条指令正在跑"。前面 X 轴的 801 是同一个原因。
         #
-        # ⚠️ 只做**局部变量**，绝不写回 self._last_phys_* —— 那是"下发之前就改
+        # [!] 只做**局部变量**，绝不写回 self._last_phys_* —— 那是"下发之前就改
         #    状态"，会让"写失败后必须清空跟踪"的保证失效（有测试守着）。
         #    self._last_phys_* 只在 _commit_move 里更新。
         origin_x, origin_y = self._last_phys_x, self._last_phys_y
@@ -695,8 +824,8 @@ class PLCInterface:
             #
             # 算一下就清楚：target_slew_mm 的单位是 mm/周期。实测周期 63~71Hz，
             # 40mm/周期 ≈ 2600mm/s，而目标每 16ms 就可能反向一次，需要的加速度
-            #     a_cmd ≈ step / dt² = 40 / (1/65)² ≈ 169,000 mm/s²
-            # 轴的实际能力：106N / 3kg ≈ 35,000 mm/s² —— **差约 5 倍**。
+            #     a_cmd ≈ step / dt² = 40 / (1/65)² ≈ 169,000 mm/s^2
+            # 轴的实际能力：106N / 3kg ≈ 35,000 mm/s^2 —— **差约 5 倍**。
             # 轴追不上 → 跟随误差累积 → 超监控窗口 → 报错 → 运动学 801。
             #
             # 修法：限制"目标速度每周期能变多少"，即每周期步长的变化量
@@ -747,9 +876,21 @@ class PLCInterface:
                     self.last_send_state = "deadzone"
                     return None
                 self.last_send_state = "deadzone-resend"
-            # 步距 ≤ blend_threshold → 混合（平滑）；更大 → 中止重开（会顿）。
-            # 阈值可调，配合 TO「作业序列 → 最大舍入间距」一起实验。
-            buffer_mode = 0 if distance > self.blend_threshold_mm else 5
+            # 步距 ≤ blend_threshold → 混合（平滑）；更大 → 附加运动（先走完、停下、再走）。
+            #
+            # ★★★ TO_Kinematics 的 BufferMode 取值和**轴版完全不同**，别照搬轴的 0/1：
+            #     1 = 附加运动    当前的运动序列已完成，运动系统将停止，之后才执行新作业  ← 会停
+            #     2 = 滤波处理（较低速度）  达到混合距离时与当前运动混合
+            #     5 = 滤波处理（较高速度）  达到混合距离时与当前运动混合
+            #   而轴版 MC_MoveAbsolute 的 0=立即中止 / 1=混合 —— **运动机构版没有 0**。
+            #
+            # 现场踩过：这里原来发 0（照抄轴版语义），对 TO_Kinematics 是**非法值**，
+            # 作业被拒绝、目标直接丢失。日志里 `BufferMode 混合 N / 中止 1` 的那个
+            # "中止 1" 就是它。
+            #
+            # 现在大跳变时发 1（附加运动）= 明确的"走完当前再走新的"，语义最接近原来
+            # 想要的中止重开，而且是**合法值**。
+            buffer_mode = 1 if distance > self.blend_threshold_mm else 5
         else:
             distance = None
             buffer_mode = 5
@@ -773,6 +914,44 @@ class PLCInterface:
             self.last_send_dist_mm = distance
         self.last_send_state = "sent"
 
+    def _write_transition(self, distance):
+        """写 TransitionParameter[1]（精磨距离）＝ 混合起点离目标多远。
+
+        ★★★ 为什么必须每周期跟着步距写，不能留一个固定值：
+        它的语义是「在距离目标还有这么远时，就开始和下一段作业混合」。
+          · 步距 20mm、精磨 15mm → 只最后 15mm 混合 ✓ 连续
+          · 步距  5mm、精磨 15mm → 精磨距离比整段还长 → TO 把整段圆掉，
+            **到不了目标**。小步距恰恰是"瞄准到点"的精细修正，被圆掉就瞄不准。
+
+        ★★★ 步距接近 0 时**绝不能写 0**（现场踩过）：
+        目标没变时步距就是 0.1mm 量级，写成 0 的含义是「精磨距离 = 0」=
+        **完全不许混合**，等于把刚修好的混合又关掉。日志里
+        `步距中位 0.1mm | 精磨 0.0mm` 就是这个 bug。
+        这种周期本来就没什么可混合的，**保持上一次的值**才对。
+        """
+        if not self.transition_enabled:
+            return
+        if distance is None or distance <= DEAD_ZONE_MM:
+            return          # 步距太小：保持上一次的精磨距离，不要写 0
+        value = min(self.blend_threshold_mm, distance * TRANSITION_RATIO)
+        value = round(value, 1)
+        # 变化不大就不写 —— 省一次往返，也避免 PLC 读到中间态。
+        if (self._last_transition is not None
+                and abs(value - self._last_transition) < 0.2):
+            return
+        try:
+            self._client.db_write(DB_MOTION, COMM_TRANSITION_OFFSET,
+                                  struct.pack(">d", value))
+        except Exception as exc:
+            self.transition_enabled = False
+            self._messages.put(
+                f"PLC 写 TransitionParameter[1] 失败（DB1.DBD{COMM_TRANSITION_OFFSET}）"
+                f"：{exc} —— 已停用该写入；混合距离改回由 TO「最大舍入间距」决定")
+            return
+        self.round_trips += 1
+        self._last_transition = value
+        self.last_transition_mm = value
+
     def send_linear_move(self, game_x, game_y):
         """脉冲模式：写 36 字节 [X,0,Y,0,mode]，然后抬 DB1.56.0（P 沿触发）。"""
         if not self.connected:
@@ -784,6 +963,7 @@ class PLCInterface:
         phys_x, phys_y, buffer_mode, distance = prepared
         try:
             self._write_payload(phys_x, phys_y, buffer_mode)
+            self._write_transition(distance)
             self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, True)
             self._commit_move(phys_x, phys_y, buffer_mode, distance)
             return True
@@ -795,7 +975,7 @@ class PLCInterface:
     def send_linear_move_sequence(self, game_x, game_y, sequence):
         """序号握手模式：写目标块，再写序号 —— PLC 比较序号后执行，**不需要脉宽**。
 
-        ⚠️ 顺序不能反：**先写目标块，再写序号**。这样 PLC 看到新序号时
+        [!] 顺序不能反：**先写目标块，再写序号**。这样 PLC 看到新序号时
         目标已经稳定，和"先写目标再抬触发"是同一个思路。
         """
         if not self.connected:
@@ -807,6 +987,8 @@ class PLCInterface:
         phys_x, phys_y, buffer_mode, distance = prepared
         try:
             self._write_payload(phys_x, phys_y, buffer_mode)
+            # ★ 精磨距离必须在触发/序号之前写好 —— PLC 看到新序号时两个值都要是新的。
+            self._write_transition(distance)
             self.round_trips += 1
             self._client.db_write(DB_MOTION, COMM_SEQ_OFFSET,
                                   struct.pack(">i", sequence & 0x7FFFFFFF))
@@ -935,7 +1117,7 @@ class PLCLink:
         self._requires_snap7 = client_factory is None
         self.blend_threshold_mm = float(blend_threshold_mm)
         self.target_slew_mm = float(target_slew_mm)
-        # ★ 目标加速度限幅（mm/s²）。见 PLCInterface._prepare_move 的说明：
+        # ★ 目标加速度限幅（mm/s^2）。见 PLCInterface._prepare_move 的说明：
         #   TIA 里 Y 轴报的是「跟随误差」，纯限步长治不了（急转需要的加速度
         #   是轴能力的约 5 倍）。0 = 关闭。
         self.target_accel_mm_s2 = float(target_accel_mm_s2)
@@ -1061,6 +1243,18 @@ class PLCLink:
         else:
             text += " | BufferMode 无下发"
         text += f" | 步距中位 {median:.1f}mm p95 {p95:.1f}mm"
+        # ★ 精磨距离（TransitionParameter[1]）：混合起点离目标多远，随步距自适应。
+        #   如果这里一直显示 "关"，说明写 DB1.DBD150 失败了 —— 那时混合距离
+        #   退回由 TO「最大舍入间距」决定，就是"每点停一下"的老毛病。
+        # ★ 这里必须用 self._client —— diagnostics() 里没有名为 client 的局部变量。
+        #   （踩过：写成 client 会 NameError，而且是在每个 [stats] 行上崩，表现为
+        #     "实时处理失败"，看起来像整个视觉管线坏了。）
+        client = self._client
+        trans = getattr(client, "last_transition_mm", None)
+        if getattr(client, "transition_enabled", False):
+            text += (f" | 精磨 {trans:.1f}mm" if trans is not None else " | 精磨 未发")
+        else:
+            text += " | 精磨 关（DB1.DBD150 写失败）"
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
         if mode_total and 100.0 * counters["mode0"] / mode_total > 20.0:
@@ -1085,7 +1279,36 @@ class PLCLink:
                 text += f" | 序号模式 已发 {seq_sent} 条 / PLC 落后 {lag}"
                 if lag > 3:
                     text += "  ← PLC 跟不上，指令在积压"
+        # ★★ 用**实测周期**做安全自检 —— 不要用 --plc-rate 名义值。
+        #    实测常只有 60~70Hz（S7 往返耗时主导），而名义可能是 200：
+        #    用名义值算会把 slew 12 误判成 2400mm/s（制动 192mm）而狂报警，
+        #    用实测值算才是真实的 840mm/s（制动 24mm）。
+        #    限速器的单位是 mm/**周期**，所以"周期多快"直接决定指令速度。
+        rate_hz = cycles / elapsed
+        warn = self._safety_warning_text(rate_hz)
+        if warn:
+            text += warn
         return text
+
+    def _safety_warning_text(self, rate_hz):
+        """把"余量够不够刹得住"挂到诊断行上（有实测周期才算得准）。
+
+        返回 ""（安全）或一段警告。只在**不安全**时输出，安全时不占地方。
+        """
+        slew = self.target_slew_mm
+        if not slew or slew <= 0.0 or rate_hz <= 0.0:
+            return ""
+        try:
+            warnings = safety_warnings(slew, rate_hz)
+        except Exception:
+            return ""
+        if not warnings:
+            return ""
+        brake, speed = braking_distance_mm(slew, rate_hz)
+        # 包络到软限位之间的余量就是 MOTION_MARGIN_MM（包络 = PHYSICAL_* 内缩它）
+        margin = MOTION_MARGIN_MM
+        return (f" | [!]安全自检 {speed:.0f}mm/s 制动{brake:.0f}mm > 余量{margin:.0f}mm"
+                f" —— 冲向限位会刹不住，降 --target-slew-mm 或加 --motion-margin-mm")
 
 
     @property
@@ -1114,6 +1337,24 @@ class PLCLink:
 
     def physical_to_game(self, x, y):
         return _physical_to_game(self.zone, x, y)
+
+    @property
+    def reachable_bounds(self):
+        """AI 允许瞄的范围（游戏坐标）—— **必须用 COMMAND_\*，不是 PHYSICAL_\***。
+
+        这个属性是给 AI 的 recovery_bounds 用的：告诉它"哪些位置是真能到的"。
+
+        [!] 曾经用 PHYSICAL_*（TIA 软限位），那比实际能下发的包络宽
+        MOTION_MARGIN_MM。后果：AI 以为够得到、一直瞄外面，而 PLC 在下发时
+        默默把目标夹回包络 —— 表现就是"机械臂长期顶在包络角点上"，
+        而且 AI 的 target 和 PLC 实际下发的 target 对不上（有测试守着这个往返一致）。
+
+        判据很简单：**"AI 能瞄的范围" 必须等于 "PLC 会原样接受的范围"。**
+        这里读的是模块全局 COMMAND_*，所以 set_motion_margin() 之后自动跟着变。
+        """
+        left, top = self.physical_to_game(COMMAND_X_MIN, COMMAND_Y_MIN)
+        right, bottom = self.physical_to_game(COMMAND_X_MAX, COMMAND_Y_MAX)
+        return left, right, top, bottom
 
     def set_target(self, game_x, game_y):
         try:
@@ -1193,7 +1434,7 @@ class PLCLink:
         return self.set_axis_enable(axis, wanted), wanted
 
     def home_axis(self, axis):
-        """单轴回零。⚠️ 回零会让该轴动，是刻意的人工动作。"""
+        """单轴回零。[!] 回零会让该轴动，是刻意的人工动作。"""
         axis = str(axis).lower()
         if axis not in AXIS_NAMES:
             return False
@@ -1351,6 +1592,37 @@ class PLCLink:
                 and not feedback.comm_lost_latch and not feedback.group_stop
                 and feedback.kinematics_error == 0)
 
+    def _envelope_escape(self, feedback):
+        """轴是否已经跑出命令包络（= 失控过冲）。
+
+        为什么要单独检测：代码下发的坐标**永远**在命令包络内（game_to_physical
+        会夹取），但轴自己的物理位置**可以**冲出去 —— 跟随误差刹不住时就会。
+
+        现场实测：代码最大只能指令到 Y=170，而轴停在物理 **Y=192.6**
+        （超出 22.6mm，比软限位 185 还多 7.6mm）。程序当时**完全没察觉**，
+        因为这个检测不存在，直到轴撞上硬限位。有了它就能在越界的那一刻
+        撤销使能并喊出来，而不是等撞击。
+
+        返回 None（正常）或一行描述。
+        """
+        if not feedback.valid:
+            return None
+        try:
+            px, py = _game_to_physical_raw(self.zone, feedback.x, feedback.y)
+        except (ValueError, OverflowError, ZeroDivisionError):
+            return None
+        if not (math.isfinite(px) and math.isfinite(py)):
+            return None
+        over_x = max(COMMAND_X_MIN - px, px - COMMAND_X_MAX)
+        over_y = max(COMMAND_Y_MIN - py, py - COMMAND_Y_MAX)
+        if over_x <= ENVELOPE_ESCAPE_MM and over_y <= ENVELOPE_ESCAPE_MM:
+            return None
+        axis = "X" if over_x >= over_y else "Y"
+        return (f"{axis} 轴跑出命令包络：实际物理 ({px:.1f},{py:.1f})，"
+                f"包络 X {COMMAND_X_MIN:.0f}..{COMMAND_X_MAX:.0f} "
+                f"Y {COMMAND_Y_MIN:.0f}..{COMMAND_Y_MAX:.0f}"
+                f"（超出 {max(over_x, over_y):.1f}mm）—— 已撤销使能")
+
     def _cycle(self):
         client = self._client
         if not self.sequence_trigger:
@@ -1393,8 +1665,13 @@ class PLCLink:
         with self._lock:
             # Serious faults revoke even a pending arm request. During the initial
             # heartbeat/enable ramp, hold pending without allowing any movement.
+            # ★ 轴跑出命令包络 = 失控过冲，和"严重故障"同级：立刻撤销使能。
+            escape = self._envelope_escape(feedback)
+            if escape:
+                self._messages.put(f"[!] {escape}")
             fault = (feedback.axis_fault or feedback.comm_lost or feedback.comm_lost_latch
                      or feedback.group_stop or feedback.kinematics_error != 0
+                     or escape is not None
                      or (not feedback.plc_echo_ok
                          and time.monotonic() - self._echo_change_at >= ECHO_TIMEOUT)
                      or (self._armed and not safe))
