@@ -1008,3 +1008,84 @@ def test_diagnostics_runs_without_client_local_and_reports_transition():
         assert value < client.last_send_dist_mm + 1e-9, (value, client.last_send_dist_mm)
     finally:
         assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_transition_write_failure_keeps_pulse_and_sequence_motion_connected():
+    for sequence_mode in (False, True):
+        client = MemoryPLC()
+        try:
+            assert client.connect()
+            client.actual_game = (300, 140)
+            client.transport.fail_transition = True
+            if sequence_mode:
+                assert client.send_linear_move_sequence(350, 220, 1)
+                assert client.send_linear_move_sequence(400, 250, 2)
+                assert struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_ACK_OFFSET)[0] == 2
+            else:
+                assert client.send_linear_move(350, 220)
+                client.clear_trigger()
+                assert client.send_linear_move(400, 250)
+            assert client.connected and client.transport.connected
+            assert not client.transition_enabled
+            assert client.last_error
+            assert client.last_send_state == "sent"
+            assert len(client.transport.moves) == 2
+            assert sum(operation[0] == "transition" for operation in client.transport.operations) == 1
+        finally:
+            client.disconnect()
+
+
+@memory_binding()
+def test_position_inside_physical_limits_can_arm_outside_command_margin():
+    original_margin = protocol.MOTION_MARGIN_MM
+    link = None
+    try:
+        protocol.set_motion_margin(40)
+        client = MemoryPLC()
+        struct.pack_into(">dd", client.transport.db[1], 2, 0, -100)
+        link = PLCLink("memory", period=0.03, sequence_trigger=True,
+                       client_factory=lambda *args: client)
+        link.start()
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert not link.armed and not client.transport.moves
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(300, 180)
+        assert until(lambda: client.last_send_state == "sent")
+        px, _, py, _, _ = struct.unpack(">ddddi", client.transport.moves[-1])
+        assert protocol.COMMAND_X_MIN <= px <= protocol.COMMAND_X_MAX
+        assert protocol.COMMAND_Y_MIN <= py <= protocol.COMMAND_Y_MAX
+        assert link.armed
+    finally:
+        if link is not None:
+            assert link.stop(timeout=2.0)
+        protocol.set_motion_margin(original_margin)
+
+
+@memory_binding()
+def test_small_escape_past_each_physical_limit_revokes_without_auto_rearm():
+    for x, y in ((protocol.PHYSICAL_X_MIN - 0.1, 0),
+                 (protocol.PHYSICAL_X_MAX + 0.1, 0),
+                 (0, protocol.PHYSICAL_Y_MIN - 0.1),
+                 (0, protocol.PHYSICAL_Y_MAX + 0.1)):
+        client = MemoryPLC()
+        link = PLCLink("memory", period=0.03, sequence_trigger=True,
+                       client_factory=lambda *args: client)
+        link.start()
+        try:
+            assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+            assert link.enable_axes() and until(lambda: link.armed)
+            assert link.set_target(300, 180)
+            assert until(lambda: client.last_send_state == "sent")
+            struct.pack_into(">dd", client.transport.db[1], 2, x, y)
+            assert until(lambda: not link.armed and link._target is None)
+            sent = len(client.transport.moves)
+            struct.pack_into(">dd", client.transport.db[1], 2, 0, 0)
+            assert until(lambda: abs(link.feedback.x - link.physical_to_game(0, 0)[0]) < 1e-6)
+            assert link.set_target(350, 220)
+            cycles = link.cycle_count
+            assert until(lambda: link.cycle_count >= cycles + 3)
+            assert not link.armed
+            assert len(client.transport.moves) == sent
+        finally:
+            assert link.stop(timeout=2.0)

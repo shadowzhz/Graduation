@@ -276,11 +276,6 @@ def set_axis_dynamics(accel_mm_s2=None, decel_mm_s2=None, speed_mm_s=None) -> No
     if speed_mm_s is not None:
         AXIS_SPEED_LIMIT_MM_S = float(speed_mm_s)
 
-# 轴跑出命令包络多少毫米就判定"失控逃逸"并立刻撤销使能。
-# 取 10mm：命令包络到软限位留有 MOTION_MARGIN_MM 的余量，10 < 余量时
-# 检测会在碰到软限位**之前**先动作。
-ENVELOPE_ESCAPE_MM = 10.0
-
 # TransitionParameter[1]（精磨距离 = 混合起点离目标多远）在 DB1 里的字节偏移。
 # 现场在 DB1 建了 `TransitionParameter : Array[1..5] of LReal` @ 150.0，
 # FC1 用指针 P#DB1.DBX150.0 传给 MC_MoveLinearAbsolute 的 TransitionParameter。
@@ -944,9 +939,10 @@ class PLCInterface:
                                   struct.pack(">d", value))
         except Exception as exc:
             self.transition_enabled = False
-            self._messages.put(
+            self.last_error = (
                 f"PLC 写 TransitionParameter[1] 失败（DB1.DBD{COMM_TRANSITION_OFFSET}）"
                 f"：{exc} —— 已停用该写入；混合距离改回由 TO「最大舍入间距」决定")
+            print(f"[PLC] {self.last_error}")
             return
         self.round_trips += 1
         self._last_transition = value
@@ -1340,7 +1336,7 @@ class PLCLink:
 
     @property
     def reachable_bounds(self):
-        """AI 允许瞄的范围（游戏坐标）—— **必须用 COMMAND_\*，不是 PHYSICAL_\***。
+        """AI 可请求的命令范围（游戏坐标），由 COMMAND_* 而非 PHYSICAL_* 决定。
 
         这个属性是给 AI 的 recovery_bounds 用的：告诉它"哪些位置是真能到的"。
 
@@ -1593,18 +1589,7 @@ class PLCLink:
                 and feedback.kinematics_error == 0)
 
     def _envelope_escape(self, feedback):
-        """轴是否已经跑出命令包络（= 失控过冲）。
-
-        为什么要单独检测：代码下发的坐标**永远**在命令包络内（game_to_physical
-        会夹取），但轴自己的物理位置**可以**冲出去 —— 跟随误差刹不住时就会。
-
-        现场实测：代码最大只能指令到 Y=170，而轴停在物理 **Y=192.6**
-        （超出 22.6mm，比软限位 185 还多 7.6mm）。程序当时**完全没察觉**，
-        因为这个检测不存在，直到轴撞上硬限位。有了它就能在越界的那一刻
-        撤销使能并喊出来，而不是等撞击。
-
-        返回 None（正常）或一行描述。
-        """
+        """实际位置越过软限位才撤销授权；命令余量不能阻止轴从旧位置回到命令范围。"""
         if not feedback.valid:
             return None
         try:
@@ -1613,15 +1598,15 @@ class PLCLink:
             return None
         if not (math.isfinite(px) and math.isfinite(py)):
             return None
-        over_x = max(COMMAND_X_MIN - px, px - COMMAND_X_MAX)
-        over_y = max(COMMAND_Y_MIN - py, py - COMMAND_Y_MAX)
-        if over_x <= ENVELOPE_ESCAPE_MM and over_y <= ENVELOPE_ESCAPE_MM:
+        over_x = max(PHYSICAL_X_MIN - px, px - PHYSICAL_X_MAX)
+        over_y = max(PHYSICAL_Y_MIN - py, py - PHYSICAL_Y_MAX)
+        if over_x <= COORD_EPSILON and over_y <= COORD_EPSILON:
             return None
         axis = "X" if over_x >= over_y else "Y"
-        return (f"{axis} 轴跑出命令包络：实际物理 ({px:.1f},{py:.1f})，"
-                f"包络 X {COMMAND_X_MIN:.0f}..{COMMAND_X_MAX:.0f} "
-                f"Y {COMMAND_Y_MIN:.0f}..{COMMAND_Y_MAX:.0f}"
-                f"（超出 {max(over_x, over_y):.1f}mm）—— 已撤销使能")
+        return (f"{axis} 轴越过软限位：实际物理 ({px:.1f},{py:.1f})，"
+                f"限位 X {PHYSICAL_X_MIN:.0f}..{PHYSICAL_X_MAX:.0f} "
+                f"Y {PHYSICAL_Y_MIN:.0f}..{PHYSICAL_Y_MAX:.0f}"
+                f"（超出 {max(over_x, over_y):.1f}mm）—— 已撤销运动授权")
 
     def _cycle(self):
         client = self._client
@@ -1665,7 +1650,7 @@ class PLCLink:
         with self._lock:
             # Serious faults revoke even a pending arm request. During the initial
             # heartbeat/enable ramp, hold pending without allowing any movement.
-            # ★ 轴跑出命令包络 = 失控过冲，和"严重故障"同级：立刻撤销使能。
+            # 实际位置越过软限位与严重故障同级；不能因收窄命令范围撤销合法旧位置的授权。
             escape = self._envelope_escape(feedback)
             if escape:
                 self._messages.put(f"[!] {escape}")

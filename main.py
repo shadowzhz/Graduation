@@ -246,6 +246,7 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False):
     rally = result.rally
     if (rally is None or rally.target is None or
             (rally.state in (RallyState.DEFENDING, RallyState.ATTACKING) and
+             not rally.held_target and
              (not result.track_confirmed or result.ai_decision is None or result.curling_state is None))):
         if plc is not None:
             plc.clear_target()
@@ -358,9 +359,7 @@ def run_vision(args):
         # ★ 把轴的**实际可达范围**交给 AI：它据此限制"可覆盖范围"
         #   （recovery_bounds），免得老是瞄到轴到不了的边角。
         runtime.ai.recovery_bounds = plc.reachable_bounds
-        # ★★ rally 也要一份：用来判断"停在自己半场死角的那颗球还回不回收得动"。
-        #    回收要绕到球后面推，绕不过去时只能放弃退回 READY ——
-        #    否则会像现场那样停在夹取角点一动不动，一局卡死。
+        # 回收按相同命令范围判断能否接触；不可达时清目标，不能直穿冰壶回位。
         rally.reachable_bounds = plc.reachable_bounds
         # ★★ 启动就自检"余量够不够刹得住"。现场撞死挡的根源就是没人会在跑之前
         #    先算这一步：slew 40 @70Hz = 2800mm/s，而 a=15000 时需要 261mm 才
@@ -374,8 +373,7 @@ def run_vision(args):
                   f"{plc_module.AXIS_ACCEL_LIMIT_MM_S2:.0f}mm/s^2 估算制动距离 {brake:.0f}mm")
             for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate):
                 print(f"[PLC] [!] 安全自检：{warning}")
-        print(f"[PLC] 越界检测已启用：轴超出命令包络 "
-              f"{plc_module.ENVELOPE_ESCAPE_MM:.0f}mm 即撤销使能并报警")
+        print("[PLC] 位置越界检测已启用：实际轴位置越过软限位即撤销运动授权并报警")
         plc.start()
         if window is not None and not args.dry_run:
             window.attach_plc(plc)

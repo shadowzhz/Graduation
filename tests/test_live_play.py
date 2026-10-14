@@ -14,7 +14,7 @@ from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PlcControlAdapter
-from air_hockey.control.adapter import PlcTarget
+from air_hockey.control import plc as protocol
 from air_hockey.control.plc import PLCFeedback, PLCLink
 from air_hockey.physics import StoneMotion, goal_scorer
 from main import submit_rally_target
@@ -45,7 +45,7 @@ class _LiveTable:
         self.plc = plc
         if plc is not None:
             self.runtime.ai.recovery_bounds = plc.reachable_bounds
-        self.controller = RallyController()
+        self.controller = RallyController(reachable_bounds=None if plc is None else plc.reachable_bounds)
         self.adapter = PlcControlAdapter()
         self.game = _contact_game(stone)
         self.mallet = mallet
@@ -81,25 +81,27 @@ class _LiveTable:
         request = submit_rally_target(result, self.adapter, None)
         assert result.detection is not None, (self.sequence, stone)
         assert result.track_confirmed, (self.sequence, result.track)
-        assert request is not None, (self.sequence, result.rally)
+        self.states.add(result.rally.state)
+        if request is None:
+            assert result.rally.target is None, (self.sequence, result.rally)
+            return result, None
         limits = self.adapter._limits
         for x, y in (result.rally.target, (request.target_x, request.target_y)):
             assert math.isfinite(x) and math.isfinite(y)
             assert limits[0] <= x <= limits[1] and limits[2] <= y <= limits[3], (x, y)
-        self.states.add(result.rally.state)
         return result, request
 
     def advance(self, request):
-        if self.plc is not None:
-            target = self.plc.physical_to_game(*self.plc.game_to_physical(request.target_x, request.target_y))
-            request = PlcTarget(*target, request.timestamp)
+        target = self.mallet if request is None else (request.target_x, request.target_y)
+        if self.plc is not None and request is not None:
+            target = self.plc.physical_to_game(*self.plc.game_to_physical(*target))
         steps = math.ceil(0.1 / core.MAX_PHYSICS_STEP)
         dt = 0.1 / steps
         stone = self.game.stone
         for _ in range(steps):
             previous_mallet = self.mallet
             x, y, vx, vy = self.game._move_towards(
-                *self.mallet, request.target_x, request.target_y,
+                *self.mallet, *target,
                 core.DIFFICULTIES["普通"].ai_speed, dt,
             )
             self.mallet = (x, y)
@@ -136,7 +138,7 @@ class _LiveTable:
             stone = self.game.stone
             returned |= stone.y > core.RINK_CENTER_Y + core.STONE_RADIUS and stone.vy > 0
             if (returned and result.curling_state.y > core.RINK_CENTER_Y
-                    and request.target_y == READY_POSITION[1]):
+                    and request is not None and request.target_y == READY_POSITION[1]):
                 assert self.impacts > previous_impacts, (self.sequence, stone)
                 assert result.curling_state.y > core.RINK_CENTER_Y
                 return result, request
@@ -187,12 +189,32 @@ def test_live_moving_rear_puck_is_bypassed_and_returned():
     table.return_puck()
 
 
+def test_live_rear_contact_uses_runtime_default_command_margin():
+    original_margin = protocol.MOTION_MARGIN_MM
+    try:
+        protocol.set_motion_margin(40.0)
+        table = _LiveTable(StoneMotion(x=300, y=140), (300, 250), PLCLink("offline"))
+        for _ in range(30):
+            _, request = table.observe()
+            assert request is not None
+            table.advance(request)
+            if table.impacts:
+                assert table.game.stone.vy > 0
+                assert table.minimum_y >= 139.0
+                break
+        else:
+            raise AssertionError(("Reachable rear puck was never contacted", table.mallet))
+    finally:
+        protocol.set_motion_margin(original_margin)
+
+
 def test_live_unreachable_goal_side_puck_is_not_pushed_into_own_goal():
     link = PLCLink("offline")
     y = link.reachable_bounds[2] - core.STONE_RADIUS
     table = _LiveTable(StoneMotion(x=300, y=y), (300, 250), link)
     for _ in range(30):
         _, request = table.observe()
+        assert request is None
         table.advance(request)
     assert table.impacts == 0
     assert table.minimum_y == y

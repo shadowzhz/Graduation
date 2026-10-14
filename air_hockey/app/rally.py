@@ -34,6 +34,7 @@ class RallyDecision:
     mallet_position: tuple[float, float]
     mallet_source: str
     transitions: tuple[str, ...] = ()
+    held_target: bool = False
 
 
 # 主防御的"深入上限"（球台单位，1 单位 ≈ 0.928mm）。
@@ -62,11 +63,6 @@ DEFAULT_DEFENSE_FORWARD_LIMIT = None
 OCCLUSION_HOLD_SECONDS = 1.0       # 刚丢多久之内算"可能只是被挡"
 OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡的"（球台单位，约 139mm）
 
-# 回收一颗停住的冰壶时，球槌**圆心**必须能到的位置 = 球心 - (两半径之和) - 这个余量。
-# 余量不是凑数：刚好贴住球是推不动的，必须还能再从那儿往前走一段。
-RETRIEVE_BACK_MARGIN = 12.0
-
-
 class RallyController:
     def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT,
                  reachable_bounds: tuple | None = None):
@@ -87,27 +83,15 @@ class RallyController:
         self._last_active_state = RallyState.WAITING
 
     def can_retrieve(self, stone) -> bool:
-        """停住的冰壶还回收得动吗 —— 球槌能不能绕到它**后面**去推。
-
-        ★★★ 现场卡死的就是这一条：球停在 game y≈112，要推它球槌圆心得退到
-        y ≈ 112 - (14+31) - 12 = 55；而 `--motion-margin-mm 30` 把可达下限卡在
-        y = 125。**物理上绕不过去** —— 于是 AI 停在夹取角点 (217,125) 一动不动，
-        rally 保持 ATTACKING 永不退场，一局就此停住。
-
-        为什么不能"从前面推"：从前面推会把它推向 **y 更小**的一侧，那正是
-        机器自己的球门方向 —— 那是乌龙球。所以这一支只能**放弃并退回 READY**，
-        让真人把球拿出来。
-
-        没有 bounds 时返回 True（保持原行为，仿真和没接 PLC 时不受影响）。
-        """
+        """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
         if self.reachable_bounds is None:
             return True
         try:
-            _left, _right, top, _bottom = self.reachable_bounds
-            behind = (stone.y
-                      - (core.STONE_RADIUS + core.MALLET_RADIUS)
-                      - RETRIEVE_BACK_MARGIN)
-            return behind >= top
+            left, right, top, bottom = self.reachable_bounds
+            closest_x = min(max(stone.x, left), right)
+            closest_y = min(stone.y, bottom)
+            return (stone.y > top and math.hypot(stone.x - closest_x, stone.y - closest_y)
+                    < core.STONE_RADIUS + core.MALLET_RADIUS)
         except (TypeError, ValueError, IndexError):
             return True
 
@@ -122,6 +106,7 @@ class RallyController:
         self.state = (RallyState.WAITING if math.dist(position, READY_POSITION) <= ARRIVAL_TOLERANCE
                       else RallyState.RECOVERING)
         target = READY_POSITION
+        held_target = False
         reason = "no puck; READY"
         direction = "invalid"
         stone = result.curling_state
@@ -163,15 +148,10 @@ class RallyController:
                     target_y = decision.target_y
                     unreachable = machine_half and puck_stopped and not self.can_retrieve(stone)
                     if unreachable:
-                        # ★★★ 停住的球在轴**绕不过去**的死角（贴着自己那侧的墙）。
-                        #   回收需要绕到球后面推；绕不过去时：
-                        #     · 从前面推 = 推向自家门 = 乌龙球，绝不允许
-                        #     · 原地赖着 = 现场实测卡死（target 恒为夹取角点 (217,125)、
-                        #       hit phase 恒为 positioning、永不退场，一局就此停住）
-                        #   所以只能放弃、退回 READY，让真人把球拿出来。
+                        # 不能盲目直穿身后的球回 READY，那会从前侧推向自家球门。
                         self.state = RallyState.RECOVERING
                         reason = (f"puck unreachable (stopped at y={stone.y:.0f}, "
-                                  f"can't get behind it): READY")
+                                  f"no goal-side contact): target cleared; move puck manually")
                         self._last_target = None
                     elif machine_half and puck_stopped:
                         # 死球（冰壶在自己半场停住）必须上去回收，否则回合停住 —— 不设上限。
@@ -186,7 +166,7 @@ class RallyController:
                     else:
                         reason = "human-half puck: defend/prepare"
                     if unreachable:
-                        target = READY_POSITION
+                        target = None
                     else:
                         target = (decision.target_x, target_y)
                         # ★ 记下这次的有效目标 —— 供"球槌遮挡"时保持用
@@ -213,10 +193,11 @@ class RallyController:
             # 判据：**球槌就停在最后那个目标附近**（说明是它自己挡的），
             # 且刚丢不久 → 保持原目标和原状态，让它把这一下做完。
             if (self._last_target is not None
-                    and now - self._last_seen_at <= OCCLUSION_HOLD_SECONDS
+                    and 0 <= now - self._last_seen_at <= OCCLUSION_HOLD_SECONDS
                     and math.dist(position, self._last_target) <= OCCLUSION_KEEP_RADIUS):
                 target = self._last_target
                 self.state = self._last_active_state
+                held_target = True
                 reason = "puck hidden by mallet: hold target"
             elif self._last_target is not None:
                 # ★ 没保持成功时把原因写进 reason —— 现场一次就能看出是
@@ -228,4 +209,5 @@ class RallyController:
                 reason = f"no puck; READY (hold rejected: age={age:.0f}s gap={gap:.0f})"
         transitions = (() if self.state == previous else
                        (f"{previous.value} -> {self.state.value}: {reason}",))
-        return RallyDecision(self.state, target, reason, direction, position, source, transitions)
+        return RallyDecision(self.state, target, reason, direction, position, source, transitions,
+                             held_target=held_target)

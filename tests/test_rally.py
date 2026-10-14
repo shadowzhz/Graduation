@@ -2,7 +2,9 @@
 
 from dataclasses import replace
 import math
+from unittest.mock import patch
 
+import cv2
 import numpy as np
 
 from air_hockey import core_config as core
@@ -14,7 +16,7 @@ from air_hockey.app.rally import (
     RallyController,
     RallyState,
 )
-from air_hockey.app.vision_runtime import VisionResult
+from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.control.plc import PLCFeedback
@@ -301,47 +303,27 @@ def test_occluded_puck_keeps_target_while_mallet_is_on_it():
     assert decision.target == READY_POSITION
 
 
-def test_rally_gives_up_on_puck_it_cannot_get_behind():
-    """★ 停在自己半场死角的球：绕不过去时必须退回 READY，不能赖在夹取角点。
-
-    现场实测（2026-10）：球停在 game y≈112，`--motion-margin-mm 30` 把可达下限
-    卡在 y=125，球槌圆心得退到 112-45-12=55 才推得动 → **物理上做不到**。
-    旧代码假设"停住的球一定回收得动"，于是 target 恒为夹取角点 (217,125)、
-    hit phase 恒为 positioning、rally 永远是 ATTACKING —— 一局就此卡死。
-
-    从前面推是不行的（那是推自家门 = 乌龙球），所以唯一正确的动作是放弃退场。
-    """
+def test_rally_allows_goal_side_contact_without_full_diameter_retreat():
     bounds = (118.0, 486.0, 125.0, 314.0)
     controller = RallyController(reachable_bounds=bounds)
-    state = make_game_state(stone_y=112.0)
-    decision = controller.update(make_vision_result(state), now=1.0)
-    assert decision.target == READY_POSITION, decision
-    assert decision.state is RallyState.RECOVERING, decision
-    assert "unreachable" in decision.reason, decision.reason
+    result = observation(1, x=300, y=140, vx=0, vy=0, mallet=(300, 250))
+    decision = tick(controller, result, mallet=(300, 250))
+    assert controller.can_retrieve(result.curling_state)
+    assert decision.state is RallyState.ATTACKING
+    request = submit_rally_target(result, PlcControlAdapter(), None)
+    assert request is not None
+    assert abs(request.target_x - result.curling_state.x) > core.STONE_RADIUS + core.MALLET_RADIUS
+    assert request.target_y == 250
 
-    # 没有 bounds（仿真 / 没接 PLC）时行为不变 —— 不引入回归
-    plain = RallyController()
-    assert plain.can_retrieve(make_game_state(stone_y=112.0).stone)
-    assert plain.update(make_vision_result(make_game_state(stone_y=112.0)),
-                        now=1.0).state is RallyState.ATTACKING
+
 def test_rally_gives_up_on_puck_it_cannot_get_behind():
-    """★ 停在自己半场死角的球：绕不过去时必须退回 READY，不能赖在夹取角点。
-
-    现场实测（2026-10）：球停在 game y≈112，`--motion-margin-mm 30` 把可达下限
-    卡在 y=125，而球槌圆心要退到 112-45-12=55 才推得动 → **物理上做不到**。
-    旧代码假设"停住的球一定回收得动"，于是 target 恒为夹取角点 (217,125)、
-    hit phase 恒为 positioning、rally 永远是 ATTACKING —— 一局就此卡死。
-
-    从前面推是不行的（那是推向自家门 = 乌龙球），所以唯一正确的动作是放弃退场。
-    """
     bounds = (118.0, 486.0, 125.0, 314.0)
     controller = RallyController(reachable_bounds=bounds)
-    # 停住的球（vy=0 → direction "still"），位置贴着可达下限
-    result = observation(1, x=217, y=112, vx=0, vy=0)
-    decision = tick(controller, result)
-    assert decision.target == READY_POSITION, decision
+    result = observation(1, x=217, y=112, vx=0, vy=0, mallet=(217, 250))
+    decision = tick(controller, result, mallet=(217, 250))
+    assert decision.target is None
     assert decision.state is RallyState.RECOVERING, decision
-    assert "unreachable" in decision.reason, decision.reason
+    assert submit_rally_target(result, PlcControlAdapter(), None) is None
 
 
 def test_rally_without_bounds_still_retrieves_stopped_puck():
@@ -358,4 +340,51 @@ def test_rally_retrieves_stopped_puck_that_is_deep_enough():
     result = observation(1, x=217, y=250, vx=0, vy=0)
     decision = tick(controller, result)
     assert decision.state is RallyState.ATTACKING, decision
-    assert "retrieve" in decision.reason, decision.reason
+    assert decision.target == (217, 250)
+
+
+def test_rally_rejects_stopped_pucks_outside_contact_reach():
+    controller = RallyController(reachable_bounds=(118.0, 486.0, 125.0, 314.0))
+    for x, y in ((50, 250), (550, 250), (300, 370), (300, 125)):
+        result = observation(1, x=x, y=y, vx=0, vy=0)
+        assert not controller.can_retrieve(result.curling_state)
+        assert tick(controller, result).target is None
+
+
+def test_occlusion_hold_is_published_after_track_deletion_and_expires():
+    runtime = VisionRuntime(table_roi=(0, 0, 1280, 720),
+                            table_calibration_file=None, disable_undistort=True)
+    controller = RallyController()
+    adapter = PlcControlAdapter()
+    link = PLCLink("offline")
+    last_target = None
+    for sequence in range(1, runtime.tracker.max_missed_frames + 3):
+        timestamp = 10 + sequence * 0.01
+        image = np.zeros((720, 1280, 3), np.uint8)
+        if sequence == 1:
+            cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
+        feedback = PLCFeedback(stamp=timestamp, valid=True, x=400, y=220,
+                               x_en=True, y_en=True, axes_ready=True)
+        with patch("air_hockey.app.vision_runtime.time.monotonic", return_value=timestamp):
+            runtime.set_ai_feedback(feedback)
+            result = runtime.process_frame(Frame(image, timestamp=timestamp, sequence=sequence))
+            tick(controller, result, feedback=feedback)
+            request = submit_rally_target(result, adapter, link)
+        assert request is not None
+        if result.track is not None:
+            last_target = (request.target_x, request.target_y)
+        else:
+            assert result.curling_state is None and not result.track_confirmed
+            assert link._target == last_target
+            assert not link.armed
+
+    expired = timestamp + OCCLUSION_HOLD_SECONDS + 0.1
+    feedback = replace(feedback, stamp=expired)
+    with patch("air_hockey.app.vision_runtime.time.monotonic", return_value=expired):
+        runtime.set_ai_feedback(feedback)
+        result = runtime.process_frame(Frame(image, timestamp=expired, sequence=sequence + 1))
+        tick(controller, result, feedback=feedback)
+        request = submit_rally_target(result, adapter, link)
+    assert request is not None
+    assert link._target == READY_POSITION
+    assert not link.armed
