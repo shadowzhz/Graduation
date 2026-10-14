@@ -4,6 +4,7 @@
 """
 
 from typing import Sequence
+import math
 import cv2
 import numpy as np
 
@@ -34,9 +35,25 @@ def _draw_annotations(
 ) -> np.ndarray:
     """把 raw 像素标注投影到目标画布；render 与预览使用相同的几何数据。"""
     scale = min(scale_x, scale_y)
+    canvas_h, canvas_w = output.shape[:2]
 
     def point(x, y):
-        return round(x * scale_x), round(y * scale_y)
+        """投影到画布坐标。
+
+        ⚠️ 必须**夹取范围**并把类型收敛成 Python int —— 检测偶尔会给出完全离谱的
+        位置（现场实测出现过 puck=(-1095.4, 4225.9)，球台只有 600x760），
+        算出来的画线坐标会让 cv2.line 抛
+            "Can't parse 'pt1'. Sequence item with index 0 has a wrong type"
+        而把整个预览渲染搞崩（表现为"实时处理失败"）。
+        夹到 ±2 倍画布范围足够：既不会崩，也还是能看到线指向哪边。
+        """
+        px, py = x * scale_x, y * scale_y
+        if not math.isfinite(px):
+            px = 0.0
+        if not math.isfinite(py):
+            py = 0.0
+        return (max(-2 * canvas_w, min(2 * canvas_w, int(px))),
+                max(-2 * canvas_h, min(2 * canvas_h, int(py))))
 
     def size(value):
         return max(1, round(value * scale))

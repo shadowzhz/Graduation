@@ -52,6 +52,16 @@ class RallyDecision:
 #    210   → 约等于不限制（= ai.py 自身的上限 349）
 DEFAULT_DEFENSE_FORWARD_LIMIT = None
 
+# ★ 遮挡保持：球槌压到球上时，球被球槌挡住 → 检测消失 → 轨道丢弃 →
+# track_confirmed=False → rally 切 RECOVERING、目标回 READY → 球槌退开 →
+# 球又可见 → 再去 → 再次遮挡 …… 现场日志里连续循环好几轮。
+#
+# 判据故意放宽：**只要刚追击过、且球槌还在那个目标附近，就当是它自己挡的**。
+# 现场实测把半径/窗口收紧时会"只保持一帧就放弃"，所以取宽值；
+# 真正兜底的是窗口上限（超时一定会回 READY），不会永远抱着一个陈旧目标。
+OCCLUSION_HOLD_SECONDS = 1.0       # 刚丢多久之内算"可能只是被挡"
+OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡的"（球台单位，约 139mm）
+
 
 class RallyController:
     def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT):
@@ -62,6 +72,10 @@ class RallyController:
         """
         self.state = RallyState.WAITING
         self.defense_forward_limit = defense_forward_limit
+        # ★ 遮挡保持用的记忆（见 update 里的说明）
+        self._last_target = None
+        self._last_seen_at = 0.0
+        self._last_active_state = RallyState.WAITING
 
     def update(self, result: VisionResult, *, now: float, feedback=None,
                mallet_position=READY_POSITION) -> RallyDecision:
@@ -126,8 +140,43 @@ class RallyController:
                     else:
                         reason = "human-half puck: defend/prepare"
                     target = (decision.target_x, target_y)
+                    # ★ 记下这次的有效目标 —— 供"球槌遮挡"时保持用
+                    self._last_target = target
+                    self._last_active_state = self.state
             else:
                 reason = "puck on human side moving away; READY"
+                # ★ 主动回 READY 时清掉旧目标 —— 否则后面一次遮挡会把一个
+                #   陈旧的追击点"复活"，机械臂又冲回去。
+                self._last_target = None
+            # ★ 只要这一帧有确认的轨道（不管走哪一支），就刷新时间戳。
+            #   原来只在"机器半场追击"那一支里刷新 —— 如果中间夹了一帧
+            #   "球飞走"（target=READY），时间戳就不动，保持窗口会悄悄过期，
+            #   表现为"遮挡保持只成功一帧、下一帧就放弃"（现场日志里正是如此）。
+            self._last_seen_at = now
+        else:
+            # ★★★ 遮挡保持：球槌压到球上时，球会被球槌挡住 —— 检测消失、
+            # 轨道在宽限期（max_missed_frames）之后被丢弃、track_confirmed 变 False。
+            # 而"球槌压到球上"恰恰是它该做的事，于是出现
+            #     逼近球 → ATTACKING->RECOVERING(no puck) → 目标回 READY → 退开
+            #     → 球又可见 → 再去 → 再次遮挡 → 循环
+            # 现场日志里连续好几轮（mallet 239→175→143 退开 → 246→…→143 再来）。
+            #
+            # 判据：**球槌就停在最后那个目标附近**（说明是它自己挡的），
+            # 且刚丢不久 → 保持原目标和原状态，让它把这一下做完。
+            if (self._last_target is not None
+                    and now - self._last_seen_at <= OCCLUSION_HOLD_SECONDS
+                    and math.dist(position, self._last_target) <= OCCLUSION_KEEP_RADIUS):
+                target = self._last_target
+                self.state = self._last_active_state
+                reason = "puck hidden by mallet: hold target"
+            elif self._last_target is not None:
+                # ★ 没保持成功时把原因写进 reason —— 现场一次就能看出是
+                #   "超时"还是"球槌离太远"。
+                #   age 取整到秒：否则每帧都变，日志会被这行刷屏，
+                #   把真正的故障信息（比如"轴故障位=X"）淹掉。
+                age = now - self._last_seen_at
+                gap = math.dist(position, self._last_target)
+                reason = f"no puck; READY (hold rejected: age={age:.0f}s gap={gap:.0f})"
         transitions = (() if self.state == previous else
                        (f"{previous.value} -> {self.state.value}: {reason}",))
         return RallyDecision(self.state, target, reason, direction, position, source, transitions)

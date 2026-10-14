@@ -82,6 +82,19 @@ class MemoryS7:
 
     def db_write(self, db, start, data):
         data = bytes(data)
+        if (db, start, len(data)) == (1, protocol.COMM_SEQ_OFFSET, 4):
+            # ★ 序号握手：序号写下来就代表"一条新指令"，等价于脉冲模式里抬触发位。
+            #   真实 PLC 也是这个语义：先拿到已稳定的目标块，看到新序号就执行。
+            self.operations.append(("sequence", db, start, data))
+            if self.fail_payload:
+                raise RuntimeError("sequence write failed")
+            self.db[db][start:start + len(data)] = data
+            # 模拟 PLC 把已处理的序号回写到 DB1.64（诊断用"落后几条"）
+            self.db[1][protocol.COMM_SEQ_ACK_OFFSET:protocol.COMM_SEQ_ACK_OFFSET + 4] = data
+            assert self.pending_payload is not None
+            self.moves.append(self.pending_payload)
+            self.pending_payload = None
+            return
         assert (db, start, len(data)) == (1, 20, 36)
         self.operations.append(("payload", db, start, data))
         if self.fail_payload:
@@ -175,8 +188,9 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
         # 用符号常量而不是写死数值：这个断言的本意是验证**分量顺序**
         # （X, 0, Y, 0 —— 实机 TO_Kinematics 用的是分量 1 和 3），
         # 而不是验证行程的具体毫米数。写死数值会在改行程时误报。
+        # 上限是 COMMAND_*（命令限位），比 TIA 软限位内缩 MOTION_MARGIN_MM。
         assert struct.unpack_from(">ddddi", move) == (
-            protocol.PHYSICAL_X_MAX, 0.0, protocol.PHYSICAL_Y_MAX, 0.0, 5)
+            protocol.COMMAND_X_MAX, 0.0, protocol.COMMAND_Y_MAX, 0.0, 5)
         assert len(move) == 36
         assert plc.transport.operations[-2:] == [
             ("payload", 1, 20, move), ("bit", 1, 56, 0, True)]
@@ -250,9 +264,12 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
     try:
         assert client.connect()
         left, right, top, bottom = protocol.DEFAULT_ZONE
+        # 场地边缘映射到 **COMMAND_*（命令限位）**，不是 PHYSICAL_*（TIA 软限位）。
+        # 两者的差值就是 MOTION_MARGIN_MM —— 代码的目标必须比软限位保守，
+        # 否则命令正好落在软限位上，稍有超调就触发轴故障。
         for game_point, physical_point in (
-            ((left, top), (protocol.PHYSICAL_X_MIN, protocol.PHYSICAL_Y_MIN)),
-            ((right, bottom), (protocol.PHYSICAL_X_MAX, protocol.PHYSICAL_Y_MAX)),
+            ((left, top), (protocol.COMMAND_X_MIN, protocol.COMMAND_Y_MIN)),
+            ((right, bottom), (protocol.COMMAND_X_MAX, protocol.COMMAND_Y_MAX)),
         ):
             client.reset_tracking()
             client.clear_trigger()
@@ -266,7 +283,7 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
                                        top - protocol.COORD_EPSILON / 2)
         move = client.transport.moves[-1]
         assert struct.unpack_from(">dddd", move) == (
-            protocol.PHYSICAL_X_MIN, 0.0, protocol.PHYSICAL_Y_MIN, 0.0,
+            protocol.COMMAND_X_MIN, 0.0, protocol.COMMAND_Y_MIN, 0.0,
         )
 
         before = len(client.transport.moves)
@@ -787,3 +804,158 @@ def test_stop_during_high_pulse_hold_prevents_the_next_command():
         link._cycle()
         assert not link.armed and link._target is None
         assert client.transport.moves == before
+
+
+@memory_binding()
+def test_sequence_trigger_advances_sequence_instead_of_pulsing():
+    """序号握手模式：写目标块 + 递增序号，不写触发位。
+
+    这是替代脉冲触发的方案 —— 脉冲要求高低电平各跨过一个 PLC 扫描周期
+    （实测 2~3ms、偶发 5ms），把周期锁在约 28ms（35Hz）；序号握手没有这个限制。
+    """
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, sequence_trigger=True,
+                   client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(300, 180)
+        assert until(lambda: len(client.transport.moves) == 1)
+        first = struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0]
+        assert first == link._sequence > 0
+        # ★ 序号模式绝不能再抬触发位 —— 否则 PLC 会被脉冲和序号双重触发
+        assert client.transport.db[1][protocol.TRIGGER_BYTE] & 1 == 0
+
+        assert link.set_target(340, 200)
+        assert until(lambda: len(client.transport.moves) == 2)
+        assert struct.unpack_from(
+            ">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0] == first + 1
+        assert client.transport.db[1][protocol.TRIGGER_BYTE] & 1 == 0
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_sequence_does_not_advance_on_deadzone_skip():
+    """目标没变 **且轴已到位** 时才跳过 —— 死区是压抖动的，不是压重发的。"""
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, sequence_trigger=True,
+                   client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        # ★ 起始时把"轴的实际位置"放在别处 —— 第一条指令才会真的发出去。
+        #   （若一开始就放在目标上，新逻辑会正确地判定"已经到位、不用发"。）
+        #   必须在 enable 之前写好，否则和工作线程的周期抢时序（测试会抖）。
+        px, py = client.game_to_physical(250, 150)
+        struct.pack_into(">d", client.transport.db[1], 2, px)
+        struct.pack_into(">d", client.transport.db[1], 10, py)
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(300, 180)
+        assert until(lambda: len(client.transport.moves) >= 1)
+        # ★ 轴走到目标处：写进去之后要**等反馈确认**，否则下一句可能在
+        #   工作线程读到新位置之前就判定了（会偶发失败）。
+        px, py = client.game_to_physical(300, 180)
+        struct.pack_into(">d", client.transport.db[1], 2, px)
+        struct.pack_into(">d", client.transport.db[1], 10, py)
+        assert until(lambda: abs(link.feedback.x - 300.0) < 1.0
+                     and abs(link.feedback.y - 180.0) < 1.0)
+        sent = struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0]
+        # 到这里轴已到位、目标也稳定下来，再取基准计数并让 worker 空转几个周期
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 4)
+        moves = len(client.transport.moves)
+        # 目标只挪 0.4mm（< DEAD_ZONE_MM）→ 才该被死区挡掉
+        assert link.set_target(300.4, 180.0)
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 4)
+        assert len(client.transport.moves) == moves
+        assert struct.unpack_from(
+            ">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0] == sent
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_target_is_resent_when_axis_never_arrived():
+    """★ 回归"假死"：目标没变但轴没走到时，必须持续重发。
+
+    现场症状：target(98,340)、轴停在(98,219)，下发 0.0Hz、死区跳过 312，
+    机械臂就此卡住不动 —— 因为死区只比"上次发送的目标"，不比轴的实际位置。
+    """
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, sequence_trigger=True,
+                   client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(300, 180)
+        assert until(lambda: len(client.transport.moves) == 1)
+        moves = len(client.transport.moves)
+        # 轴的实际位置离目标很远（模拟"根本没走到"），而目标不再变化
+        far_x, far_y = client.game_to_physical(300, 320)
+        struct.pack_into(">d", client.transport.db[1], 2, far_x)
+        struct.pack_into(">d", client.transport.db[1], 10, far_y)
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 4)
+        # ★ 必须继续下发 —— 不能因为"目标没变"就一条都不发
+        assert len(client.transport.moves) > moves
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_single_axis_enable_only_touches_that_axis_and_blocks_motion():
+    """★ 单轴使能 / 撤销必须安全：
+
+    · 只写**对应那个轴**的命令位（DB1.0 bit6=X / bit7=Y），不能顺手写另一个
+    · 单轴使能后**绝不能**开始下发运动 —— _motion_safe 要求 x_en 和 y_en 同时为真
+      （现场用它把报 801 的那个轴单独撤下来，另一个继续可用）
+    """
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.set_axis_enable("x", True)
+        assert until(lambda: (client.transport.db[1][0] >> 6) & 1 == 1)
+        # ★ 只动了 X 的命令位，Y 的没被碰
+        assert (client.transport.db[1][0] >> 7) & 1 == 0, "单轴使能写到了另一个轴"
+
+        # 模拟 PLC 回报：只有 X 已使能（DB1.1 bit2=X / bit3=Y）
+        client.transport.db[1][1] = (client.transport.db[1][1] | 0x04) & ~0x08
+        assert until(lambda: link.feedback.x_en and not link.feedback.y_en)
+
+        # ★ 单轴使能下发目标 → 不能有任何运动、不能 arm
+        assert link.set_target(300, 180)
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 5)
+        assert client.transport.moves == [], "单轴使能居然下发了运动！"
+        assert not link.armed
+
+        # 再把 Y 也使能 → 才允许运动
+        assert link.set_axis_enable("y", True)
+        assert until(lambda: (client.transport.db[1][0] >> 7) & 1 == 1)
+        client.transport.db[1][1] |= 0x08
+        assert until(lambda: link.armed)
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_single_axis_disable_clears_only_that_axis_and_disarms():
+    """撤下单个轴：只清自己的位，并且立刻停止运动授权。"""
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_axis_enable("y", False)
+        assert until(lambda: (client.transport.db[1][0] >> 7) & 1 == 0)
+        assert (client.transport.db[1][0] >> 6) & 1 == 1, "撤 Y 不该动 X"
+        assert until(lambda: not link.armed)
+    finally:
+        assert link.stop(timeout=2.0)

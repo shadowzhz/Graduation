@@ -36,6 +36,20 @@ DB_MOTION = 1
 DB_COMM = 18
 MOTION_CMD_BYTE = 0
 HOMING_BYTE = 1
+# ★ 单轴操作：DB1 里 X/Y 的位本来就是分开的（PLC 侧早就支持），只是代码一直两个一起写。
+#   有了单轴使能，就能在某个轴报 801 / 撞限位之后只把它撤下来，另一个继续用。
+#
+# ⚠️ 这几个映射是**从原来"两个一起写"的代码推出来的**：
+#      enable_axes  → DB1.0 bit6(True) + bit7(True)
+#      disable_axes → DB1.0 bit6(False) + bit7(False)
+#      home_axes    → DB1.1 bit0(True) + bit1(True)
+#      axes_reset   → DB1.0 bit4(True) + bit5(True)
+#   顺序都是 X 然后 Y。**上机前请在 FC1 里核对一次**：按单轴按钮时
+#   只有对应那个轴动作，就说明映射对；若按 X 动了 Y，把这两个字典对调即可。
+AXIS_ENABLE_BITS = {"x": 6, "y": 7}
+AXIS_RESET_BITS = {"x": 4, "y": 5}
+AXIS_HOME_BITS = {"x": 0, "y": 1}
+AXIS_NAMES = ("x", "y")
 MOTION_STATUS_BYTE = 1
 MOTION_BLOCK_START = 20
 MOTION_BLOCK_SIZE = 36
@@ -47,10 +61,88 @@ GROUP_RESET_BIT = 3
 GROUP_STOP_BIT = 2
 GROUP_COMM_LOST_LATCH_BIT = 4
 STATUS_READ_START = 0
-STATUS_READ_SIZE = 141
+# DB1 读取长度：原来 141（0~140）。序号握手加的 上次序号 在 146，
+# 所以要读到 149 才拿得到 —— 150 字节正好覆盖 0~149。
+# ⚠️ 不能超过 DB1 实际长度（现场 DB1 最后一个变量是 气缸启动@150.0，共 151 字节）。
+STATUS_READ_SIZE = 150
 COMM_READ_START = 0
-COMM_READ_SIZE = 58
+# DB18 随现场变量表增长：58（原始）→ 62 → 66（加 Reaction）→ 92 → 96（RemainingDistance
+# 挪到 70、infoData 挪到 86）。从新到旧逐个尝试，读到哪个能用就用哪个 ——
+# 现场改 PLC 变量表时不该把整个连接判死（那会表现成"PLC 未连接"，很难查）。
+# ⚠️ 读**超过** DB 实际长度会失败，所以列表里必须含实际长度（或其以下的值）。
+COMM_READ_SIZES = (96, 92, 66, 62, 58)
+COMM_READ_SIZE_LEGACY = COMM_READ_SIZES[-1]
 COMM_KIN_ERROR_OFFSET = 56
+# ★ 轴自己的故障码 —— PLC 早就导出来了，代码一直没读：
+#   DB18.2  Word  X轴ERRORID
+#   DB18.6  Word  Y轴ERRORID
+# 轴撞软限位 / 跟随误差时，这里就是 TIA 里看到的那个具体代码。
+# 按**无符号**读，显示成 16#xxxx（和 TIA 一致）。
+COMM_X_ERRID_OFFSET = 2
+COMM_Y_ERRID_OFFSET = 6
+# 接到 MC_MoveLinearAbsolute 上的 Error / ErrorId
+COMM_MC_ERR_OFFSET = 58
+COMM_MC_ERR_BIT = 3
+COMM_MC_ERRID_OFFSET = 60
+# ★ TO_Kinematics.ErrorDetail.Reaction（DInt，有符号）—— 6 字节起。
+# Number 告诉你"报了什么"，Reaction 告诉你"TO 因此做了什么"，
+# 后者才是判断"这是原因还是结果"的关键。
+COMM_KIN_REACTION_OFFSET = 62
+
+# ============================================================================
+# 序号握手触发（替代脉冲触发）
+# ============================================================================
+# 脉冲触发的致命约束：脉宽必须跨过 PLC 扫描周期。实测 OB1 = 2~3ms（偶发 5ms），
+# 所以高低电平各要 10ms 才安全 —— 加上 S7 往返，周期被锁在约 28ms（35Hz）。
+# 而"平滑"需要 ≥100Hz（否则快球的步距超过混合阈值，每周期都中止重开）。
+#
+# 序号握手：Python 每下发一条就把序号 +1，PLC 比较"指令序号"和"上次序号"，
+# 不同就执行并记下 —— **完全不需要脉宽**。周期只剩 4 次 S7 往返 ≈ 6.6ms → ~150Hz。
+#
+# 顺序很重要：**先写目标块，再写序号** —— PLC 看到新序号时目标已经稳定。
+#
+# PLC 侧（OB1 里 MC_MoveLinearAbsolute 之前）：
+#     IF "DB1".指令序号 <> "DB1".上次序号 THEN
+#         "DB1".上次序号 := "DB1".指令序号;
+#         #序号触发 := TRUE;
+#     ELSE
+#         #序号触发 := FALSE;
+#     END_IF;
+#     // Execute 输入改成:  #序号触发 OR "DB1".XY轴直线绝对启动
+# 这样两种模式都能跑，切换不用改 PLC。
+#
+# ⚠️ 偏移必须和 TIA 里【实际排布】一致，不是我们想放哪就放哪。
+# 现场 DB1 里 TIA 把这两个变量追加到了末尾：
+#     指令序号   DInt   142.0
+#     上次序号   DInt   146.0
+# （气缸启动 150.0 是 DB1 的最后一个变量 → DB1 共 151 字节）
+COMM_SEQ_OFFSET = 142         # DInt：Python 写，指令序号
+COMM_SEQ_ACK_OFFSET = 146     # DInt：PLC 写，已处理的序号（读回来就是"落后几条"）
+
+# ============================================================================
+# 补齐诊断用的 DB18 字段（全部用边界检查读，PLC 没加就显示"未读到"）
+# ============================================================================
+# ⚠️ 读错偏移比"没加"更糟：边界检查能挡住"没加"（显示"未读到"），
+#    但读错偏移会**静默返回垃圾值**。所以每个数字都必须对着 TIA 抄。
+#
+# 2026-10-13 现场实际布局（TIA 变量表，DB18 共 96 字节）：
+#   56.0  XY轴ErrorDetail.Number     UInt     ★ 运动学错误明细（就是那个 801 = 16#0321）
+#   58.3  error                      Bool     MC 块的 Error
+#   60.0  errorid                    Word     MC 块的 ErrorId
+#   62.0  XY轴ErrorDetail.Reaction   DInt     ★ TO 对该错误的反应
+#   66.0  XY轴.WarningWord           DWord    ★ 预警字（软限位预警在这里）
+#   70.0  XY轴RemainingDistance      LReal    ★ 当前运动还差多远（接的是 MC.RemainingDistance）
+#   78.0  mcRemaining                LReal    ← 旧字段，现在没人写它（保留不动，代码不读）
+#   86.0  infoData                   LTime    ★ OB1 循环时间（RT_INFO，单位**纳秒**）
+#   94.0  ret_Val                    Int      ← RT_INFO 的状态码，不是时间
+#
+# ★ 注意 DB18 里**没有** CommandAborted 字段了（曾经想加在 70.0，后来被 RemainingDistance 占了）。
+#   所以代码不再读它 —— 否则会把 RemainingDistance 的字节当成"中止标志"，永远显示 True。
+#   MC 块上的 CommandAborted 输出目前也还是写死的 false，没有数据可用。
+COMM_WARNING_WORD_OFFSET = 66
+COMM_MC_REMAINING_OFFSET = 70      # XY轴RemainingDistance（不是那个旧的 mcRemaining@78）
+COMM_OB1_TIME_OFFSET = 86          # LTime，纳秒
+COMM_RTINFO_STATUS_OFFSET = 94     # Int，RT_INFO 状态码
 COMM_BYTE = 0
 COMM_HEARTBEAT_BIT = 0
 COMM_PLC_HEARTBEAT_BIT = 1
@@ -83,9 +175,75 @@ PHYSICAL_X_MIN, PHYSICAL_X_MAX = -180.0, 215.0
 PHYSICAL_Y_MIN, PHYSICAL_Y_MAX = -125.0, 185.0
 TABLE_X_MIN, TABLE_X_MAX = -224.5, 255.5
 TABLE_Y_MIN, TABLE_Y_MAX = -198.5, 241.5
+
+# ★ 命令余量：代码下发目标时再往内收这么多，绝不贴到 TIA 的软限位。
+#
+# 关键：**TIA 的软限位是故障保护，代码的目标限位必须比它更保守**。
+# 如果两者设成同一个值（比如都是 -180/215），那么命令正好落在软限位上 ——
+# 只要有一点超调或跟随误差就立刻触发轴故障，现场表现为报警后禁止运动。
+#
+# 正确关系：
+#     TIA 软限位（永不该碰到）    -180 / 215
+#     代码命令限位（日常夹取）    -180+8 / 215-8 = -172 / 207
+#
+# 这样超调要先吃掉这些毫米的缓冲才会碰到软限位。
+# ⚠️ 调大它会更安全但行程更小；调小到 0 就等于把命令限位和软限位重合（不建议）。
+#
+# 2026-10 现场：8mm 不够。日志里 AI 的目标长期卡在夹取角点（game (67,349)），
+# 换算成物理正好是 COMMAND_X_MIN/COMMAND_Y_MAX —— 也就是每天贴着极限走。
+# 结果 X 轴先报 801，把余量问题暴露出来；之后 Y 轴也报了 801：
+#     [PLC] kin=801  Y=16#8001  last_sent=(-172.0,177.0)  busy=True  intent=(67,349)
+# 也就是"指令落在命令包络的绝对角点 + 轴一冲过头"= 撞软限位。
+# 改成 15mm：给超调留一倍缓冲，同时按球台尺度损失还能接受。
+# 运行期可用 --motion-margin-mm 覆盖；真正的根治是在 TIA 里把轴加速度调柔。
+MOTION_MARGIN_MM = 15.0
+
+# 命令夹取的上/下限（= PHYSICAL_* 再内缩 MOTION_MARGIN_MM）
+COMMAND_X_MIN, COMMAND_X_MAX = PHYSICAL_X_MIN + MOTION_MARGIN_MM, PHYSICAL_X_MAX - MOTION_MARGIN_MM
+COMMAND_Y_MIN, COMMAND_Y_MAX = PHYSICAL_Y_MIN + MOTION_MARGIN_MM, PHYSICAL_Y_MAX - MOTION_MARGIN_MM
+
+
+def set_motion_margin(margin_mm: float) -> None:
+    """运行期改命令余量（--motion-margin-mm）。
+
+    轴撞软限位报 801 时把它调大即可，不用改代码重跑。
+    这是"少走一点"和"不撞限位"之间的取舍：调大更安全、可覆盖范围更小。
+    """
+    global MOTION_MARGIN_MM, COMMAND_X_MIN, COMMAND_X_MAX, COMMAND_Y_MIN, COMMAND_Y_MAX
+    margin_mm = float(margin_mm)
+    if margin_mm < 0.0:
+        raise ValueError("motion margin must be >= 0")
+    MOTION_MARGIN_MM = margin_mm
+    COMMAND_X_MIN = PHYSICAL_X_MIN + margin_mm
+    COMMAND_X_MAX = PHYSICAL_X_MAX - margin_mm
+    COMMAND_Y_MIN = PHYSICAL_Y_MIN + margin_mm
+    COMMAND_Y_MAX = PHYSICAL_Y_MAX - margin_mm
+
+# 现场诊断：有多少次目标被夹取（= 想去的点在轴能到的范围之外）。
+# 这个比例高说明"游戏场地比机器能覆盖的大"这件事在频繁发生，
+# 也说明机械臂经常跑到极限位置 —— 那是撞软限位的高风险时刻。
+_CLAMP_COUNTS = {"x": 0, "y": 0, "both": 0, "total": 0}
+
+
+def reset_clamp_counts():
+    _CLAMP_COUNTS.update({"x": 0, "y": 0, "both": 0, "total": 0})
+
+
+def clamp_counts():
+    return dict(_CLAMP_COUNTS)
 COORD_EPSILON = 1e-6
 DEAD_ZONE_MM = 3.0
 # Measured on the machine: 50mm with BufferMode=5 stalled streaming motion.
+#
+# 现场实测的含义：步距 ≤ 这个值时用 BufferMode=5（混合，平滑）；更大就用 0
+# （中止重开，会一顿一顿）。50mm 用混合会"卡住"，所以当年把阈值定在 10mm。
+#
+# ★ 但"卡住"的原因是 TO 的「作业序列 → 最大舍入间距」被设成了 100%：
+#   混合半径可以吃掉整个运动，轴一直在拐弯、走不出直线。
+#   把舍入间距调小（例如 30%）之后，混合应当可以在更大的步距下正常工作，
+#   那时这个阈值就可以放宽 —— 快球才可能真正平滑。
+#
+# 所以做成可调（--blend-threshold-mm），配合 PLC 侧舍入间距一起实验。
 BUFFER_MODE_IMMEDIATE_MM = 10.0
 DEFAULT_PERIOD = 0.03
 RECONNECT_INTERVAL = 2.0
@@ -117,16 +275,26 @@ def _game_to_physical(zone, x, y):
     """游戏场地坐标 -> 机器坐标。
 
     映射用 TABLE_*（球台真实边缘在轴坐标里的位置），
-    夹取用 PHYSICAL_*（轴的行程安全限位）—— 这两件事必须分开：
-    球台比轴的行程大，映射到球台边缘时会被安全限位截住，
-    这正是"球从边角过去、轴到不了"的物理事实。
+    夹取用 COMMAND_*（= PHYSICAL_* 再内缩 MOTION_MARGIN_MM）。
+
+    为什么要内缩：TIA 的软限位是**故障保护**，代码的目标限位必须比它保守，
+    否则命令正好落在软限位上，稍有超调就触发轴故障。见 MOTION_MARGIN_MM 的说明。
     """
     x, y = _validate_game_point(zone, x, y)
     left, right, top, bottom = zone
     px = TABLE_X_MIN + (x - left) * (TABLE_X_MAX - TABLE_X_MIN) / (right - left)
     py = TABLE_Y_MIN + (y - top) * (TABLE_Y_MAX - TABLE_Y_MIN) / (bottom - top)
-    return (max(PHYSICAL_X_MIN, min(PHYSICAL_X_MAX, px)),
-            max(PHYSICAL_Y_MIN, min(PHYSICAL_Y_MAX, py)))
+    cx = max(COMMAND_X_MIN, min(COMMAND_X_MAX, px))
+    cy = max(COMMAND_Y_MIN, min(COMMAND_Y_MAX, py))
+    _CLAMP_COUNTS["total"] += 1
+    hit_x, hit_y = cx != px, cy != py
+    if hit_x:
+        _CLAMP_COUNTS["x"] += 1
+    if hit_y:
+        _CLAMP_COUNTS["y"] += 1
+    if hit_x and hit_y:
+        _CLAMP_COUNTS["both"] += 1
+    return cx, cy
 
 
 def _validate_game_point(zone, x, y):
@@ -162,6 +330,13 @@ class PLCFeedback:
     y_home: bool = False
     x_err: bool = False
     y_err: bool = False
+    # ★ 轴自己的故障码（DB18.2 / DB18.6）。撞软限位、跟随误差等都会在这里给出
+    #   TIA 里看到的那个具体代码；None = 该字段读不到（DB18 还是旧长度）。
+    x_errid: Optional[int] = None
+    y_errid: Optional[int] = None
+    # MC_MoveLinearAbsolute 的 Error / ErrorId（现场接到 DB18.58.3 / DB18.60）
+    mc_error: Optional[bool] = None
+    mc_errid: Optional[int] = None
     busy: bool = False
     comm_lost: bool = False
     axes_ready: bool = False
@@ -169,17 +344,71 @@ class PLCFeedback:
     group_stop: bool = False
     comm_lost_latch: bool = False
     kinematics_error: int = 0
+    # TO_Kinematics.ErrorDetail.Reaction（DInt）：TO 对该错误的**反应**。
+    # Number 说"报了什么"，Reaction 说"因此做了什么" —— 后者决定
+    # 这到底是一个原因，还是别的原因（比如使能被撤）导致的结果。
+    kin_reaction: Optional[int] = None
+    # 序号握手：PLC 已处理到的序号（DB1.64）。和本地下发序号一比就是"落后几条"。
+    # None = 没读到（PLC 还没加这个字段）。
+    seq_ack: Optional[int] = None
+    # ---- 诊断补充（PLC 加了多少就显示多少；None = 未读到）----
+    warning_word: Optional[int] = None     # ★ 预警字（软限位预警在这里）
+    mc_remaining: Optional[float] = None   # ★ 当前运动还差多远（MC.RemainingDistance）
+    ob1_ns: Optional[int] = None           # ★ OB1 循环时间（纳秒，来自 RT_INFO）
+    rtinfo_status: Optional[int] = None    # RT_INFO 的状态码（0 = 正常）
+
+    @property
+    def ob1_ms(self):
+        """OB1 循环时间换算成毫秒（RT_INFO 给的是纳秒）。"""
+        return None if self.ob1_ns is None else self.ob1_ns / 1e6
 
     @property
     def axis_fault(self):
         return self.x_err or self.y_err
 
+    def fault_detail(self):
+        """把故障相关的码拼成一行，供状态显示和报警快照使用。
+
+        全部按无符号 + 16#xxxx 显示 —— 和 TIA 里的写法一致，
+        这样你拿这个码直接去查 TIA 在线帮助或手册就能对上。
+        """
+        def _hex(value):
+            if value is None:
+                return "未读到"
+            return f"16#{value:04X}({value})"
+        return (f"轴码 X={_hex(self.x_errid)} Y={_hex(self.y_errid)} | "
+                f"运动指令error={self.mc_error} errorid={_hex(self.mc_errid)} | "
+                f"运动学Number={_hex(self.kinematics_error)} "
+                f"Reaction={'未读到' if self.kin_reaction is None else self.kin_reaction}")
+
 
 class PLCInterface:
     """Blocking S7 transport, exclusively operated by PLCLink's worker."""
 
-    def __init__(self, ip="192.168.0.64", rack=0, slot=1, zone=None):
+    def __init__(self, ip="192.168.0.64", rack=0, slot=1, zone=None,
+                 blend_threshold_mm=BUFFER_MODE_IMMEDIATE_MM, target_slew_mm=0.0,
+                 target_accel_mm_s2=0.0, period=0.0):
         self.ip, self.rack, self.slot = ip, rack, slot
+        # 步距超过它就用 BufferMode=0（中止重开）而不是 5（混合）。
+        # 现场实测 50mm + 混合会"卡住"（TO 舍入间距 100%），所以默认 10mm。
+        # 调小 TO 的舍入间距后可以放宽这个值让快球也平滑。
+        self.blend_threshold_mm = float(blend_threshold_mm)
+        # 目标限速（mm/周期）。0 = 关闭。
+        # ★ 建议 = blend_threshold_mm：这样步距永远不超阈值 → 永不中止 → 不顿。
+        self.target_slew_mm = float(target_slew_mm)
+        # ★★★ 目标加速度限幅（mm/s²），0 = 关闭；period 是这个限幅换算用的周期。
+        # 见 _prepare_move 里的说明 —— TIA 状态位显示 Y 轴报的是"跟随误差"，
+        # 光限步长治不了（目标突然反向需要的加速度是轴能力的约 5 倍）。
+        self.target_accel_mm_s2 = float(target_accel_mm_s2)
+        self.period = float(period)
+        # 上一个周期真正发出去的步长（mm），加速度限幅要拿它比。
+        self._last_step = None
+        # 上一次真正发送的时刻 —— 加速度限幅要用**实测** dt，
+        # 不能用 --plc-rate 的名义周期（名义 200Hz、实际常只有 70Hz）。
+        self._last_send_at = None
+        # ★ 轴的实际位置（游戏坐标），由 PLCLink 每个周期从反馈里更新。
+        #   _prepare_move 的死区判据要用它 —— 只看"上次发了什么"会假死，见那里的注释。
+        self.actual_game = None
         self.zone = _validated_zone(DEFAULT_ZONE if zone is None else zone)
         self._client = None
         self._connected = False
@@ -195,6 +424,8 @@ class PLCInterface:
         self.last_send_dist_mm = 0.0
         self.last_error = ""
         self._multi_read_failed = False
+        # DB18 当前用哪种长度读（66 / 62 / 58），见 COMM_READ_SIZES
+        self._comm_size = None
         self.round_trips = 0
 
     @property
@@ -238,6 +469,8 @@ class PLCInterface:
     def reset_tracking(self):
         self._last_phys_x = None
         self._last_phys_y = None
+        self._last_step = None
+        self._last_send_at = None
         return True
 
     def _write_bool(self, db, offset, bit, value):
@@ -284,57 +517,100 @@ class PLCInterface:
         self.round_trips += len(specs)
         return [self._client.db_read(db, start, size) for db, start, size in specs]
 
+    def _read_status_blocks(self):
+        """读 DB1 + DB18，兼容 DB18 的三种长度（58 / 62 / 66）。
+
+        从新的往旧的试，读到哪个能用就记住哪个 —— 现场加减 DB18 字段时
+        不该把整个连接判死（那会表现成"PLC 未连接"，很难查）。
+        """
+        sizes = list(COMM_READ_SIZES)
+        if self._comm_size in sizes:                 # 先用上次成功的长度
+            sizes.remove(self._comm_size)
+            sizes.insert(0, self._comm_size)
+        for size in sizes:
+            try:
+                db1, db18 = self._read_db_blocks(
+                    ((DB_MOTION, STATUS_READ_START, STATUS_READ_SIZE),
+                     (DB_COMM, COMM_READ_START, size)))
+            except Exception:
+                continue
+            self._comm_size = size
+            return db1, db18
+        return None, None
+
     def clear_trigger(self):
         self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, False)
 
-    def enable_axes(self):
+    def set_axis_enable(self, axis, enabled):
+        """单轴使能 / 撤销。axis 为 "x" 或 "y"。
+
+        两个轴必须**都**使能程序才允许下发运动（见 PLCLink._motion_safe），
+        所以单轴使能只用于现场单独调试或单独撤下一个报故障的轴。
+        """
         if not self.connected:
             return False
+        bit = AXIS_ENABLE_BITS.get(axis)
+        if bit is None:
+            return False
         try:
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 6, True)
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 7, True)
+            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, bit, bool(enabled))
             return True
         except Exception:
             self._connected = False
             return False
+
+    def reset_axis(self, axis):
+        """单轴复位（清该轴的报警）。"""
+        if not self.connected:
+            return False
+        bit = AXIS_RESET_BITS.get(axis)
+        if bit is None:
+            return False
+        try:
+            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, bit, True)
+            time.sleep(0.05)
+            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, bit, False)
+            return True
+        except Exception:
+            self._connected = False
+            return False
+
+    def home_axis(self, axis):
+        """单轴回零。⚠️ 回零**会让该轴动**（去找参考点），是刻意的人工动作。"""
+        if not self.connected:
+            return False
+        bit = AXIS_HOME_BITS.get(axis)
+        if bit is None:
+            return False
+        try:
+            self._write_bool(DB_MOTION, HOMING_BYTE, bit, True)
+            time.sleep(0.05)
+            self._write_bool(DB_MOTION, HOMING_BYTE, bit, False)
+            return True
+        except Exception:
+            self._connected = False
+            return False
+
+    def enable_axes(self):
+        return all(self.set_axis_enable(axis, True) for axis in AXIS_NAMES)
 
     def disable_axes(self):
-        if not self.connected:
-            return False
-        try:
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 6, False)
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 7, False)
-            return True
-        except Exception:
-            self._connected = False
-            return False
+        # 两个都要写：用 all() 会在第一个失败时短路，漏掉另一个。
+        return all([self.set_axis_enable(axis, False) for axis in AXIS_NAMES])
 
     def home_axes(self):
-        if not self.connected:
-            return False
-        try:
-            self._write_bool(DB_MOTION, HOMING_BYTE, 0, True)
-            self._write_bool(DB_MOTION, HOMING_BYTE, 1, True)
-            time.sleep(0.05)
-            self._write_bool(DB_MOTION, HOMING_BYTE, 0, False)
-            self._write_bool(DB_MOTION, HOMING_BYTE, 1, False)
-            return True
-        except Exception:
-            self._connected = False
-            return False
+        return all(self.home_axis(axis) for axis in AXIS_NAMES)
 
     def axes_reset(self):
+        # 组复位 + 两个单轴复位
+        ok = all([self.reset_axis(axis) for axis in AXIS_NAMES])
         if not self.connected:
             return False
         try:
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 4, True)
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 5, True)
             self._write_bool(DB_MOTION, GROUP_CTRL_BYTE, GROUP_RESET_BIT, True)
             time.sleep(0.05)
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 4, False)
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, 5, False)
             self._write_bool(DB_MOTION, GROUP_CTRL_BYTE, GROUP_RESET_BIT, False)
-            return True
+            return ok
         except Exception:
             self._connected = False
             return False
@@ -345,37 +621,196 @@ class PLCInterface:
     def physical_to_game(self, x, y):
         return _physical_to_game(self.zone, x, y)
 
-    def send_linear_move(self, game_x, game_y):
-        """Write 36-byte [X,0,Y,0], mode, then raise DB1.56.0 atomically."""
-        if not self.connected:
-            self.last_send_state = "disconnected"
-            return False
+    def _prepare_move(self, game_x, game_y):
+        """坐标换算 + 目标限速 + 死区 + BufferMode。
+
+        返回 None（不发）或 (物理x, 物理y, mode, 步距)。步距在**第一次**下发时是 None。
+
+        ★ 目标限速（slew）治的是"顿"：rally 状态机切换时目标会**瞬间跳变**
+        （现场实测 p95 步距 192.8mm —— Y 在防守线 140 和追击 286 之间来回跳），
+        每跳一次就 BufferMode=0 中止重开一次，实测中止占比 48%。
+        把跳变削成"每周期最多走 target_slew_mm"，只要 slew ≤ blend_threshold，
+        步距就永远不超阈值 → 永远走混合、永不中止 —— 运动从"跳"变成"斜坡"。
+        """
         try:
             phys_x, phys_y = self.game_to_physical(game_x, game_y)
         except (ValueError, OverflowError):
             self.last_send_state = "invalid"
-            return False
-        if self._last_phys_x is not None:
-            distance = max(abs(phys_x - self._last_phys_x),
-                           abs(phys_y - self._last_phys_y))
+            return None
+        # ★★★ 起点：优先用"上次真正发出去的位置"；还没有就用轴的**实际位置**打底 ——
+        # 这样 arming 后的**第一条**指令也走限速斜坡。
+        #
+        # 现场（TIA 工艺对象 Y轴 → 状态位和错误位：错误 = 跟随误差）：
+        # 按 E 使能时 _enable_on_worker 会 reset_tracking() → _last_phys=None，
+        # 于是 arming 后的**第一条**指令**完全不限速**，直接跳到当前目标的
+        # 命令包络角点（实测 game(533,349) → phys(200,170)，从轴所在的
+        # (-117,-75) 算起约 320mm）。轴以最大加速度扑过去 → 跟随误差 →
+        # Y 轴 16#8001 → 整机撤销使能。快照 prev_en=(True,True) prev_busy=True
+        # 正是"刚使能、第一条指令正在跑"。前面 X 轴的 801 是同一个原因。
+        #
+        # ⚠️ 只做**局部变量**，绝不写回 self._last_phys_* —— 那是"下发之前就改
+        #    状态"，会让"写失败后必须清空跟踪"的保证失效（有测试守着）。
+        #    self._last_phys_* 只在 _commit_move 里更新。
+        origin_x, origin_y = self._last_phys_x, self._last_phys_y
+        if origin_x is None:
+            actual = getattr(self, "actual_game", None)
+            if actual is not None:
+                try:
+                    origin_x, origin_y = self.game_to_physical(actual[0], actual[1])
+                except (ValueError, OverflowError):
+                    origin_x = origin_y = None
+        if origin_x is not None:
+            # 目标限速：朝旧位置按比例回拉，使这一步不超过 target_slew_mm
+            if self.target_slew_mm > 0.0:
+                dx = phys_x - origin_x
+                dy = phys_y - origin_y
+                span = max(abs(dx), abs(dy))
+                if span > self.target_slew_mm:
+                    ratio = self.target_slew_mm / span
+                    phys_x = origin_x + dx * ratio
+                    phys_y = origin_y + dy * ratio
+            # ★★★ 死区判据必须在**加速度限幅之前**算出来。
+            #
+            # 用限幅后的步长去判死区会**永久锁死**：--plc-rate 200 时
+            #     max_delta = 25000 × 0.005² = 0.625mm
+            # 步长被压到 0.6mm < DEAD_ZONE_MM(3mm) → 每周期都进死区分支；
+            # 等轴追上这个 0.6mm 小步，actual_gap 也 < 3mm → return None，
+            # 而 _last_phys 不更新 → 下一周期算出来一模一样 → 再也不发。
+            # 现场症状：mallet 一动不动、下发 0.0Hz、死区跳过 277、已发仅 17 条。
+            #
+            # 所以这里先按"限速后"的步长定 distance 做死区判断，
+            # 之后才让加速度限幅把实际下发步长削小 —— 小步照发，目标就能一周期
+            # 一周期地爬过去，而不是卡在原地。
+            dx_step = phys_x - origin_x
+            dy_step = phys_y - origin_y
+            distance = max(abs(dx_step), abs(dy_step))
+            # ★★★ 加速度限幅：只限步长是不够的 —— 目标**突然反向**才是最耗
+            # 加速度的动作，而限速器完全不管方向。
+            #
+            # 现场（TIA 工艺对象 Y轴 → 状态位和错误位）：
+            #     错误：跟随误差 = 红     警告：动态限值 = 黄
+            #     轴状态：已归位 = 绿（没丢回零）、编码器有效 = 绿、驱动装置 = 灰
+            #     运动撤销快照：physical Y=110.49（行程正中间，不是限位）prev_busy=True
+            # 也就是**轴在正常位置自由运动途中跟不上指令**，不是撞到哪。
+            #
+            # 算一下就清楚：target_slew_mm 的单位是 mm/周期。实测周期 63~71Hz，
+            # 40mm/周期 ≈ 2600mm/s，而目标每 16ms 就可能反向一次，需要的加速度
+            #     a_cmd ≈ step / dt² = 40 / (1/65)² ≈ 169,000 mm/s²
+            # 轴的实际能力：106N / 3kg ≈ 35,000 mm/s² —— **差约 5 倍**。
+            # 轴追不上 → 跟随误差累积 → 超监控窗口 → 报错 → 运动学 801。
+            #
+            # 修法：限制"目标速度每周期能变多少"，即每周期步长的变化量
+            #     max_delta = target_accel_mm_s2 * dt²
+            # dt 用**实测的两次发送间隔**，不用 --plc-rate 的名义周期 ——
+            # 名义 200Hz 而实际只有 70Hz，用 0.005 算出来的 max_delta 会小 8 倍，
+            # 限幅过狠、轴几乎不动。
+            if (self.target_accel_mm_s2 > 0.0 and self._last_step is not None):
+                now_mono = time.monotonic()
+                dt = (now_mono - self._last_send_at
+                      if self._last_send_at is not None else self.period)
+                if dt <= 0.0 or not math.isfinite(dt):
+                    dt = self.period
+                max_delta = self.target_accel_mm_s2 * dt * dt
+                if max_delta > 0.0:
+                    dx = phys_x - origin_x
+                    dy = phys_y - origin_y
+                    ddx = dx - self._last_step[0]
+                    ddy = dy - self._last_step[1]
+                    span = max(abs(ddx), abs(ddy))
+                    if span > max_delta:
+                        ratio = max_delta / span
+                        phys_x = origin_x + self._last_step[0] + ddx * ratio
+                        phys_y = origin_y + self._last_step[1] + ddy * ratio
+            # ★ 注意：distance 已经在上面（加速度限幅之前）算好了，这里**不要**
+            #   用限幅后的步长重算 —— 那正是把它锁死的写法。见上面的注释。
+            # ★★★ 死区必须同时看【轴的实际位置】，不能只看"上次发送了什么"。
+            #
+            # 只和上次发送比的话会假死：目标一旦等于上次发过的值（尤其目标被命令限位
+            # 夹取、长期不变时），distance 就是 0，于是永远跳过 —— 而轴可能因为中止、
+            # 被挡住、PLC 漏指令等等**根本没走到那里**。
+            # 现场实测：target(98,340)、轴停在(98,219)，下发 0.0Hz、死区跳过 312，
+            # 机械臂就此卡住不动。
+            #
+            # 判据：只有"目标没变"(distance 小) **且** "轴已经到位"(actual_gap 小)
+            # 才跳过；轴没到位就一直重发。有 --target-slew-mm 兜着，重发是 40mm
+            # 一步的斜坡，不会变成硬冲。
             if distance < DEAD_ZONE_MM:
-                self.last_send_state = "deadzone"
-                return True
-            buffer_mode = 0 if distance > BUFFER_MODE_IMMEDIATE_MM else 5
+                actual_gap = None
+                actual = getattr(self, "actual_game", None)
+                if actual is not None:
+                    try:
+                        ax, ay = self.game_to_physical(actual[0], actual[1])
+                        actual_gap = max(abs(phys_x - ax), abs(phys_y - ay))
+                    except (ValueError, OverflowError):
+                        actual_gap = None
+                if actual_gap is None or actual_gap < DEAD_ZONE_MM:
+                    self.last_send_state = "deadzone"
+                    return None
+                self.last_send_state = "deadzone-resend"
+            # 步距 ≤ blend_threshold → 混合（平滑）；更大 → 中止重开（会顿）。
+            # 阈值可调，配合 TO「作业序列 → 最大舍入间距」一起实验。
+            buffer_mode = 0 if distance > self.blend_threshold_mm else 5
         else:
+            distance = None
             buffer_mode = 5
+        return phys_x, phys_y, buffer_mode, distance
+
+    def _write_payload(self, phys_x, phys_y, buffer_mode):
+        data = bytearray(MOTION_BLOCK_SIZE)
+        # The machine's TO_Kinematics uses components 1=X, 3=Y, NOT [X,Y,0,0].
+        struct.pack_into(">ddddi", data, 0, phys_x, 0.0, phys_y, 0.0, buffer_mode)
+        self.round_trips += 1
+        self._client.db_write(DB_MOTION, MOTION_BLOCK_START, data)
+
+    def _commit_move(self, phys_x, phys_y, buffer_mode, distance):
+        # 记住这一周期真正发出去的步长 —— 下一周期的加速度限幅要拿它比。
+        if self._last_phys_x is not None:
+            self._last_step = (phys_x - self._last_phys_x, phys_y - self._last_phys_y)
+        self._last_phys_x, self._last_phys_y = phys_x, phys_y
+        self._last_send_at = time.monotonic()
+        self.last_buffer_mode = buffer_mode
+        if distance is not None:
+            self.last_send_dist_mm = distance
+        self.last_send_state = "sent"
+
+    def send_linear_move(self, game_x, game_y):
+        """脉冲模式：写 36 字节 [X,0,Y,0,mode]，然后抬 DB1.56.0（P 沿触发）。"""
+        if not self.connected:
+            self.last_send_state = "disconnected"
+            return False
+        prepared = self._prepare_move(game_x, game_y)
+        if prepared is None:
+            return self.last_send_state != "invalid"
+        phys_x, phys_y, buffer_mode, distance = prepared
         try:
-            data = bytearray(MOTION_BLOCK_SIZE)
-            # The machine's TO_Kinematics uses components 1=X, 3=Y, NOT [X,Y,0,0].
-            struct.pack_into(">ddddi", data, 0, phys_x, 0.0, phys_y, 0.0, buffer_mode)
-            self.round_trips += 1
-            self._client.db_write(DB_MOTION, MOTION_BLOCK_START, data)
+            self._write_payload(phys_x, phys_y, buffer_mode)
             self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, True)
-            if self._last_phys_x is not None:
-                self.last_send_dist_mm = distance
-            self._last_phys_x, self._last_phys_y = phys_x, phys_y
-            self.last_buffer_mode = buffer_mode
-            self.last_send_state = "sent"
+            self._commit_move(phys_x, phys_y, buffer_mode, distance)
+            return True
+        except Exception:
+            self._connected = False
+            self.last_send_state = "disconnected"
+            return False
+
+    def send_linear_move_sequence(self, game_x, game_y, sequence):
+        """序号握手模式：写目标块，再写序号 —— PLC 比较序号后执行，**不需要脉宽**。
+
+        ⚠️ 顺序不能反：**先写目标块，再写序号**。这样 PLC 看到新序号时
+        目标已经稳定，和"先写目标再抬触发"是同一个思路。
+        """
+        if not self.connected:
+            self.last_send_state = "disconnected"
+            return False
+        prepared = self._prepare_move(game_x, game_y)
+        if prepared is None:
+            return self.last_send_state != "invalid"
+        phys_x, phys_y, buffer_mode, distance = prepared
+        try:
+            self._write_payload(phys_x, phys_y, buffer_mode)
+            self.round_trips += 1
+            self._client.db_write(DB_MOTION, COMM_SEQ_OFFSET,
+                                  struct.pack(">i", sequence & 0x7FFFFFFF))
+            self._commit_move(phys_x, phys_y, buffer_mode, distance)
             return True
         except Exception:
             self._connected = False
@@ -386,9 +821,33 @@ class PLCInterface:
         if not self.connected:
             return None
         try:
-            db1, db18 = self._read_db_blocks(((DB_MOTION, STATUS_READ_START, STATUS_READ_SIZE),
-                                                (DB_COMM, COMM_READ_START, COMM_READ_SIZE)))
+            db1, db18 = self._read_status_blocks()
+            if db1 is None:
+                self._connected = False
+                return None
             status, comm, group = db1[MOTION_STATUS_BYTE], db18[COMM_BYTE], db1[GROUP_CTRL_BYTE]
+
+            def _word(offset):
+                """按无符号读一个 Word；DB18 还是旧长度时返回 None。"""
+                if offset + 2 > len(db18):
+                    return None
+                return struct.unpack_from(">H", db18, offset)[0]
+
+            def _bit(offset, bit):
+                if offset >= len(db18):
+                    return None
+                return bool(db18[offset] & (1 << bit))
+
+            def _dword(offset):
+                if offset + 4 > len(db18):
+                    return None
+                return struct.unpack_from(">I", db18, offset)[0]
+
+            def _lreal(offset):
+                if offset + 8 > len(db18):
+                    return None
+                return struct.unpack_from(">d", db18, offset)[0]
+
             return {
                 "x_en": bool(status & 0x04), "y_en": bool(status & 0x08),
                 "x_home": bool(status & 0x10), "y_home": bool(status & 0x20),
@@ -396,13 +855,40 @@ class PLCInterface:
                 "y_pos": struct.unpack_from(">d", db1, 10)[0],
                 "x_err": bool(comm & (1 << COMM_X_ERR_BIT)),
                 "y_err": bool(db18[COMM_Y_ERR_OFFSET] & (1 << COMM_Y_ERR_BIT)),
+                # ★ 轴自己的故障码（一直没读）
+                "x_errid": _word(COMM_X_ERRID_OFFSET),
+                "y_errid": _word(COMM_Y_ERRID_OFFSET),
+                # MC_MoveLinearAbsolute 的 Error / ErrorId（现场新接的）
+                "mc_error": _bit(COMM_MC_ERR_OFFSET, COMM_MC_ERR_BIT),
+                "mc_errid": _word(COMM_MC_ERRID_OFFSET),
                 "busy": bool(db1[MOTION_BUSY_BYTE] & 1),
                 "plc_heartbeat": bool(comm & (1 << COMM_PLC_HEARTBEAT_BIT)),
                 "comm_lost": bool(comm & (1 << COMM_LINK_LOST_BIT)),
                 "axes_ready": bool(comm & (1 << COMM_AXES_READY_BIT)),
                 "group_stop": bool(group & (1 << GROUP_STOP_BIT)),
                 "comm_lost_latch": bool(group & (1 << GROUP_COMM_LOST_LATCH_BIT)),
-                "kinematics_error": struct.unpack_from(">h", db18, COMM_KIN_ERROR_OFFSET)[0],
+                # ★ ErrorDetail.Number 在 TO 里是 **UDInt**（DB12.Static.ErrorDetail.Number），
+                # 程序用 MOVE 送进 %DB18.DBW56（Word，只保留低 16 位）。
+                # 必须按**无符号**读 —— 按有符号读的话，16#8001 这类码会变成 -32767，
+                # 和 TIA 里看到的对不上，故障就成了谜。
+                "kinematics_error": struct.unpack_from(">H", db18, COMM_KIN_ERROR_OFFSET)[0],
+                # ErrorDetail.Reaction（DInt，有符号）—— 读不到就是 None（DB18 短）
+                "kin_reaction": (struct.unpack_from(">i", db18, COMM_KIN_REACTION_OFFSET)[0]
+                                 if COMM_KIN_REACTION_OFFSET + 4 <= len(db18) else None),
+                # PLC 已处理到哪个序号（它写在 DB1.64）。和 Python 的序号一比，
+                # 就知道"PLC 落后几条指令" —— 这是判断它跟不跟得上的直接指标。
+                "seq_ack": (struct.unpack_from(">i", db1, COMM_SEQ_ACK_OFFSET)[0]
+                            if COMM_SEQ_ACK_OFFSET + 4 <= len(db1) else None),
+                # ---- 诊断补充字段（PLC 没加就是 None，界面显示"未读到"）----
+                # ★ WarningWord：软限位之类的**预警**，能在报故障之前看到征兆
+                "warning_word": _dword(COMM_WARNING_WORD_OFFSET),
+                # ★ 当前运动还差多远（接的是 MC.RemainingDistance）
+                "mc_remaining": _lreal(COMM_MC_REMAINING_OFFSET),
+                # ★ OB1 循环时间：infoData 是 LTime（64 位有符号，单位纳秒）
+                "ob1_ns": (struct.unpack_from(">q", db18, COMM_OB1_TIME_OFFSET)[0]
+                           if COMM_OB1_TIME_OFFSET + 8 <= len(db18) else None),
+                "rtinfo_status": (struct.unpack_from(">h", db18, COMM_RTINFO_STATUS_OFFSET)[0]
+                                  if COMM_RTINFO_STATUS_OFFSET + 2 <= len(db18) else None),
             }
         except Exception:
             self._connected = False
@@ -426,7 +912,9 @@ class PLCLink:
     """Single-owner worker; start/stop and target publication do no network I/O."""
 
     def __init__(self, ip, rack=0, slot=1, period=DEFAULT_PERIOD,
-                 client_factory=None, zone=None, trigger_low_time=TRIGGER_LOW_TIME):
+                 client_factory=None, zone=None, trigger_low_time=TRIGGER_LOW_TIME,
+                 blend_threshold_mm=BUFFER_MODE_IMMEDIATE_MM, sequence_trigger=False,
+                 target_slew_mm=0.0, target_accel_mm_s2=0.0):
         self.ip = ip
         self.zone = _validated_zone(DEFAULT_ZONE if zone is None else zone)
         self.period = max(0.005, float(period))
@@ -437,9 +925,26 @@ class PLCLink:
         if not math.isfinite(self.trigger_low_time):
             raise ValueError("trigger_low_time must be finite")
         self._trigger_high_at = None
+        # ★ 序号握手模式：用序号代替脉冲触发，彻底不受脉宽/扫描周期限制。
+        #   见 COMM_SEQ_OFFSET 的说明和 PLC 侧需要的改动。
+        self.sequence_trigger = bool(sequence_trigger)
+        # 序号种子取当前时间：避免"app 重启后序号恰好和 PLC 里记的重合，
+        # 第一条指令被当成旧指令丢掉"这种极难查的问题。
+        self._sequence = int(time.time()) % 1000000 + 1
+        self._sequence_sent = 0
         self._requires_snap7 = client_factory is None
-        self._client = (PLCInterface(ip, rack, slot, zone=self.zone) if client_factory is None
-                        else client_factory(ip, rack, slot))
+        self.blend_threshold_mm = float(blend_threshold_mm)
+        self.target_slew_mm = float(target_slew_mm)
+        # ★ 目标加速度限幅（mm/s²）。见 PLCInterface._prepare_move 的说明：
+        #   TIA 里 Y 轴报的是「跟随误差」，纯限步长治不了（急转需要的加速度
+        #   是轴能力的约 5 倍）。0 = 关闭。
+        self.target_accel_mm_s2 = float(target_accel_mm_s2)
+        self._client = (PLCInterface(ip, rack, slot, zone=self.zone,
+                                     blend_threshold_mm=self.blend_threshold_mm,
+                                     target_slew_mm=self.target_slew_mm,
+                                     target_accel_mm_s2=self.target_accel_mm_s2,
+                                     period=self.period)
+                        if client_factory is None else client_factory(ip, rack, slot))
         if isinstance(self._client, PLCInterface):
             self._client.zone = self.zone
         self._lock = threading.Lock()
@@ -537,6 +1042,10 @@ class PLCLink:
             self._stats_counters = {"sent": 0, "deadzone": 0, "other": 0,
                                     "mode0": 0, "mode5": 0}
             self._stats_dists = []
+            # 序号模式的诊断：PLC 已处理到哪
+            seq_ack = self._feedback.seq_ack
+            seq_now = self._sequence
+            seq_sent = self._sequence_sent
 
         mode_total = counters["mode0"] + counters["mode5"]
         dists.sort()
@@ -555,7 +1064,27 @@ class PLCLink:
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
         if mode_total and 100.0 * counters["mode0"] / mode_total > 20.0:
-            text += "  ← 中止占比偏高；核对目标跳变与轴动态，未测 PLC 扫描周期不要缩短脉宽"
+            text += "  ← 中止占比偏高（目标跳变导致）；试 --target-slew-mm 等于 --blend-threshold-mm"
+        # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到极限位置 = 撞软限位的风险高。
+        counts = clamp_counts()
+        if counts["total"]:
+            pct_x = 100.0 * counts["x"] / counts["total"]
+            pct_y = 100.0 * counts["y"] / counts["total"]
+            text += f" | 目标被夹取 X {pct_x:.0f}% Y {pct_y:.0f}%"
+            if pct_x > 30.0 or pct_y > 30.0:
+                text += "  ← 频繁要求够不到的位置，机械臂长期顶在命令限位上"
+        reset_clamp_counts()
+        # ★ 序号模式的直接指标：PLC 落后几条指令。落后多 = 它跟不上。
+        if self.sequence_trigger:
+            if seq_ack is None:
+                text += f" | 序号模式 已发 {seq_sent} 条（PLC 未回报 ack，检查 DB1.146）"
+            else:
+                # seq_now 是**序号值**（从时间戳起算），seq_sent 是**发送条数** ——
+                # 两者不是一回事，显示时要分清，否则看起来像 "已发 403 / PLC 939123"。
+                lag = (seq_now - seq_ack) & 0x7FFFFFFF
+                text += f" | 序号模式 已发 {seq_sent} 条 / PLC 落后 {lag}"
+                if lag > 3:
+                    text += "  ← PLC 跟不上，指令在积压"
         return text
 
 
@@ -609,7 +1138,25 @@ class PLCLink:
     def enable_axes(self):
         return self._run_on_worker("使能", self._enable_on_worker)
 
+    # ---- 单轴操作 ----------------------------------------------------------
+    # 现场需要：某个轴报 801 / 撞限位之后**只把那个轴**撤下来，另一个继续用；
+    # 以及单独回零 / 单独复位。
+    #
+    # ★ 单轴使能不会让程序开始发运动 —— _motion_safe 要求 x_en 和 y_en 同时为真，
+    #   所以只有一个轴使能时是安全的。
+    def set_axis_enable(self, axis, enabled):
+        """axis 为 "x" / "y"。使能走 _run_on_worker（要靠新状态才 arm）。"""
+        axis = str(axis).lower()
+        if axis not in AXIS_NAMES:
+            return False
+        if enabled:
+            return self._run_on_worker(f"{axis.upper()} 轴使能",
+                                       lambda: self._enable_axis_on_worker(axis))
+        return self._queue_disarmed_command(f"{axis.upper()} 轴撤销",
+                                           lambda: self._client.set_axis_enable(axis, False))
+
     def _enable_on_worker(self):
+        """双轴使能（E 键 / 按钮）。单轴版本见 _enable_axis_on_worker。"""
         if not self._client.enable_axes():
             return False
         # 报警/回零可能中断旧目标；人工重新授权后不能把未完成目标当作已到达。
@@ -622,6 +1169,44 @@ class PLCLink:
                 self._target_at = 0.0
                 self._arm_pending = True
         return True
+
+    def _enable_axis_on_worker(self, axis):
+        if not self._client.set_axis_enable(axis, True):
+            return False
+        # 目标跟踪作废：重新使能后不能把旧目标当作"已到达"（和双轴使能一致）。
+        self._client.reset_tracking()
+        with self._lock:
+            if not self._stop_event.is_set():
+                self._target = None
+                self._target_at = 0.0
+                self._arm_pending = True
+        return True
+
+    def toggle_axis_enable(self, axis):
+        """按当前反馈状态取反。返回 (是否已发出, 切换后的期望状态)。"""
+        axis = str(axis).lower()
+        if axis not in AXIS_NAMES:
+            return False, None
+        feedback = self.feedback
+        currently = feedback.x_en if axis == "x" else feedback.y_en
+        wanted = not bool(currently)
+        return self.set_axis_enable(axis, wanted), wanted
+
+    def home_axis(self, axis):
+        """单轴回零。⚠️ 回零会让该轴动，是刻意的人工动作。"""
+        axis = str(axis).lower()
+        if axis not in AXIS_NAMES:
+            return False
+        return self._queue_disarmed_command(f"{axis.upper()} 轴回零",
+                                           lambda: self._client.home_axis(axis))
+
+    def reset_axis(self, axis):
+        """单轴复位（清该轴报警）。"""
+        axis = str(axis).lower()
+        if axis not in AXIS_NAMES:
+            return False
+        return self._queue_disarmed_command(f"{axis.upper()} 轴复位",
+                                           lambda: self._client.reset_axis(axis))
 
     def home_axes(self):
         return self._queue_disarmed_command("回零", self._client.home_axes)
@@ -742,11 +1327,19 @@ class PLCLink:
                 x_en=status["x_en"], y_en=status["y_en"],
                 x_home=status["x_home"], y_home=status["y_home"],
                 x_err=status["x_err"], y_err=status["y_err"],
+                x_errid=status["x_errid"], y_errid=status["y_errid"],
+                mc_error=status["mc_error"], mc_errid=status["mc_errid"],
                 busy=status["busy"], comm_lost=status["comm_lost"],
                 axes_ready=status["axes_ready"], plc_echo_ok=echo_ok,
                 group_stop=status["group_stop"],
                 comm_lost_latch=status["comm_lost_latch"],
                 kinematics_error=status["kinematics_error"],
+                kin_reaction=status["kin_reaction"],
+                seq_ack=status["seq_ack"],
+                warning_word=status["warning_word"],
+                mc_remaining=status["mc_remaining"],
+                ob1_ns=status["ob1_ns"],
+                rtinfo_status=status["rtinfo_status"],
             )
             return self._feedback
 
@@ -760,18 +1353,20 @@ class PLCLink:
 
     def _cycle(self):
         client = self._client
-        if self._trigger_high_at is not None:
-            remaining_high = self.trigger_low_time - (time.monotonic() - self._trigger_high_at)
-            if remaining_high > 0.0 and self._stop_event.wait(remaining_high):
+        if not self.sequence_trigger:
+            # ---- 脉冲模式的脉宽纪律（序号模式完全不需要）----
+            if self._trigger_high_at is not None:
+                remaining_high = self.trigger_low_time - (time.monotonic() - self._trigger_high_at)
+                if remaining_high > 0.0 and self._stop_event.wait(remaining_high):
+                    return
+            try:
+                client.clear_trigger()
+            except Exception as exc:
+                self._messages.put(f"PLC 清除运动触发失败：{exc}")
+                client.disconnect()
+                self._invalidate_feedback()
                 return
-        try:
-            client.clear_trigger()
-        except Exception as exc:
-            self._messages.put(f"PLC 清除运动触发失败：{exc}")
-            client.disconnect()
-            self._invalidate_feedback()
-            return
-        self._trigger_high_at = None
+            self._trigger_high_at = None
         # 状态读取与心跳的耗时已算在低电平内，只补剩余的脉宽。
         cleared_at = time.monotonic()
         status = client.read_status_and_position()
@@ -786,6 +1381,12 @@ class PLCLink:
         feedback = self._publish(status)
         if feedback is None:
             return
+        # ★ 把轴的实际位置交给 client —— 死区判据要用它判断"轴到没到"。
+        #   不更新的话一旦轴没走到上次发的目标，代码会永远跳过（假死）。
+        try:
+            client.actual_game = (feedback.x, feedback.y)
+        except Exception:
+            pass
         safe = self._motion_safe(feedback)
         revoked = False
         interrupted_target = None
@@ -811,6 +1412,21 @@ class PLCLink:
                       and not self._stop_event.is_set()
                       and time.monotonic() - self._target_at <= TARGET_MAX_AGE else None)
         if revoked:
+            def _limit_note(px, py):
+                """把原始位置和限位比一下 —— 801 出现时一眼看出是不是贴/超软限位。"""
+                notes = []
+                for axis, value, low, high, margin_low, margin_high in (
+                        ("X", px, PHYSICAL_X_MIN, PHYSICAL_X_MAX, COMMAND_X_MIN, COMMAND_X_MAX),
+                        ("Y", py, PHYSICAL_Y_MIN, PHYSICAL_Y_MAX, COMMAND_Y_MIN, COMMAND_Y_MAX)):
+                    if value < low or value > high:
+                        notes.append(f"{axis}={value:.2f} 已超出软限位[{low},{high}] ← 就是它")
+                    elif value < margin_low or value > margin_high:
+                        notes.append(f"{axis}={value:.2f} 在命令限位外（软限位内），离软限位 "
+                                     f"{min(abs(value - low), abs(value - high)):.2f}mm")
+                    else:
+                        notes.append(f"{axis}={value:.2f} 在命令范围内")
+                return " | ".join(notes)
+
             self._messages.put(
                 f"运动撤销快照: kin={feedback.kinematics_error} "
                 f"en=({feedback.x_en},{feedback.y_en}) ready={feedback.axes_ready} "
@@ -818,6 +1434,8 @@ class PLCLink:
                 f"echo={feedback.plc_echo_ok} comm_lost={feedback.comm_lost} "
                 f"stop={feedback.group_stop} latch={feedback.comm_lost_latch} "
                 f"physical=({status['x_pos']:.3f},{status['y_pos']:.3f}) "
+                + _limit_note(status["x_pos"], status["y_pos"]) + " "
+                + feedback.fault_detail() + " "
                 f"prev_valid={previous.valid} prev_kin={previous.kinematics_error} "
                 f"prev_en=({previous.x_en},{previous.y_en}) prev_ready={previous.axes_ready} "
                 f"prev_err=({previous.x_err},{previous.y_err}) prev_busy={previous.busy} "
@@ -841,15 +1459,29 @@ class PLCLink:
             if target is None:
                 self.cycle_count += 1
                 return
-            client.send_linear_move(*target)
-            if client.connected and client.last_send_state == "sent":
-                self._trigger_high_at = time.monotonic()
+            if self.sequence_trigger:
+                # 序号模式：写目标块 + 递增的序号，PLC 比较后执行，不需要脉宽。
+                # ★ 序号只在**真的下发成功**时推进 —— 死区跳过不能推进，
+                #   否则 PLC 会拿同一条目标重复触发。
+                candidate = self._sequence + 1
+                client.send_linear_move_sequence(target[0], target[1], candidate)
+                if client.connected and client.last_send_state == "sent":
+                    self._sequence = candidate
+                    self._sequence_sent += 1
+            else:
+                client.send_linear_move(*target)
+                if client.connected and client.last_send_state == "sent":
+                    self._trigger_high_at = time.monotonic()
             # 现场诊断累计。整个累计块必须容错 —— 诊断是"非必要"的，
             # 绝不能让它的任何异常把 worker 线程打死（那会让后续命令全部失效）。
             try:
                 state = client.last_send_state
                 with self._lock:
-                    if state == "sent":
+                    # ★ "deadzone-resend" 也是真发出去了（目标没变、但轴没到位，
+                    #   所以重发）—— 必须算进"下发 Hz"。原来它落到下面的 else
+                    #   分支，于是现场日志出现"下发 0.0Hz"却其实一直在发，
+                    #   把"轴到底动没动"这个判断彻底带偏。
+                    if state in ("sent", "deadzone-resend"):
                         self._stats_counters["sent"] += 1
                         mode = getattr(client, "last_buffer_mode", None)
                         if mode in (0, 5):

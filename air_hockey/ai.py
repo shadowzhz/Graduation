@@ -36,6 +36,14 @@ class AirHockeyAI:
         # 球槌速度估计（球台单位/秒）。给了才做"提前量"：目标瞄冰壶再走 lead_time
         # 之后的位置，而不是它现在的位置。不给（None）= 保持原行为，仿真不受影响。
         self.mallet_speed = float(mallet_speed) if mallet_speed else None
+        # ★ "死球回收"模式的粘性开关。见 choose_target 里静止球那一支：
+        #   门控必须是粘性的，否则绕到球后面时（离球约 75 单位 > 门限）会被
+        #   踢回"固定瞄球位置"，球槌再被拉回球边，来回震荡永远推不到球。
+        self._retrieving = False
+        # 回收阶段：GameState.stalled_stone_phase 在实机 live 下没有任何人推进它，
+        # 永远是 "idle"，导致停滞球规划器永远进不了 "striking" —— 球槌绕到球后面
+        # 又退回侧移，无限循环。所以由 AI 自己算，且只前进不后退。
+        self._retrieve_step = 0
 
     def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
         """按难度反应延迟刷新目标。"""
@@ -61,6 +69,10 @@ class AirHockeyAI:
         safe_top = core.RINK_TOP + core.MALLET_RADIUS
         safe_bottom = core.RINK_CENTER_Y - core.MALLET_RADIUS
         stone_speed = math.hypot(state.stone.vx, state.stone.vy)
+        # ★ 球一旦动起来（或离开中线区）就退出"死球回收"模式。
+        if stone_speed > core.STONE_STOP_SPEED:
+            self._retrieving = False
+            self._retrieve_step = 0
         stone_near_center = state.stone.y <= core.RINK_CENTER_Y + core.STONE_RADIUS + 2.0
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
         if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
@@ -70,6 +82,37 @@ class AirHockeyAI:
 
         stone_in_attack_zone = state.stone.y <= difficulty.attack_line
         if stone_speed <= core.STONE_STOP_SPEED and stone_near_center:
+            # ★★★ 关键：目标"冰壶圆心"物理上做不到 —— 球槌和冰壶都是实体，
+            # 不可能占同一个圆心。轴开到旁边（约 5 单位）就被死区停住，
+            # 于是"顶着球不动"：日志里同一颗球在 (96,238) 附近被回收了 7 轮
+            # （track 225→231）都没挪窝，每轮都是 到位 → 遮挡保持 1s 超时 →
+            # 退回 READY → 再去 → 再到位 ……
+            #
+            # 修法分两步，不能一刀切：
+            #   · 球槌还没到球边上 → 保持原来的"固定瞄球位置"（防抖动，有测试守着）
+            #   · 球槌已经在球边上、球还是不动 → 说明这一支推不动它，
+            #     改用停滞球规划器：侧移绕过 → 绕到球后面 → 对齐 → 从后往前推。
+            #
+            # 还要确认"推得动"：击球点是 stone.y + MALLET_RADIUS（球后面一个
+            # 球槌半径），它必须还在球槌的行程里（≤ safe_bottom）。否则像停在
+            # 中线上的球，推的位置在 349 之外、轴根本到不了，切规划器只是徒劳。
+            #
+            # ★ 门控必须是粘性的（self._retrieving）：绕到球后面时球槌离球约
+            #   75 单位，已经超出 reach，若只看距离就会被踢回"固定瞄球位置"，
+            #   球槌又被拉回球边 → sidestepping/positioning/idle 三态震荡，
+            #   永远到不了击球点（模拟 14 步实测）。所以一旦进入回收就一直用
+            #   规划器，直到球真的动起来（下面统一清标志）。
+            reach = (core.STONE_RADIUS + core.MALLET_RADIUS) * 1.6
+            can_push = state.stone.y + core.MALLET_RADIUS <= safe_bottom
+            if not can_push:
+                self._retrieving = False
+                self._retrieve_step = 0
+            elif self._retrieving or math.hypot(state.ai_x - state.stone.x,
+                                                state.ai_y - state.stone.y) <= reach:
+                self._retrieving = True
+                phase = self._retrieve_phase(state)
+                return self._choose_stalled_stone_target(
+                    replace(state, stalled_stone_phase=phase), safe_left, safe_right)
             return AIDecision(
                 clamp(state.stone.x + error, safe_left, safe_right),
                 clamp(state.stone.y, safe_top, safe_bottom),
@@ -153,6 +196,37 @@ class AirHockeyAI:
 
     # 提前量的上限（秒）。再长没有意义 —— 球早就变向或被撞了。
     MAX_LEAD_TIME = 0.6
+
+    RETRIEVE_PHASES = ("sidestepping", "positioning", "aligning", "striking")
+
+    def _retrieve_phase(self, state) -> str:
+        """按球槌当前所在位置判断回收走到哪一步，且**只前进不后退**。
+
+        停滞球规划器靠 state.stalled_stone_phase == "striking" 才肯给出
+        "从后往前推"的目标；实机下那个字段永远是 "idle"，所以这里自己算。
+
+        只前进很关键：开始推球时球槌会越过 staging 线，若按位置重算就会退回
+        "sidestepping"，于是又绕一圈 —— 模拟里就是这样无限循环的。
+        """
+        clearance = core.STONE_RADIUS + core.MALLET_RADIUS + 8.0
+        back_line = core.RINK_TOP + core.MALLET_RADIUS + core.GOAL_POST_RADIUS + 8.0
+        staging_y = max(back_line, state.stone.y - clearance)
+        tolerance = max(3.0, (core.STONE_RADIUS + core.MALLET_RADIUS) * 0.1)
+        behind = state.ai_y <= staging_y + tolerance
+        aligned = abs(state.ai_x - state.stone.x) <= tolerance
+        if behind and aligned:
+            natural = "striking"
+        elif behind:
+            natural = "aligning"
+        elif abs(state.ai_x - state.stone.x) < clearance - tolerance:
+            natural = "sidestepping"
+        else:
+            natural = "positioning"
+        current = self.RETRIEVE_PHASES[self._retrieve_step]
+        if self.RETRIEVE_PHASES.index(natural) > self._retrieve_step:
+            current = natural
+            self._retrieve_step = self.RETRIEVE_PHASES.index(natural)
+        return current
 
     def _lead_target(self, state: GameState, lead_x: float, lead_y: float):
         """把目标从"冰壶现在的位置"提前到"球槌赶到时冰壶的位置"。
