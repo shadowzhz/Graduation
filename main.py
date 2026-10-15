@@ -683,15 +683,15 @@ def main():
                              "周期被锁在约 28ms（35Hz），快球时只能中止重开（一顿一顿）。"
                              "[!] 用 sequence 之前 PLC 里必须有序号比较逻辑（现场已加）")
     parser.add_argument("--blend-threshold-mm", type=float, default=12.0, metavar="MM",
-                        help="相邻两条目标之间步距超过它就改用 BufferMode=0（中止重开），"
+                        help="相邻两条目标之间步距超过它就改用 BufferMode=1（附加停稳），"
                              "否则用 5（混合）。默认 12，与 --target-slew-mm 默认值相同 —— "
-                             "步距永不超阈值 → 永不中止 → 运动连续。"
-                             "★ 太小会中止、太大会「卡住」（TO 舍入间距会吃掉运动）")
+                             "步距不超阈值时保持混合。"
+                             "★ 太小会频繁附加停稳；不修改 PLC 的实际速度或加速度")
     parser.add_argument("--target-slew-mm", type=float, default=12.0, metavar="MM",
                         help="目标限速（mm/周期），默认 12。"
                              "★★★ 这个治的是「顿」：rally 状态机切换时目标会**瞬间跳变**"
-                             "（现场实测 p95 步距 192.8mm，中止占比 48%%），每跳一次就 "
-                             "BufferMode=0 中止重开一次。把它削成斜坡就好了。"
+                             "（现场实测 p95 步距 192.8mm），大步会使用 "
+                             "BufferMode=1，完成当前运动并停稳后再执行下一条。"
                              "★★★ 但它决定**指令速度**（= slew × 实测周期），"
                              "所以直接决定刹不刹得住："
                              "slew 40 @70Hz = 2800mm/s，a=15000 时需要 261mm 才刹停，"

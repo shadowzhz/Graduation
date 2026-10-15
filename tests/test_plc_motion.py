@@ -923,11 +923,7 @@ def test_sequence_does_not_advance_on_deadzone_skip():
 
 @memory_binding()
 def test_target_is_resent_when_axis_never_arrived():
-    """★ 回归"假死"：目标没变但轴没走到时，必须持续重发。
-
-    现场症状：target(98,340)、轴停在(98,219)，下发 0.0Hz、死区跳过 312，
-    机械臂就此卡住不动 —— 因为死区只比"上次发送的目标"，不比轴的实际位置。
-    """
+    """PLC 空闲但实际位置未到目标时仍要重发，不能只凭上次目标跳过。"""
     client = MemoryPLC()
     link = PLCLink("memory", period=0.03, sequence_trigger=True,
                    client_factory=lambda *args: client)
@@ -938,14 +934,75 @@ def test_target_is_resent_when_axis_never_arrived():
         assert link.set_target(300, 180)
         assert until(lambda: len(client.transport.moves) == 1)
         moves = len(client.transport.moves)
-        # 轴的实际位置离目标很远（模拟"根本没走到"），而目标不再变化
+        # PLC 空闲，轴的实际位置离目标很远（模拟"根本没走到"），而目标不再变化
         far_x, far_y = client.game_to_physical(300, 320)
         struct.pack_into(">d", client.transport.db[1], 2, far_x)
         struct.pack_into(">d", client.transport.db[1], 10, far_y)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count >= cycles + 4)
-        # ★ 必须继续下发 —— 不能因为"目标没变"就一条都不发
+        # 空闲但未到位时必须继续下发，不能因为"目标没变"就一条都不发
         assert len(client.transport.moves) > moves
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_busy_target_is_not_requeued_but_changed_and_idle_targets_are_sent():
+    for sequence_mode in (False, True):
+        client = MemoryPLC()
+        client.transport.db[1][protocol.MOTION_BUSY_BYTE] |= 1
+        link = PLCLink("memory", period=0.02, sequence_trigger=sequence_mode,
+                       client_factory=lambda *args: client)
+        link.start()
+        try:
+            assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+            assert link.enable_axes() and until(lambda: link.armed)
+            assert link.set_target(350, 250)
+            assert until(lambda: bool(client.transport.moves))
+            cycles = link.cycle_count
+            assert until(lambda: link.cycle_count >= cycles + 4)
+            assert len(client.transport.moves) == 1
+
+            assert link.set_target(350.1, 250.1)
+            cycles = link.cycle_count
+            assert until(lambda: link.cycle_count >= cycles + 3)
+            assert len(client.transport.moves) == 1
+
+            assert link.set_target(450, 220)
+            assert until(lambda: len(client.transport.moves) >= 2)
+            cycles = link.cycle_count
+            assert until(lambda: link.cycle_count >= cycles + 3)
+            assert len(client.transport.moves) == 2
+            assert link.armed and link.feedback.busy
+
+            client.transport.db[1][protocol.MOTION_BUSY_BYTE] &= ~1
+            assert link.set_target(450, 220)
+            assert until(lambda: len(client.transport.moves) > 2)
+            assert not link.feedback.busy and link.armed
+        finally:
+            assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_busy_motion_still_receives_distinct_slew_waypoints():
+    client = MemoryPLC()
+    client.target_slew_mm = 12.0
+    client.blend_threshold_mm = 12.0
+    client.transport.db[1][protocol.MOTION_BUSY_BYTE] |= 1
+    link = PLCLink("memory", period=0.02, sequence_trigger=True,
+                   client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(450, 250)
+        assert until(lambda: len(client.transport.moves) >= 4)
+        points = [struct.unpack_from(">ddddi", packet) for packet in client.transport.moves[:4]]
+        for previous, current in zip(points, points[1:]):
+            assert current[0] > previous[0]
+            assert 0 < max(abs(current[0] - previous[0]), abs(current[2] - previous[2])) <= 12.0 + 1e-6
+            assert current[4] == 5
+        assert link.armed and link.feedback.busy
     finally:
         assert link.stop(timeout=2.0)
 

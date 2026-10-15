@@ -527,6 +527,7 @@ class PLCInterface:
         # ★ 轴的实际位置（游戏坐标），由 PLCLink 每个周期从反馈里更新。
         #   _prepare_move 的死区判据要用它 —— 只看"上次发了什么"会假死，见那里的注释。
         self.actual_game = None
+        self.actual_busy = False
         self.zone = _validated_zone(DEFAULT_ZONE if zone is None else zone)
         self._client = None
         self._connected = False
@@ -752,7 +753,7 @@ class PLCInterface:
 
         ★ 目标限速（slew）治的是"顿"：rally 状态机切换时目标会**瞬间跳变**
         （现场实测 p95 步距 192.8mm —— Y 在防守线 140 和追击 286 之间来回跳），
-        每跳一次就 BufferMode=0 中止重开一次，实测中止占比 48%。
+        大步使用 BufferMode=1，完成当前运动并停稳后才执行下一条。
         把跳变削成"每周期最多走 target_slew_mm"，只要 slew ≤ blend_threshold，
         步距就永远不超阈值 → 永远走混合、永不中止 —— 运动从"跳"变成"斜坡"。
         """
@@ -760,6 +761,12 @@ class PLCInterface:
             phys_x, phys_y = self.game_to_physical(game_x, game_y)
         except (ValueError, OverflowError):
             self.last_send_state = "invalid"
+            return None
+        # 执行中的同点不再排队；在限速前比较，避免挡住仍在推进的斜坡目标。
+        if (self.actual_busy and self._last_phys_x is not None
+                and max(abs(phys_x - self._last_phys_x),
+                        abs(phys_y - self._last_phys_y)) < DEAD_ZONE_MM):
+            self.last_send_state = "pending"
             return None
         # ★★★ 起点：优先用"上次真正发出去的位置"；还没有就用轴的**实际位置**打底 ——
         # 这样 arming 后的**第一条**指令也走限速斜坡。
@@ -847,17 +854,7 @@ class PLCInterface:
                         phys_y = origin_y + self._last_step[1] + ddy * ratio
             # ★ 注意：distance 已经在上面（加速度限幅之前）算好了，这里**不要**
             #   用限幅后的步长重算 —— 那正是把它锁死的写法。见上面的注释。
-            # ★★★ 死区必须同时看【轴的实际位置】，不能只看"上次发送了什么"。
-            #
-            # 只和上次发送比的话会假死：目标一旦等于上次发过的值（尤其目标被命令限位
-            # 夹取、长期不变时），distance 就是 0，于是永远跳过 —— 而轴可能因为中止、
-            # 被挡住、PLC 漏指令等等**根本没走到那里**。
-            # 现场实测：target(98,340)、轴停在(98,219)，下发 0.0Hz、死区跳过 312，
-            # 机械臂就此卡住不动。
-            #
-            # 判据：只有"目标没变"(distance 小) **且** "轴已经到位"(actual_gap 小)
-            # 才跳过；轴没到位就一直重发。有 --target-slew-mm 兜着，重发是 40mm
-            # 一步的斜坡，不会变成硬冲。
+            # 同点到位则跳过；空闲但未到位时重发，执行中的同点已在限速前跳过。
             if distance < DEAD_ZONE_MM:
                 actual_gap = None
                 actual = getattr(self, "actual_game", None)
@@ -1145,11 +1142,11 @@ class PLCLink:
         self._echo_change_at = 0.0
         self._echo_seen = False
         self.cycle_count = 0
-        # 统计实际频率、中止重规划次数和目标步距；不把它们直接当作 801 的原因。
+        # 统计实际频率、同点跳过、模式分布和目标步距；不把它们直接当作 801 的原因。
         self._stats_at = time.monotonic()
         self._stats_cycles = 0
-        self._stats_counters = {"sent": 0, "deadzone": 0, "other": 0,
-                                "mode0": 0, "mode5": 0}
+        self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0,
+                                "mode1": 0, "mode5": 0}
         self._stats_dists = []
 
     def start(self):
@@ -1218,25 +1215,25 @@ class PLCLink:
             cycles = self.cycle_count - self._stats_cycles
             self._stats_at = now
             self._stats_cycles = self.cycle_count
-            self._stats_counters = {"sent": 0, "deadzone": 0, "other": 0,
-                                    "mode0": 0, "mode5": 0}
+            self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0,
+                                    "mode1": 0, "mode5": 0}
             self._stats_dists = []
             # 序号模式的诊断：PLC 已处理到哪
             seq_ack = self._feedback.seq_ack
             seq_now = self._sequence
             seq_sent = self._sequence_sent
 
-        mode_total = counters["mode0"] + counters["mode5"]
+        mode_total = counters["mode1"] + counters["mode5"]
         dists.sort()
         median = dists[len(dists) // 2] if dists else 0.0
         p95 = dists[min(len(dists) - 1, int(len(dists) * 0.95))] if dists else 0.0
 
         text = (f"周期 {cycles / elapsed:5.1f}Hz | 下发 {counters['sent'] / elapsed:5.1f}Hz | "
-                f"死区跳过 {counters['deadzone']}")
+                f"死区跳过 {counters['deadzone']} | 执行中同点跳过 {counters['pending']}")
         if mode_total:
-            abort_pct = 100.0 * counters["mode0"] / mode_total
-            text += (f" | BufferMode 混合 {counters['mode5']} / 中止 {counters['mode0']}"
-                     f"（中止 {abort_pct:.0f}%）")
+            stop_pct = 100.0 * counters["mode1"] / mode_total
+            text += (f" | BufferMode 混合 {counters['mode5']} / 附加停稳 {counters['mode1']}"
+                     f"（附加停稳 {stop_pct:.0f}%）")
         else:
             text += " | BufferMode 无下发"
         text += f" | 步距中位 {median:.1f}mm p95 {p95:.1f}mm"
@@ -1254,8 +1251,8 @@ class PLCLink:
             text += " | 精磨 关（DB1.DBD150 写失败）"
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
-        if mode_total and 100.0 * counters["mode0"] / mode_total > 20.0:
-            text += "  ← 中止占比偏高（目标跳变导致）；试 --target-slew-mm 等于 --blend-threshold-mm"
+        if mode_total and 100.0 * counters["mode1"] / mode_total > 20.0:
+            text += "  ← 附加停稳占比偏高（大步目标）；核对 --target-slew-mm 和 --blend-threshold-mm"
         # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到极限位置 = 撞软限位的风险高。
         counts = clamp_counts()
         if counts["total"]:
@@ -1645,6 +1642,8 @@ class PLCLink:
             client.actual_game = (feedback.x, feedback.y)
         except Exception:
             pass
+        if isinstance(client, PLCInterface):
+            client.actual_busy = feedback.busy
         safe = self._motion_safe(feedback)
         revoked = False
         interrupted_target = None
@@ -1747,12 +1746,14 @@ class PLCLink:
                     if state in ("sent", "deadzone-resend"):
                         self._stats_counters["sent"] += 1
                         mode = getattr(client, "last_buffer_mode", None)
-                        if mode in (0, 5):
-                            self._stats_counters["mode0" if mode == 0 else "mode5"] += 1
+                        if mode in (1, 5):
+                            self._stats_counters["mode1" if mode == 1 else "mode5"] += 1
                             self._stats_dists.append(
                                 float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
                     elif state == "deadzone":
                         self._stats_counters["deadzone"] += 1
+                    elif state == "pending":
+                        self._stats_counters["pending"] += 1
                     else:
                         self._stats_counters["other"] += 1
             except Exception:
