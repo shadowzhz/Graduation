@@ -13,6 +13,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from air_hockey import core_config
 
