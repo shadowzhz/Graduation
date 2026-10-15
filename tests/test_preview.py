@@ -14,6 +14,9 @@ class MockGeometry:
     def table_to_raw(self, tx, ty):
         return float(tx), float(ty)
 
+    def table_to_raw_batch(self, points):
+        return [(float(x), float(y)) for x, y in points]
+
 
 def split_ppm(ppm):
     header, pixels = ppm.split(b"\n", 1)

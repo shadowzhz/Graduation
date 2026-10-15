@@ -366,12 +366,15 @@ def run_vision(args):
         #    刹得住，包络到软限位只有 15mm → 几何上注定撞。
         #    按 **--plc-rate** 估算；名义值和实测可能差很多，所以只作提示。
         if args.target_slew_mm and args.target_slew_mm > 0.0:
+            accel_ref = args.target_accel_mm_s2 if args.target_accel_mm_s2 > 0 else None
             brake, speed = plc_module.braking_distance_mm(
-                args.target_slew_mm, args.plc_rate)
+                args.target_slew_mm, args.plc_rate, accel_ref)
+            accel_name = (f"目标加速度限幅 {args.target_accel_mm_s2:.0f}mm/s^2"
+                          if accel_ref is not None else
+                          f"TIA 预设加速度 {plc_module.AXIS_ACCEL_LIMIT_MM_S2:.0f}mm/s^2")
             print(f"[PLC] 目标限速 {args.target_slew_mm:g}mm/周期 × {args.plc_rate:g}Hz "
-                  f"→ 指令速度约 {speed:.0f}mm/s，按 TIA 预设加速度 "
-                  f"{plc_module.AXIS_ACCEL_LIMIT_MM_S2:.0f}mm/s^2 估算制动距离 {brake:.0f}mm")
-            for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate):
+                  f"→ 指令速度约 {speed:.0f}mm/s，按 {accel_name} 估算制动距离 {brake:.0f}mm")
+            for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate, accel_ref):
                 print(f"[PLC] [!] 安全自检：{warning}")
         print("[PLC] 位置越界检测已启用：实际轴位置越过软限位即撤销运动授权并报警")
         plc.start()

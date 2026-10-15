@@ -13,7 +13,7 @@ undistorted -> table 的映射有两种模式：
 """
 
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -53,6 +53,8 @@ class CameraGeometry:
         self.homography_matrix = None
         self.homography_inverse = None
         self.homography_image_size = None
+        self._zero_rvec = np.zeros(3, dtype=np.float32)
+        self._zero_tvec = np.zeros(3, dtype=np.float32)
 
         if image_size is not None:
             self.set_image_size(image_size)
@@ -282,8 +284,8 @@ class CameraGeometry:
         )
         projected, _ = cv2.projectPoints(
             pts_3d,
-            np.zeros(3, dtype=np.float32),
-            np.zeros(3, dtype=np.float32),
+            self._zero_rvec,
+            self._zero_tvec,
             self.camera_matrix,
             self.dist_coeffs,
         )
@@ -340,6 +342,57 @@ class CameraGeometry:
         """
         undist_x, undist_y = self.table_to_undistorted(table_x, table_y)
         return self.undistorted_to_raw(undist_x, undist_y)
+
+
+    def table_to_raw_batch(
+        self, points: Union[Sequence[Tuple[float, float]], np.ndarray]
+    ) -> List[Tuple[float, float]]:
+        """球台/场地坐标 -> 原始相机像素坐标（批量）。
+
+        输入约定为 (N, 2) 形状点集合。
+        """
+        if len(points) == 0:
+            return []
+        arr = np.asarray(points, dtype=np.float64)
+        if arr.shape[0] == 0:
+            return []
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(f"points must have shape (N, 2), got {arr.shape}")
+
+        if self.homography_inverse is not None:
+            pts_in = np.ascontiguousarray(arr, dtype=np.float64).reshape(-1, 1, 2)
+            undist = cv2.perspectiveTransform(pts_in, self.homography_inverse).reshape(-1, 2)
+        else:
+            ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
+            scale_x, scale_y = self._get_rink_scales()
+            rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
+            undist = np.empty((len(arr), 2), dtype=np.float64)
+            undist[:, 0] = ux0 + (arr[:, 0] - rink_left) / scale_x
+            undist[:, 1] = uy0 + (arr[:, 1] - rink_top) / scale_y
+
+        if not self.enabled or self.camera_matrix is None or self.new_camera_matrix is None:
+            raw = undist
+        else:
+            fx = self.new_camera_matrix[0, 0]
+            fy = self.new_camera_matrix[1, 1]
+            cx = self.new_camera_matrix[0, 2]
+            cy = self.new_camera_matrix[1, 2]
+
+            pts_3d = np.empty((len(undist), 1, 3), dtype=np.float32)
+            pts_3d[:, 0, 0] = (undist[:, 0] - cx) / fx
+            pts_3d[:, 0, 1] = (undist[:, 1] - cy) / fy
+            pts_3d[:, 0, 2] = 1.0
+
+            projected, _ = cv2.projectPoints(
+                pts_3d,
+                self._zero_rvec,
+                self._zero_tvec,
+                self.camera_matrix,
+                self.dist_coeffs,
+            )
+            raw = projected.reshape(-1, 2)
+
+        return list(zip(raw[:, 0].tolist(), raw[:, 1].tolist()))
 
     def raw_velocity_to_table(
         self,

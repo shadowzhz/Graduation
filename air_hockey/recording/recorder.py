@@ -93,6 +93,8 @@ class RuntimeRecorder:
         self._error = None
         self._journal = None
         if self.path is not None:
+            if self.path.is_file():
+                raise FileExistsError(f"recording file already exists: {self.path}")
             self.path.parent.mkdir(parents=True, exist_ok=True)
             journal_path = self.path.with_name(self.path.name + ".journal")
             self._journal = journal_path.open("x+", encoding="utf-8")

@@ -72,7 +72,7 @@ def _draw_annotations(
         cv2.arrowedLine(output, center, end, (0, 0, 255), size(2), tipLength=0.2)
 
     if result.trajectory and len(result.trajectory) > 1:
-        pixel_trajectory = [camera_geometry.table_to_raw(px, py) for px, py in result.trajectory]
+        pixel_trajectory = camera_geometry.table_to_raw_batch(result.trajectory)
         for i in range(len(pixel_trajectory) - 1):
             pt1 = point(*pixel_trajectory[i])
             pt2 = point(*pixel_trajectory[i + 1])
