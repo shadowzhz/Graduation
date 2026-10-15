@@ -272,6 +272,32 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
 
 
 @memory_binding()
+def test_slew_roundoff_does_not_switch_blending_to_stop_and_append():
+    for sequence_mode in (False, True):
+        client = MemoryPLC()
+        client.blend_threshold_mm = 12.0
+        client.target_slew_mm = 12.0
+        client.actual_game = (300, 140)
+        try:
+            assert client.connect()
+            if sequence_mode:
+                assert client.send_linear_move_sequence(105.83333333333334, 77, 1)
+            else:
+                assert client.send_linear_move(105.83333333333334, 77)
+            assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 5
+
+            client.target_slew_mm = 0.0
+            if sequence_mode:
+                assert client.send_linear_move_sequence(500, 300, 2)
+            else:
+                client.clear_trigger()
+                assert client.send_linear_move(500, 300)
+            assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 1
+        finally:
+            client.disconnect()
+
+
+@memory_binding()
 def test_plc_game_zone_edges_and_epsilon_tolerance():
     client = MemoryPLC()
     try:

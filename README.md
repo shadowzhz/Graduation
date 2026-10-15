@@ -148,6 +148,8 @@ python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 
 `TransitionParameter[1]` 可选写入失败会记录并打印实际异常，停用该写入，保留 TO 的既有混合距离设置；不会因为日志队列属性错误把连接误标为断线。运动数据、触发位或序号写入失败仍按原通信失败路径处理。
 
+限速步长等于混合阈值时，按浮点容差保持 `BufferMode=5`，避免数值尾差误切成先停稳再走的附加运动；真实超过阈值的大步仍使用 `BufferMode=1`，不修改阈值、PLC 参数或通信协议。
+
 ```bash
 # 不开相机的人工五点测试；e/h/c/n/q 各自输入后回车，不自动使能。
 python3 air_hockey/tools/test_rally_points.py --plc 192.168.0.64
