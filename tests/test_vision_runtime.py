@@ -752,3 +752,162 @@ def test_camera_calibration_duplicate_sequence_is_not_resampled_and_quit_respond
         tool.main()
         assert camera.stopped and not output.exists()
     assert calibrator.sample_count == 1
+
+
+def test_adaptive_roi_stationary_puck_local_detection_maintains_track():
+    """静止冰壶动态 ROI 包含目标并由局部 detect_candidates 找回，维持同一轨迹。"""
+    from air_hockey.app.vision_runtime import _compute_dynamic_roi
+
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+    track_id = None
+
+    for i in range(3):
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.circle(image, (600, 350), 30, (0, 0, 255), -1)
+        t = 1.0 + i * 0.05
+        frame = Frame(image, timestamp=t)
+
+        if runtime.tracker.track is not None:
+            pred_pos = runtime.tracker.predict_position(t)
+            roi = _compute_dynamic_roi(runtime.tracker.track, pred_pos, 1280, 720)
+            assert roi is not None
+            assert roi.x <= 600 - 30 and roi.x + roi.width >= 600 + 30
+            assert roi.y <= 350 - 30 and roi.y + roi.height >= 350 + 30
+            candidates = runtime.detector.detect_candidates(frame, dynamic_roi=roi)
+            assert len(candidates) > 0
+            assert abs(candidates[0].x - 600) < 5
+
+        result = runtime.process_frame(frame)
+        assert result.detection is not None
+        assert abs(result.detection.center_x - 600) < 5
+        if track_id is None:
+            track_id = result.track.track_id
+        else:
+            assert result.track is not None
+            assert result.track.track_id == track_id
+            assert result.track_confirmed
+
+
+def test_adaptive_roi_fast_puck_and_dropped_frames_reacquired_locally():
+    """高速球与掉帧时根据速度和时间差扩展搜索框，局部候选找回并维持轨迹。"""
+    from air_hockey.app.vision_runtime import _compute_dynamic_roi
+
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+
+    track_id = None
+    x = 200
+    t = 1.00
+    for i in range(8):
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.circle(image, (x, 300), 30, (0, 0, 255), -1)
+        res = runtime.process_frame(Frame(image, timestamp=t))
+        if track_id is None:
+            track_id = res.track.track_id
+        else:
+            assert res.track.track_id == track_id
+        last_x = x
+        x += 35
+        t += 0.035
+
+    last_t = t - 0.035
+    t_drop = last_t + 0.08
+    x_drop = last_x + 60
+    image_drop = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image_drop, (x_drop, 300), 30, (0, 0, 255), -1)
+    frame_drop = Frame(image_drop, timestamp=t_drop)
+
+    pred_pos = runtime.tracker.predict_position(t_drop)
+    roi = _compute_dynamic_roi(runtime.tracker.track, pred_pos, 1280, 720)
+    assert roi is not None
+    assert roi.width > 140
+    assert roi.x <= x_drop - 30 and roi.x + roi.width >= x_drop + 30
+    assert roi.x <= last_x - 30
+
+    candidates = runtime.detector.detect_candidates(frame_drop, dynamic_roi=roi)
+    assert len(candidates) > 0
+    assert abs(candidates[0].x - x_drop) < 5
+
+    res_drop = runtime.process_frame(frame_drop)
+    assert res_drop.detection is not None
+    assert abs(res_drop.detection.center_x - x_drop) < 5
+    assert res_drop.track is not None and res_drop.track.track_id == track_id
+    assert res_drop.track_confirmed
+
+
+def test_adaptive_roi_fast_reversal_contains_previous_observation():
+    """快速反向时 ROI 同时包含上一观测点与预测位置，局部找回并维持轨迹。"""
+    from air_hockey.app.vision_runtime import _compute_dynamic_roi
+
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+
+    track_id = None
+    x = 200
+    t = 1.00
+    for i in range(10):
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.circle(image, (x, 300), 30, (0, 0, 255), -1)
+        res = runtime.process_frame(Frame(image, timestamp=t))
+        if track_id is None:
+            track_id = res.track.track_id
+        else:
+            assert res.track.track_id == track_id
+        last_x = x
+        x += 35
+        t += 0.035
+
+    last_t = t - 0.035
+    rev_t = last_t + 0.08
+    rev_x = 520
+    image_rev = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image_rev, (rev_x, 300), 30, (0, 0, 255), -1)
+    frame_rev = Frame(image_rev, timestamp=rev_t)
+
+    pred_pos = runtime.tracker.predict_position(rev_t)
+    roi = _compute_dynamic_roi(runtime.tracker.track, pred_pos, 1280, 720)
+    old_rx = int(pred_pos[0] - 70)
+
+    assert old_rx > rev_x - 30
+    assert roi is not None
+    assert roi.x <= rev_x - 30 and roi.x + roi.width >= rev_x + 30
+    assert roi.x <= last_x - 30
+
+    candidates = runtime.detector.detect_candidates(frame_rev, dynamic_roi=roi)
+    assert len(candidates) > 0
+    assert abs(candidates[0].x - rev_x) < 5
+
+    res_rev = runtime.process_frame(frame_rev)
+    assert res_rev.detection is not None
+    assert abs(res_rev.detection.center_x - rev_x) < 5
+    assert res_rev.track is not None and res_rev.track.track_id == track_id
+    assert res_rev.track_confirmed
+
+def test_adaptive_roi_boundary_and_edge_cases():
+    """测试图像边缘裁剪、非有限值保护和原框下限保护。"""
+    from air_hockey.app.vision_runtime import _compute_dynamic_roi
+    from air_hockey.vision.types import Track
+
+    track_edge = Track(1, center_x=30.0, center_y=40.0, radius=25.0, vx=-200.0, vy=-200.0, last_timestamp=1.0)
+    roi_edge = _compute_dynamic_roi(track_edge, pred_pos=(10.0, 20.0), img_w=1280, img_h=720)
+    assert roi_edge is not None
+    assert roi_edge.x == 0
+    assert roi_edge.y == 0
+
+    track_rb = Track(2, center_x=1260.0, center_y=700.0, radius=25.0, vx=100.0, vy=100.0, last_timestamp=1.0)
+    roi_rb = _compute_dynamic_roi(track_rb, pred_pos=(1270.0, 710.0), img_w=1280, img_h=720)
+    assert roi_rb is not None
+    assert roi_rb.x + roi_rb.width <= 1280
+    assert roi_rb.y + roi_rb.height <= 720
+
+    assert _compute_dynamic_roi(track_edge, pred_pos=(float('nan'), 20.0), img_w=1280, img_h=720) is None
+    assert _compute_dynamic_roi(track_edge, pred_pos=(10.0, float('inf')), img_w=1280, img_h=720) is None
+    assert _compute_dynamic_roi(None, pred_pos=(10.0, 20.0), img_w=1280, img_h=720) is None
+
+    track_nan_obs = Track(3, center_x=float('nan'), center_y=float('nan'), radius=25.0, vx=0.0, vy=0.0, last_timestamp=1.0)
+    roi_safe = _compute_dynamic_roi(track_nan_obs, pred_pos=(500.0, 300.0), img_w=1280, img_h=720)
+    assert roi_safe is not None
+
+    orig_rx = max(0, min(int(500.0 - 70), 1279))
+    track_fast = Track(4, center_x=300.0, center_y=300.0, radius=30.0, vx=2000.0, vy=0.0, last_timestamp=1.0)
+    roi_fast = _compute_dynamic_roi(track_fast, pred_pos=(500.0, 300.0), img_w=1280, img_h=720)
+    assert roi_fast.x <= orig_rx
+    assert roi_fast.x + roi_fast.width >= orig_rx + 140

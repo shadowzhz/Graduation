@@ -1,12 +1,14 @@
 """针对 renderer 的单元测试。"""
-
+from pathlib import Path
 import numpy as np
 
+from air_hockey import core_config as core
 from air_hockey.app.rally import RallyDecision, RallyState
 from air_hockey.app.renderer import format_status, render, render_preview
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
 from air_hockey.vision.types import Detection, Track, TrackState
+from air_hockey.vision.geometry import CameraGeometry
 
 
 class MockGeometry:
@@ -20,6 +22,9 @@ class MockGeometry:
     def table_to_raw(self, tx, ty):
         self.calls.append((float(tx), float(ty)))
         return float(tx + self.offset_x), float(ty + self.offset_y)
+
+    def table_to_raw_batch(self, points):
+        return [self.table_to_raw(tx, ty) for tx, ty in points]
 
 
 def test_render_preserves_shape_and_does_not_modify_original():
@@ -124,3 +129,55 @@ def _assert_requested_target(preview_width, rally_present, rally_target):
         old_y = round((result.ai_target[1] + geometry.offset_y) * scale)
         assert np.array_equal(output[old_y, old_x], [0, 0, 0])
     assert not np.any(image)
+
+
+def test_render_batch_trajectory_matches_pointwise_exact_pixels():
+    """回归测试：验证使用批量轨迹转换与逐点转换绘制的像素图像绝对一致（像素差 0）。"""
+    calib_file = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
+    table_calib = Path(__file__).resolve().parents[1] / "calibration" / "table_homography.npz"
+    rink_bounds = (core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM)
+    table_roi = (350, 0, 580, 650)
+
+    geom = CameraGeometry.from_calibration_file(
+        calib_file,
+        rink_bounds=rink_bounds,
+        table_calibration_file=table_calib if table_calib.is_file() else None,
+        table_roi=table_roi,
+        enabled=True,
+    )
+
+    # 205 点轨迹
+    xs = np.linspace(core.RINK_LEFT + 20, core.RINK_RIGHT - 20, 205)
+    ys = np.linspace(core.RINK_TOP + 50, core.RINK_BOTTOM - 50, 205)
+    trajectory = list(zip(xs.tolist(), ys.tolist()))
+
+    img = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame = Frame(image=img, timestamp=1.0, sequence=1)
+    result = VisionResult(frame=frame, fps=60.0, trajectory=trajectory)
+
+    # 1. 批量与逐点转换点坐标完全一致
+    pw_pts = [geom.table_to_raw(x, y) for x, y in trajectory]
+    batch_pts = geom.table_to_raw_batch(trajectory)
+    assert pw_pts == batch_pts
+
+    # 2. 模拟逐点转换验证渲染像素一致
+    class PointwiseBaselineGeometry:
+        def table_to_raw(self, tx, ty):
+            return geom.table_to_raw(tx, ty)
+
+        def table_to_raw_batch(self, points):
+            return [geom.table_to_raw(tx, ty) for tx, ty in points]
+
+    pw_geom = PointwiseBaselineGeometry()
+    output_batch = render(result, table_roi, geom)
+    output_pw = render(result, table_roi, pw_geom)
+
+    # 验证输出图像像素绝对一致（最大像素差为 0）
+    diff = np.max(np.abs(output_batch.astype(int) - output_pw.astype(int)))
+    assert diff == 0, f"Expected pixel diff 0, got {diff}"
+
+    # 验证预览模式下的像素一致性
+    prev_batch = render_preview(result, table_roi, geom, 640)
+    prev_pw = render_preview(result, table_roi, pw_geom, 640)
+    diff_prev = np.max(np.abs(prev_batch.astype(int) - prev_pw.astype(int)))
+    assert diff_prev == 0, f"Expected preview pixel diff 0, got {diff_prev}"

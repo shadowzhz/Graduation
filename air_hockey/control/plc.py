@@ -295,6 +295,16 @@ def braking_distance_mm(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
     return speed * speed / (2.0 * accel), speed
 
 
+def _braking_step(dist: float, max_delta: float) -> float:
+    """按剩余距离算出不超调的最大离散步长。"""
+    if dist <= 0.0 or max_delta <= 0.0:
+        return 0.0
+    if dist <= max_delta:
+        return dist
+    d = dist - max_delta / 8.0
+    disc = max_delta * max_delta + 8.0 * max_delta * d
+    return max(0.0, (math.sqrt(disc) - max_delta) / 2.0)
+
 def safety_warnings(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
     """按当前参数算出安全警告列表（空列表 = 安全）。
 
@@ -383,6 +393,7 @@ def _game_to_physical_raw(zone, x, y):
     `_game_to_physical` 是给**下发**用的，会把结果夹进命令包络；拿它来判断
     "轴是不是跑出去了"永远得到"没跑出去"，等于没检测。
     """
+    x, y = _finite_pair(x, y)
     left, right, top, bottom = zone
     px = TABLE_X_MIN + (x - left) * (TABLE_X_MAX - TABLE_X_MIN) / (right - left)
     py = TABLE_Y_MIN + (y - top) * (TABLE_Y_MAX - TABLE_Y_MIN) / (bottom - top)
@@ -743,6 +754,9 @@ class PLCInterface:
     def game_to_physical(self, x, y):
         return _game_to_physical(self.zone, x, y)
 
+    def game_to_physical_raw(self, x, y):
+        return _game_to_physical_raw(self.zone, x, y)
+
     def physical_to_game(self, x, y):
         return _physical_to_game(self.zone, x, y)
 
@@ -787,72 +801,50 @@ class PLCInterface:
             actual = getattr(self, "actual_game", None)
             if actual is not None:
                 try:
-                    origin_x, origin_y = self.game_to_physical(actual[0], actual[1])
+                    origin_x, origin_y = self.game_to_physical_raw(actual[0], actual[1])
                 except (ValueError, OverflowError):
                     origin_x = origin_y = None
         if origin_x is not None:
-            # 目标限速：朝旧位置按比例回拉，使这一步不超过 target_slew_mm
-            if self.target_slew_mm > 0.0:
-                dx = phys_x - origin_x
-                dy = phys_y - origin_y
-                span = max(abs(dx), abs(dy))
-                if span > self.target_slew_mm:
-                    ratio = self.target_slew_mm / span
-                    phys_x = origin_x + dx * ratio
-                    phys_y = origin_y + dy * ratio
-            # ★★★ 死区判据必须在**加速度限幅之前**算出来。
-            #
-            # 用限幅后的步长去判死区会**永久锁死**：--plc-rate 200 时
-            #     max_delta = 25000 × 0.005² = 0.625mm
-            # 步长被压到 0.6mm < DEAD_ZONE_MM(3mm) → 每周期都进死区分支；
-            # 等轴追上这个 0.6mm 小步，actual_gap 也 < 3mm → return None，
-            # 而 _last_phys 不更新 → 下一周期算出来一模一样 → 再也不发。
-            # 现场症状：mallet 一动不动、下发 0.0Hz、死区跳过 277、已发仅 17 条。
-            #
-            # 所以这里先按"限速后"的步长定 distance 做死区判断，
-            # 之后才让加速度限幅把实际下发步长削小 —— 小步照发，目标就能一周期
-            # 一周期地爬过去，而不是卡在原地。
+            dx = phys_x - origin_x
+            dy = phys_y - origin_y
+            span = max(abs(dx), abs(dy))
+
+            now_mono = time.monotonic()
+            dt = (now_mono - self._last_send_at
+                  if self._last_send_at is not None else self.period)
+            if dt <= 0.0 or not math.isfinite(dt):
+                dt = self.period
+            max_delta = self.target_accel_mm_s2 * dt * dt if self.target_accel_mm_s2 > 0.0 else 0.0
+
+            # 目标限速与提前减速：步长不超 target_slew_mm 且按剩余距离减速刹停
+            v_limit = self.target_slew_mm if self.target_slew_mm > 0.0 else span
+            if max_delta > 0.0:
+                v_limit = min(v_limit, _braking_step(span, max_delta))
+
+            if span > v_limit:
+                ratio = v_limit / span
+                phys_x = origin_x + dx * ratio
+                phys_y = origin_y + dy * ratio
+
             dx_step = phys_x - origin_x
             dy_step = phys_y - origin_y
             distance = max(abs(dx_step), abs(dy_step))
-            # ★★★ 加速度限幅：只限步长是不够的 —— 目标**突然反向**才是最耗
-            # 加速度的动作，而限速器完全不管方向。
-            #
-            # 现场（TIA 工艺对象 Y轴 → 状态位和错误位）：
-            #     错误：跟随误差 = 红     警告：动态限值 = 黄
-            #     轴状态：已归位 = 绿（没丢回零）、编码器有效 = 绿、驱动装置 = 灰
-            #     运动撤销快照：physical Y=110.49（行程正中间，不是限位）prev_busy=True
-            # 也就是**轴在正常位置自由运动途中跟不上指令**，不是撞到哪。
-            #
-            # 算一下就清楚：target_slew_mm 的单位是 mm/周期。实测周期 63~71Hz，
-            # 40mm/周期 ≈ 2600mm/s，而目标每 16ms 就可能反向一次，需要的加速度
-            #     a_cmd ≈ step / dt² = 40 / (1/65)² ≈ 169,000 mm/s^2
-            # 轴的实际能力：106N / 3kg ≈ 35,000 mm/s^2 —— **差约 5 倍**。
-            # 轴追不上 → 跟随误差累积 → 超监控窗口 → 报错 → 运动学 801。
-            #
-            # 修法：限制"目标速度每周期能变多少"，即每周期步长的变化量
-            #     max_delta = target_accel_mm_s2 * dt²
-            # dt 用**实测的两次发送间隔**，不用 --plc-rate 的名义周期 ——
-            # 名义 200Hz 而实际只有 70Hz，用 0.005 算出来的 max_delta 会小 8 倍，
-            # 限幅过狠、轴几乎不动。
-            if (self.target_accel_mm_s2 > 0.0 and self._last_step is not None):
-                now_mono = time.monotonic()
-                dt = (now_mono - self._last_send_at
-                      if self._last_send_at is not None else self.period)
-                if dt <= 0.0 or not math.isfinite(dt):
-                    dt = self.period
-                max_delta = self.target_accel_mm_s2 * dt * dt
-                if max_delta > 0.0:
-                    dx = phys_x - origin_x
-                    dy = phys_y - origin_y
-                    ddx = dx - self._last_step[0]
-                    ddy = dy - self._last_step[1]
-                    span = max(abs(ddx), abs(ddy))
-                    if span > max_delta:
-                        ratio = max_delta / span
-                        phys_x = origin_x + self._last_step[0] + ddx * ratio
-                        phys_y = origin_y + self._last_step[1] + ddy * ratio
-            # ★ 注意：distance 已经在上面（加速度限幅之前）算好了，这里**不要**
+
+            # 加速度限幅：限制相邻周期步长变化量
+            if self.target_accel_mm_s2 > 0.0 and self._last_step is not None and max_delta > 0.0:
+                ddx = dx_step - self._last_step[0]
+                ddy = dy_step - self._last_step[1]
+                accel_span = max(abs(ddx), abs(ddy))
+                if accel_span > max_delta:
+                    ratio = max_delta / accel_span
+                    phys_x = origin_x + self._last_step[0] + ddx * ratio
+                    phys_y = origin_y + self._last_step[1] + ddy * ratio
+
+            # 软限位兜底：无论斜坡还是包络外回归，中间指令均不得超越软限位
+            phys_x = max(PHYSICAL_X_MIN, min(PHYSICAL_X_MAX, phys_x))
+            phys_y = max(PHYSICAL_Y_MIN, min(PHYSICAL_Y_MAX, phys_y))
+
+            # ★ 注意：distance 已经在上面（加速度限幅之前）算好了，这里不要
             #   用限幅后的步长重算 —— 那正是把它锁死的写法。见上面的注释。
             # 同点到位则跳过；空闲但未到位时重发，执行中的同点已在限速前跳过。
             if distance < DEAD_ZONE_MM:
@@ -860,7 +852,7 @@ class PLCInterface:
                 actual = getattr(self, "actual_game", None)
                 if actual is not None:
                     try:
-                        ax, ay = self.game_to_physical(actual[0], actual[1])
+                        ax, ay = self.game_to_physical_raw(actual[0], actual[1])
                         actual_gap = max(abs(phys_x - ax), abs(phys_y - ay))
                     except (ValueError, OverflowError):
                         actual_gap = None
@@ -1292,13 +1284,14 @@ class PLCLink:
         slew = self.target_slew_mm
         if not slew or slew <= 0.0 or rate_hz <= 0.0:
             return ""
+        accel = self.target_accel_mm_s2 if self.target_accel_mm_s2 > 0.0 else None
         try:
-            warnings = safety_warnings(slew, rate_hz)
+            warnings = safety_warnings(slew, rate_hz, accel)
         except Exception:
             return ""
         if not warnings:
             return ""
-        brake, speed = braking_distance_mm(slew, rate_hz)
+        brake, speed = braking_distance_mm(slew, rate_hz, accel)
         # 包络到软限位之间的余量就是 MOTION_MARGIN_MM（包络 = PHYSICAL_* 内缩它）
         margin = MOTION_MARGIN_MM
         return (f" | [!]安全自检 {speed:.0f}mm/s 制动{brake:.0f}mm > 余量{margin:.0f}mm"

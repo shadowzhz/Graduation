@@ -1,7 +1,7 @@
 """颜色阈值 + 轮廓几何约束的冰壶检测，检测这一帧里冰壶在哪里"""
 
 from dataclasses import replace
-from math import inf, pi        # inf 代表无穷大
+from math import hypot, inf, pi        # inf 代表无穷大
 
 import cv2
 
@@ -35,23 +35,55 @@ class StoneDetector:
         self.max_radius = float(max_radius)
         self.min_circularity = float(min_circularity)
 
-    # 拿一帧图像尝试找冰壶，新增 dynamic_roi 参数
-    def detect(self, frame, dynamic_roi=None):
-        """跑一遍检测管线，返回得分最高候选对应的 CurlingState，找不到返回 None。"""
-        # 优先使用动态 ROI，如果没有传动态 ROI（比如刚启动或跟丢了），则使用全局自定的 self.roi
-        current_roi = dynamic_roi if dynamic_roi is not None else self.roi
-        
-        cropped, offset_x, offset_y = crop_roi(frame.image, current_roi)       # 将图像按 current_roi 处理
-        # 裁剪完没有数据则返回
-        if cropped.size == 0:
+    @staticmethod
+    def select_candidate(candidates, *, predicted_position=None, previous_position=None,
+                         previous_radius=None, max_distance=80.0):
+        """根据原轨迹预测/历史位置与候选质量做关联，不匹配回退最高分候选。"""
+        if not candidates:
             return None
-        
+        if predicted_position is None and previous_position is None:
+            return candidates[0]
+
+        max_dist = max(float(max_distance), 1e-6)
+        matching = []
+
+        for c in candidates:
+            d_pred = hypot(c.x - predicted_position[0], c.y - predicted_position[1]) if predicted_position else None
+            d_prev = hypot(c.x - previous_position[0], c.y - previous_position[1]) if previous_position else None
+            dists = [d for d in (d_pred, d_prev) if d is not None]
+            if not dists:
+                continue
+            gate_dist = min(dists)
+            if gate_dist > max_dist:
+                continue
+
+            match_dist = d_pred if (d_pred is not None and d_pred <= max_dist) else gate_dist
+            dist_score = max(0.0, 1.0 - (match_dist / max_dist))
+
+            if previous_radius is not None and previous_radius > 0 and c.radius > 0:
+                radius_sim = min(c.radius, previous_radius) / max(c.radius, previous_radius)
+                score = 0.6 * c.confidence + 0.3 * dist_score + 0.1 * radius_sim
+            else:
+                score = 0.65 * c.confidence + 0.35 * dist_score
+
+            matching.append((score, c))
+
+        if not matching:
+            return candidates[0]
+        return max(matching, key=lambda item: item[0])[1]
+
+    def detect_candidates(self, frame, dynamic_roi=None):
+        """跑一遍检测管线，返回按原 (score, area) 稳定降序排序的 CurlingState 候选列表。"""
+        current_roi = dynamic_roi if dynamic_roi is not None else self.roi
+
+        cropped, offset_x, offset_y = crop_roi(frame.image, current_roi)       # 将图像按 current_roi 处理
+        if cropped.size == 0:
+            return []
+
         mask = threshold(cropped, self.lower, self.upper, self.color_space)             # 颜色筛选
         mask = morphology(mask, self.morphology_kernel, self.morphology_iterations)     # 形态学处理
 
-        candidates = []
-
-        # 轮廓提取
+        raw = []
         for contour in external_contours(mask):
             area = float(cv2.contourArea(contour))                              # 计算这个轮廓有多大
             if area < self.min_area or area > self.max_area:                    # 面积过滤
@@ -66,27 +98,25 @@ class StoneDetector:
             if radius < self.min_radius or radius > self.max_radius:            # 外接圆半径过滤
                 continue
 
-            # 开始生成真正的检测结果 (此时的 x,y 是相对于原畸变图像的)
             detection = Detection(
-                # 坐标偏移
                 center_x=float(center_x + offset_x),
                 center_y=float(center_y + offset_y),
-
                 radius=float(radius),
                 area=area,
                 timestamp=frame.timestamp,              # 时间戳，用于计算轨迹预测
                 circularity=float(circularity),
             )
             score = self._score_candidate(detection)    # 计算检测分数
-            candidates.append((score, replace(detection, score=score)))         # 保存候选
-        # 没有分数直接返回
-        if not candidates:
-            return None
-        # 分数相同取面积大的
-        best = max(candidates, key=lambda item: (item[0], item[1].area))[1]
-        # 对外统一成 CurlingState，不再直接暴露散落的坐标字段
-        return CurlingState.from_detection(best)
+            raw.append((score, area, replace(detection, score=score)))
 
+        if not raw:
+            return []
+        raw.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [CurlingState.from_detection(item[2]) for item in raw]
+
+    def detect(self, frame, dynamic_roi=None):
+        """跑一遍检测管线，返回得分最高候选对应的 CurlingState，找不到返回 None。"""
+        return self.select_candidate(self.detect_candidates(frame, dynamic_roi=dynamic_roi))
     # 给候选冰壶评分
     def _score_candidate(self, detection):
         # 圆形度为主，面积项防止刚好过线的小噪点拿最高分

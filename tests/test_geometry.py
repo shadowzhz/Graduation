@@ -26,6 +26,7 @@ from air_hockey.vision.tracker import StoneTracker, TrackState
 from air_hockey.vision.types import Detection, ROI
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
+TABLE_CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "table_homography.npz"
 
 RINK_BOUNDS = (core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM)
 # 固定的 table 目标点顺序：左上 -> 右上 -> 右下 -> 左下
@@ -594,3 +595,117 @@ def test_homography_file_loads_matrix_and_image_size():
             gx, gy = geom.undistorted_to_table(float(sx), float(sy))
             assert abs(gx - tx) < 1e-3
             assert abs(gy - ty) < 1e-3
+
+
+def test_batch_table_to_raw_matches_single_pointwise_homography():
+    """回归测试：启用内参 + Homography 模式下，批量 table_to_raw 与逐点转换严格一致。
+
+    205 点轨迹下逐点与批量输出的最大像素绝对差必须为 0.0，且输出顺序严格保持。
+    """
+    if TABLE_CALIB_FILE.is_file():
+        geom = CameraGeometry.from_calibration_file(
+            CALIB_FILE,
+            rink_bounds=RINK_BOUNDS,
+            table_calibration_file=TABLE_CALIB_FILE,
+            enabled=True,
+        )
+    else:
+        base = CameraGeometry.from_calibration_file(
+            CALIB_FILE, rink_bounds=RINK_BOUNDS, table_calibration_file=None, enabled=True
+        )
+        raw_quad = np.array([[350.0, 50.0], [930.0, 60.0], [950.0, 620.0], [330.0, 600.0]], dtype=np.float64)
+        undistorted = np.array([base.raw_to_undistorted(px, py) for px, py in raw_quad], dtype=np.float32)
+        homography = cv2.getPerspectiveTransform(undistorted, RINK_CORNERS)
+        geom = CameraGeometry(
+            rink_bounds=RINK_BOUNDS,
+            camera_matrix=base.camera_matrix,
+            dist_coeffs=base.dist_coeffs,
+            image_size=base.image_size,
+            homography_matrix=homography,
+            enabled=True,
+        )
+
+    xs = np.linspace(RINK_BOUNDS[0] + 10.0, RINK_BOUNDS[1] - 10.0, 205)
+    ys = np.linspace(RINK_BOUNDS[2] + 20.0, RINK_BOUNDS[3] - 20.0, 205)
+    points = list(zip(xs.tolist(), ys.tolist()))
+
+    pointwise = [geom.table_to_raw(x, y) for x, y in points]
+    batch = geom.table_to_raw_batch(points)
+
+    assert len(batch) == len(pointwise) == 205
+    for (px, py), (bx, by) in zip(pointwise, batch):
+        assert abs(px - bx) == 0.0
+        assert abs(py - by) == 0.0
+
+
+def test_batch_table_to_raw_matches_single_pointwise_roi_fallback():
+    """回归测试：启用内参 + ROI fallback 模式下，批量 table_to_raw 与逐点转换严格一致。"""
+    table_roi = (350.0, 0.0, 580.0, 650.0)
+    geom = CameraGeometry.from_calibration_file(
+        CALIB_FILE,
+        rink_bounds=RINK_BOUNDS,
+        table_roi=table_roi,
+        table_calibration_file=None,
+        enabled=True,
+    )
+
+    xs = np.linspace(RINK_BOUNDS[0] + 10.0, RINK_BOUNDS[1] - 10.0, 205)
+    ys = np.linspace(RINK_BOUNDS[2] + 20.0, RINK_BOUNDS[3] - 20.0, 205)
+    points = list(zip(xs.tolist(), ys.tolist()))
+
+    pointwise = [geom.table_to_raw(x, y) for x, y in points]
+    batch = geom.table_to_raw_batch(points)
+
+    assert len(batch) == len(pointwise)
+    for (px, py), (bx, by) in zip(pointwise, batch):
+        assert abs(px - bx) == 0.0
+        assert abs(py - by) == 0.0
+
+
+def test_batch_table_to_raw_matches_single_pointwise_disabled():
+    """回归测试：禁用畸变校正下，批量 table_to_raw 与逐点转换严格一致。"""
+    table_roi = (350.0, 0.0, 580.0, 650.0)
+    geom = CameraGeometry(rink_bounds=RINK_BOUNDS, table_roi=table_roi, enabled=False)
+
+    points = [(50.0, 100.0), (300.0, 400.0), (550.0, 700.0)]
+    pointwise = [geom.table_to_raw(x, y) for x, y in points]
+    batch = geom.table_to_raw_batch(points)
+
+    assert len(batch) == len(pointwise)
+    for (px, py), (bx, by) in zip(pointwise, batch):
+        assert abs(px - bx) == 0.0
+        assert abs(py - by) == 0.0
+
+
+def test_batch_table_to_raw_edge_cases_and_validation():
+    """回归测试：空点集、单点输入、输出顺序及校验异常。"""
+    table_roi = (350.0, 0.0, 580.0, 650.0)
+    geom = CameraGeometry(rink_bounds=RINK_BOUNDS, table_roi=table_roi, enabled=False)
+
+    # 空点集
+    assert geom.table_to_raw_batch([]) == []
+    assert geom.table_to_raw_batch(np.empty((0, 2))) == []
+
+    # 单点
+    single_res = geom.table_to_raw_batch([(100.0, 200.0)])
+    assert len(single_res) == 1
+    assert single_res[0] == geom.table_to_raw(100.0, 200.0)
+
+    # 乱序输出顺序保持
+    ordered_points = [(500.0, 600.0), (100.0, 200.0), (350.0, 450.0)]
+    assert geom.table_to_raw_batch(ordered_points) == [geom.table_to_raw(x, y) for x, y in ordered_points]
+
+    # 校验：ROI 未设置报错
+    geom_no_roi = CameraGeometry(rink_bounds=RINK_BOUNDS, enabled=False)
+    try:
+        geom_no_roi.table_to_raw_batch([(100.0, 200.0)])
+        assert False, "Should raise ValueError when table_roi is not set"
+    except ValueError as exc:
+        assert "table_roi is not set" in str(exc)
+
+    # 校验：点维度非法
+    try:
+        geom.table_to_raw_batch(np.zeros((3, 3)))
+        assert False, "Should raise ValueError for invalid point shape"
+    except ValueError as exc:
+        assert "points must have shape" in str(exc)

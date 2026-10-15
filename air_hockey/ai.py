@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass, replace
 
 from . import core_config as core
-from .physics import clamp
+from .physics import StoneMotion, clamp
 from game_state import GameState
 from .prediction import PredictionState, TrajectoryPredictor
 
@@ -308,7 +308,17 @@ class AirHockeyAI:
         if t is None or not math.isfinite(t) or t <= 0.0:
             return lead_x, lead_y          # 追不上：不外推，直接瞄现在的位置
         t = min(t, self.MAX_LEAD_TIME)
-        return stone.x + stone.vx * t, stone.y + stone.vy * t
+        motion = StoneMotion(stone.x, stone.y)
+        motion.set_immediate_velocity(stone.vx, stone.vy)
+        remaining = t
+        substep = core.PREDICTION_SUBSTEP
+        while remaining > 1e-9:
+            step_dt = min(substep, remaining)
+            motion.step(step_dt)
+            remaining -= step_dt
+            if abs(motion.vx) < 1e-9 and abs(motion.vy) < 1e-9 and not motion.response_active:
+                break
+        return motion.x, motion.y
 
     def _predict_stone_x(
         self, state: GameState, target_y: float, prediction: PredictionState | None = None

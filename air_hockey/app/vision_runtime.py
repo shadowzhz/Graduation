@@ -56,6 +56,53 @@ def _track_usable(track) -> bool:
     """
     return track is not None and track.state != TrackState.TENTATIVE
 
+def _compute_dynamic_roi(
+    track: Optional[Track],
+    pred_pos: tuple[float, float],
+    img_w: int,
+    img_h: int,
+    base_box_size: int = 140,
+) -> Optional[ROI]:
+    """根据当前轨迹速度、时间差与反向包络自适应扩展动态 ROI。"""
+    if track is None or img_w <= 0 or img_h <= 0:
+        return None
+
+    pred_raw_x, pred_raw_y = pred_pos
+    if not (math.isfinite(pred_raw_x) and math.isfinite(pred_raw_y)):
+        return None
+
+    # 原框：基于当前预测位置的基础 140 框，作为尺寸与范围的下限保护
+    orig_rx = max(0, min(int(pred_raw_x - base_box_size / 2), img_w - 1))
+    orig_ry = max(0, min(int(pred_raw_y - base_box_size / 2), img_h - 1))
+    orig_rw = max(1, min(base_box_size, img_w - orig_rx))
+    orig_rh = max(1, min(base_box_size, img_h - orig_ry))
+    orig_rx_max = orig_rx + orig_rw
+    orig_ry_max = orig_ry + orig_rh
+
+    radius = float(getattr(track, "radius", 0.0) or 0.0)
+    if not math.isfinite(radius) or radius <= 0.0:
+        radius = 25.0
+
+    obs_x = float(getattr(track, "center_x", pred_raw_x))
+    obs_y = float(getattr(track, "center_y", pred_raw_y))
+    if not (math.isfinite(obs_x) and math.isfinite(obs_y)):
+        obs_x, obs_y = pred_raw_x, pred_raw_y
+
+    # 上一观测点与预测位置都包含，加球半径余量，且不缩小到比原框更小
+    min_x = min(orig_rx, obs_x - radius, pred_raw_x - radius)
+    max_x = max(orig_rx_max, obs_x + radius, pred_raw_x + radius)
+    min_y = min(orig_ry, obs_y - radius, pred_raw_y - radius)
+    max_y = max(orig_ry_max, obs_y + radius, pred_raw_y + radius)
+
+    rx = max(0, min(int(math.floor(min_x)), img_w - 1))
+    ry = max(0, min(int(math.floor(min_y)), img_h - 1))
+    rx_end = max(rx + 1, min(int(math.ceil(max_x)), img_w))
+    ry_end = max(ry + 1, min(int(math.ceil(max_y)), img_h))
+
+    rw = rx_end - rx
+    rh = ry_end - ry
+    return ROI(x=rx, y=ry, width=rw, height=rh)
+
 
 @dataclass
 class VisionResult:
@@ -182,6 +229,22 @@ class VisionRuntime:
         if 0.0 <= age <= 0.25 and all(math.isfinite(value) for value in (feedback.x, feedback.y)):
             self._ai_feedback_position = (feedback.x, feedback.y)
 
+    def _detect(self, frame, dynamic_roi=None):
+        # 自定义检测器继续遵循原 detect 契约。
+        if not isinstance(self.detector, StoneDetector) or type(self.detector).detect is not StoneDetector.detect:
+            return self.detector.detect(frame, dynamic_roi=dynamic_roi)
+        candidates = self.detector.detect_candidates(frame, dynamic_roi=dynamic_roi)
+        track = self.tracker.track
+        if not _track_usable(track):
+            return self.detector.select_candidate(candidates)
+        return self.detector.select_candidate(
+            candidates,
+            predicted_position=self.tracker.predict_position(frame.timestamp),
+            previous_position=(track.center_x, track.center_y),
+            previous_radius=track.radius,
+            max_distance=self.tracker.max_distance,
+        )
+
     def process_frame(self, frame: Frame) -> VisionResult:
         """处理单帧：检测/追踪预测 -> 坐标转换 -> 状态估计 -> 轨迹预测 -> AI 决策。"""
         t0 = time.perf_counter()
@@ -211,17 +274,19 @@ class VisionRuntime:
             box_size = 140
 
             if _track_usable(self.tracker.track):
-                pred_raw_x, pred_raw_y = self.tracker.predict_position(processed_frame.timestamp)
+                pred_pos = self.tracker.predict_position(processed_frame.timestamp)
                 img_h, img_w = processed_frame.image.shape[:2]
-                rx = max(0, min(int(pred_raw_x - box_size / 2), img_w - 1))
-                ry = max(0, min(int(pred_raw_y - box_size / 2), img_h - 1))
-                rw = max(1, min(box_size, img_w - rx))
-                rh = max(1, min(box_size, img_h - ry))
-                dynamic_roi = ROI(x=rx, y=ry, width=rw, height=rh)
+                dynamic_roi = _compute_dynamic_roi(
+                    self.tracker.track,
+                    pred_pos,
+                    img_w,
+                    img_h,
+                    base_box_size=box_size,
+                )
 
-            detection = self.detector.detect(processed_frame, dynamic_roi=dynamic_roi)
+            detection = self._detect(processed_frame, dynamic_roi=dynamic_roi)
             if detection is None and dynamic_roi is not None:
-                detection = self.detector.detect(processed_frame)
+                detection = self._detect(processed_frame)
             self._last_detection_timestamp = now
             detected_ms = (time.perf_counter() - t_detect_start) * 1000
             self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1

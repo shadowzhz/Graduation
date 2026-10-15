@@ -1172,3 +1172,78 @@ def test_small_escape_past_each_physical_limit_revokes_without_auto_rearm():
             assert len(client.transport.moves) == sent
         finally:
             assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_advance_braking_prevents_accel_overshoot_and_warns():
+    original_margin = protocol.MOTION_MARGIN_MM
+    try:
+        protocol.set_motion_margin(40.0)
+        warns = protocol.safety_warnings(12.0, 100.0, 12000.0)
+        assert len(warns) == 1
+        assert "制动距离 60mm > 包络到软限位的余量 40mm" in warns[0]
+
+        for busy in (True, False):
+            client = MemoryPLC()
+            client.period = 0.01
+            client.target_slew_mm = 12.0
+            client.target_accel_mm_s2 = 12000.0
+            client.actual_game = client.physical_to_game(0.0, 0.0)
+            client.actual_busy = busy
+
+            sim_time = 1000.0
+            orig_time = protocol.time.monotonic
+            protocol.time.monotonic = lambda: sim_time
+            gx, gy = client.physical_to_game(175.0, 0.0)
+            commands = []
+            try:
+                for i in range(30):
+                    sim_time = 1000.0 + i * 0.01
+                    prep = client._prepare_move(gx, gy)
+                    if prep is not None:
+                        px, py, bm, dist = prep
+                        client._commit_move(px, py, bm, dist)
+                        commands.append(px)
+            finally:
+                protocol.time.monotonic = orig_time
+
+            assert commands, "Must produce commands"
+            assert max(commands) <= 175.0 + 1e-6
+            assert max(commands) <= protocol.PHYSICAL_X_MAX
+            for prev, curr in zip(commands, commands[1:]):
+                assert curr - prev <= 12.0 + 1e-6
+    finally:
+        protocol.set_motion_margin(original_margin)
+
+
+@memory_binding()
+def test_envelope_recovery_from_actual_game_steps_smoothly_without_jump():
+    original_margin = protocol.MOTION_MARGIN_MM
+    try:
+        protocol.set_motion_margin(40.0)
+        client = MemoryPLC()
+        client.period = 0.01
+        client.target_slew_mm = 12.0
+        client.actual_game = client.physical_to_game(-170.0, -120.0)
+        client.actual_busy = False
+
+        gx, gy = client.physical_to_game(0.0, 0.0)
+        prep = client._prepare_move(gx, gy)
+        assert prep is not None
+        px, py, bm, dist = prep
+        step = max(abs(px - (-170.0)), abs(py - (-120.0)))
+        assert step <= 12.0 + 1e-6
+        assert px < protocol.COMMAND_X_MIN
+        assert px >= protocol.PHYSICAL_X_MIN
+        assert py >= protocol.PHYSICAL_Y_MIN
+
+        client._commit_move(px, py, bm, dist)
+        prep2 = client._prepare_move(gx, gy)
+        assert prep2 is not None
+        px2, py2, bm2, dist2 = prep2
+        step2 = max(abs(px2 - px), abs(py2 - py))
+        assert step2 <= 12.0 + 1e-6
+        assert px2 >= protocol.PHYSICAL_X_MIN
+        assert py2 >= protocol.PHYSICAL_Y_MIN
+    finally:
+        protocol.set_motion_margin(original_margin)

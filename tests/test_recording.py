@@ -379,3 +379,51 @@ def test_failed_close_preserves_journal_and_can_be_retried():
         assert document["frames"][0]["timestamp"] == 1.0
         assert document["frames"][0]["curling_state"]["x"] == 100.0
 
+
+def test_existing_recording_file_cannot_be_overwritten():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "existing.json"
+        with RuntimeRecorder(path, meta={"run": "original"}) as recorder:
+            recorder.record_frame(1.0, 60.0, _curling_state())
+        original_bytes = path.read_bytes()
+
+        try:
+            RuntimeRecorder(path)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("creating recorder over existing final file must raise FileExistsError")
+
+        simulation = MotionSimulator.default(steps=10).simulate()
+        try:
+            record_simulation_result(simulation, path=path)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("simulation recorder over existing final file must raise FileExistsError")
+
+        assert path.read_bytes() == original_bytes
+        assert not path.with_name(path.name + ".journal").exists()
+
+
+def test_recover_works_when_earlier_snapshot_file_exists():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "snapshot_and_crash.json"
+        recorder = RuntimeRecorder(path, meta={"run": "recovering"})
+        recorder.record_frame(1.0, 60.0, _curling_state())
+        recorder.flush()
+        recorder.record_frame(2.0, 60.0, _curling_state())
+        recorder._journal.close()
+
+        try:
+            RuntimeRecorder(path)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("creating recorder over existing final file must raise FileExistsError")
+
+        RuntimeRecorder.recover(path)
+        document = json.loads(path.read_text(encoding="utf-8"))
+        assert len(document["frames"]) == 2
+        assert [frame["timestamp"] for frame in document["frames"]] == [1.0, 2.0]
+        assert not path.with_name(path.name + ".journal").exists()

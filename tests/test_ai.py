@@ -182,6 +182,23 @@ def test_lead_does_not_diverge_when_puck_outruns_mallet():
     assert decision.target_y > layout.RINK_TOP + layout.MALLET_RADIUS
 
 
+def test_lead_target_accounts_for_wall_bounce():
+    """提前量遇到侧墙反弹时：必须按物理微步计算反弹后的位置，而不是向墙外线性外推。
+
+    回归：530, 250, vx=400, vy=0, mallet=(300, 139.52), mallet_speed=500 时，
+    纯线性外推给出 lead_x=770 并被 clamp 钉在右极限 533；
+    实际台面冰壶在右墙反弹后，0.6s 物理位置已向左弹回到约 350.93。
+    """
+    state = make_state(530.0, 250.0, vx=400.0, vy=0.0, ai_y=139.52)
+    state = replace(state, ai_x=300.0)
+
+    plain = AirHockeyAI().choose_target(state)
+    assert (plain.target_x, plain.target_y) == (530.0, 250.0)
+
+    decision = AirHockeyAI(mallet_speed=500.0).choose_target(state)
+    assert abs(decision.target_x - 350.93) < 0.1
+    assert abs(decision.target_y - 250.00) < 0.1
+
 def test_defense_uses_injected_predictor():
     # 注入不同参数的预测器，防守预测的目标横坐标必须不同
     from air_hockey.prediction import TrajectoryPredictor

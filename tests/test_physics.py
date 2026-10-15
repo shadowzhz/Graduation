@@ -396,3 +396,90 @@ def test_stationary_current_velocity_with_active_response_still_moves():
     assert prediction.duration > 1.0
     assert (source.vx, source.target_vx, source.response_active) == (0.0, 150.0, True)
 
+
+
+def test_goal_post_proximity_and_exact_boundary():
+    """门柱近邻与刚好边界：刚好在接触半径边界不碰撞，稍微进入必碰撞，远离粗筛跳过。"""
+    min_dist = layout.STONE_RADIUS + layout.GOAL_POST_RADIUS
+    for post_x, post_y in layout.GOAL_POSTS:
+        # 1. 刚好在接触半径边界上：distance == min_dist，distance_sq >= min_dist^2，不发生碰撞
+        stone_boundary = StoneMotion(x=post_x + min_dist, y=post_y, vx=-100.0, vy=0.0)
+        assert not stone_boundary.resolve_goal_posts()
+        assert stone_boundary.vx == -100.0
+
+        # 2. 刚好在边界外侧微小距离 (min_dist + 1e-4)：粗筛或接触计算均不反弹
+        stone_outside = StoneMotion(x=post_x + min_dist + 1e-4, y=post_y, vx=-100.0, vy=0.0)
+        assert not stone_outside.resolve_goal_posts()
+        assert stone_outside.vx == -100.0
+
+        # 3. 刚好进入边界内侧微小距离 (min_dist - 1e-4)：发生反弹并将位置修正到边界
+        stone_inside = StoneMotion(x=post_x + min_dist - 1e-4, y=post_y, vx=-100.0, vy=0.0)
+        assert stone_inside.resolve_goal_posts()
+        assert abs(stone_inside.x - (post_x + min_dist)) < 1e-7
+        assert stone_inside.vx > 0.0
+
+        # 4. 对角线方向刚好进入接触半径：测试双轴粗筛与法线反弹
+        angle = math.pi / 4
+        diag_inside = min_dist - 1e-4
+        stone_diag = StoneMotion(
+            x=post_x + diag_inside * math.cos(angle),
+            y=post_y + diag_inside * math.sin(angle),
+            vx=-80.0,
+            vy=-80.0,
+        )
+        assert stone_diag.resolve_goal_posts()
+        assert stone_diag.vx > 0.0 and stone_diag.vy > 0.0
+
+    # 5. 上下端门柱粗筛边界带验证：在 y = RINK_TOP + min_dist 和 RINK_BOTTOM - min_dist 上不误碰
+    stone_top_edge = StoneMotion(x=layout.GOAL_LEFT, y=layout.RINK_TOP + min_dist, vx=100.0, vy=0.0)
+    assert not stone_top_edge.resolve_goal_posts()
+    stone_bottom_edge = StoneMotion(x=layout.GOAL_RIGHT, y=layout.RINK_BOTTOM - min_dist, vx=100.0, vy=0.0)
+    assert not stone_bottom_edge.resolve_goal_posts()
+
+
+def test_goal_post_multi_collision_and_wall_corner_interplay():
+    """多碰撞与门柱/边墙复合反弹：球在门柱与上边墙间连续反弹并保持有限数值。"""
+    predictor = TrajectoryPredictor()
+    # 放置在左上门柱左侧、上边墙下方的狭窄通道，向右上角斜向射击
+    start_x = layout.GOAL_LEFT - 25.0
+    start_y = layout.RINK_TOP + 12.0
+    traj = predictor.predict(start_x, start_y, 160.0, -140.0)
+    assert len(traj) > 2
+    assert all(math.isfinite(px) and math.isfinite(py) for px, py in traj)
+    # 轨迹终点必须在合法场地内或球门内，不会发散
+    final_x, final_y = traj.endpoint
+    assert layout.RINK_LEFT <= final_x <= layout.RINK_RIGHT
+
+    # 高速撞击门柱时反弹后速度不突破 MAX_STONE_SPEED
+    fast_stone = StoneMotion(
+        x=layout.GOAL_LEFT - 10.0,
+        y=layout.RINK_TOP + 10.0,
+        vx=layout.MAX_STONE_SPEED,
+        vy=-layout.MAX_STONE_SPEED,
+    )
+    fast_stone.step(0.01)
+    speed_after = math.hypot(fast_stone.vx, fast_stone.vy)
+    assert speed_after <= layout.MAX_STONE_SPEED + 1e-9
+
+
+def test_speed_reuse_preserves_stop_and_friction_semantics():
+    """速度长度复用保持停止语义、单步数值更新顺序与摩擦精度。"""
+    # 1. 接近停止速度的冰壶在单步内由于阻尼减速彻底停止
+    stone = StoneMotion(x=layout.RINK_CENTER_X, y=layout.RINK_CENTER_Y, vx=1.0, vy=0.0)
+    stone.advance_velocity(0.1)
+    assert stone.vx == 0.0 and stone.vy == 0.0
+
+    # 2. 运动更新顺序：先 advance_position，再 resolve_walls/posts，最后 advance_velocity
+    dt = 0.01
+    s = StoneMotion(x=300.0, y=400.0, vx=100.0, vy=-50.0)
+    expected_x = s.x + s.vx * dt
+    expected_y = s.y + s.vy * dt
+    speed = math.hypot(s.vx, s.vy)
+    expected_speed = max(0.0, speed - layout.STONE_FRICTION_DECELERATION * dt)
+    expected_vx = s.vx * (expected_speed / speed)
+    expected_vy = s.vy * (expected_speed / speed)
+
+    bounced = s.step(dt)
+    assert not bounced
+    assert abs(s.x - expected_x) < 1e-9 and abs(s.y - expected_y) < 1e-9
+    assert abs(s.vx - expected_vx) < 1e-9 and abs(s.vy - expected_vy) < 1e-9

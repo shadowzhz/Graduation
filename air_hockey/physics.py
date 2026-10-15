@@ -125,8 +125,22 @@ class StoneMotion:
                 scale = velocity_step / delta_speed
                 self.vx += delta_x * scale
                 self.vy += delta_y * scale
-        self.vx, self.vy = apply_friction_velocity(self.vx, self.vy, dt)
-        self.vx, self.vy = self._limited_velocity(self.vx, self.vy)
+        vx, vy = self.vx, self.vy
+        speed = math.hypot(vx, vy)
+        new_speed = max(0.0, speed - core.STONE_FRICTION_DECELERATION * dt)
+        if speed <= 1e-9 or new_speed <= 1e-9:
+            self.vx = 0.0
+            self.vy = 0.0
+        else:
+            scale = new_speed / speed
+            vx *= scale
+            vy *= scale
+            if new_speed > core.MAX_STONE_SPEED:
+                max_scale = core.MAX_STONE_SPEED / new_speed
+                vx *= max_scale
+                vy *= max_scale
+            self.vx = vx
+            self.vy = vy
 
     def advance_position(self, dt):
         self.x += self.vx * dt
@@ -154,10 +168,15 @@ class StoneMotion:
         return bounced
 
     def resolve_walls(self):
+        eps = core.COLLISION_EPSILON
         left_limit = core.RINK_LEFT + core.STONE_RADIUS
         right_limit = core.RINK_RIGHT - core.STONE_RADIUS
         top_limit = core.RINK_TOP + core.STONE_RADIUS
         bottom_limit = core.RINK_BOTTOM - core.STONE_RADIUS
+
+        if left_limit + eps < self.x < right_limit - eps and top_limit + eps < self.y < bottom_limit - eps:
+            return False
+
         vx, vy = self.vx, self.vy
         target_vx, target_vy = self.target_vx, self.target_vy
         reflected_vx, reflected_vy = vx, vy
@@ -172,33 +191,44 @@ class StoneMotion:
                 _, reflected_target_vy, _ = resolve_wall_axis(self.y, target_vy, top_limit, bottom_limit)
             bounced = bounced or y_bounced
         # 卡在角落出不来时给一个最小弹出速度
-        at_left_or_right = self.x <= left_limit + core.COLLISION_EPSILON or self.x >= right_limit - core.COLLISION_EPSILON
-        at_top_or_bottom = self.y <= top_limit + core.COLLISION_EPSILON or self.y >= bottom_limit - core.COLLISION_EPSILON
-        current_speed = math.hypot(vx, vy)
-        if at_left_or_right and at_top_or_bottom and current_speed <= core.COLLISION_EPSILON:
-            direction_x = 1.0 if self.x <= left_limit + core.COLLISION_EPSILON else -1.0
-            direction_y = 1.0 if self.y <= top_limit + core.COLLISION_EPSILON else -1.0
-            component_speed = core.MIN_WALL_BOUNCE_SPEED / math.sqrt(2.0)
-            reflected_vx = direction_x * component_speed
-            reflected_vy = direction_y * component_speed
-            bounced = True
-        elif bounced and current_speed > core.COLLISION_EPSILON and at_left_or_right and at_top_or_bottom:
-            reflected_speed = math.hypot(reflected_vx, reflected_vy)
-            if reflected_speed < core.MIN_WALL_BOUNCE_SPEED:
-                scale = core.MIN_WALL_BOUNCE_SPEED / reflected_speed
-                reflected_vx *= scale
-                reflected_vy *= scale
+        at_left_or_right = self.x <= left_limit + eps or self.x >= right_limit - eps
+        at_top_or_bottom = self.y <= top_limit + eps or self.y >= bottom_limit - eps
+        current_speed = None
+        if at_left_or_right and at_top_or_bottom:
+            current_speed = math.hypot(vx, vy)
+            if current_speed <= eps:
+                direction_x = 1.0 if self.x <= left_limit + eps else -1.0
+                direction_y = 1.0 if self.y <= top_limit + eps else -1.0
+                component_speed = core.MIN_WALL_BOUNCE_SPEED / math.sqrt(2.0)
+                reflected_vx = direction_x * component_speed
+                reflected_vy = direction_y * component_speed
+                bounced = True
+            elif bounced:
+                reflected_speed = math.hypot(reflected_vx, reflected_vy)
+                if reflected_speed < core.MIN_WALL_BOUNCE_SPEED:
+                    scale = core.MIN_WALL_BOUNCE_SPEED / reflected_speed
+                    reflected_vx *= scale
+                    reflected_vy *= scale
         if bounced:
-            if current_speed <= core.COLLISION_EPSILON:
+            if current_speed is None:
+                current_speed = math.hypot(vx, vy)
+            if current_speed <= eps:
                 self.set_immediate_velocity(reflected_vx, reflected_vy)
             else:
                 self.set_wall_reflection(reflected_vx, reflected_vy, reflected_target_vx, reflected_target_vy)
         return bounced
 
     def resolve_goal_posts(self):
-        bounced = False
         minimum_distance = core.STONE_RADIUS + core.GOAL_POST_RADIUS
+        y = self.y
+        top = core.RINK_TOP
+        bottom = core.RINK_BOTTOM
+        if not (top - minimum_distance < y < top + minimum_distance or bottom - minimum_distance < y < bottom + minimum_distance):
+            return False
+        bounced = False
         for post_x, post_y in core.GOAL_POSTS:
+            if abs(self.y - post_y) >= minimum_distance or abs(self.x - post_x) >= minimum_distance:
+                continue
             contact = circle_post_contact(self.x, self.y, post_x, post_y, minimum_distance)
             if contact is None:
                 continue
