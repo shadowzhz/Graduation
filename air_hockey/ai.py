@@ -151,6 +151,22 @@ class AirHockeyAI:
                 stalled_stone_phase,
             )
 
+        # 冲门快球拦截优先：当冰壶冲向我方球门时（vy < -50 mm/s 且在球槌前方），
+        # 且预判落点落在大门有效防御区域内（真冲门）：
+        # 严禁前扑迎球（迎球会缩短反应时间导致来不及拦截而漏球）；
+        # 必须坚守在门线附近（Y = ai_home_y），提前横向移动到预判截获点堵截。
+        if state.stone.vy < -50.0 and not stone_behind_ai:
+            if prediction is None:
+                prediction = self.predictor.predict(state.stone)
+            predicted_goal_x = self._predict_stone_x(state, state.ai_home_y, prediction)
+            fast_shot_on_goal = (core.GOAL_LEFT - core.STONE_RADIUS <= predicted_goal_x <= core.GOAL_RIGHT + core.STONE_RADIUS)
+        else:
+            fast_shot_on_goal = False
+        if fast_shot_on_goal:
+            blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_goal_x * difficulty.prediction
+            target_x = clamp(blended_x + error, safe_left, safe_right)
+            return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)
+
         # 冰壶在自己前方且进了攻击区才主动追。
         # 这里原来直接瞄冰壶当前位置 → 球动了轴才追，永远慢一拍；
         # 现在过一遍 _lead_target 加上球槌响应延迟的提前量。

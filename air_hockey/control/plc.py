@@ -806,10 +806,11 @@ class PLCInterface:
                 except (ValueError, OverflowError):
                     origin_x = origin_y = None
         if origin_x is not None:
+            goal_phys_x = phys_x
+            goal_phys_y = phys_y
             dx = phys_x - origin_x
             dy = phys_y - origin_y
             span = max(abs(dx), abs(dy))
-
             now_mono = time.monotonic()
             dt = (now_mono - self._last_send_at
                   if self._last_send_at is not None else self.period)
@@ -848,13 +849,15 @@ class PLCInterface:
             # ★ 注意：distance 已经在上面（加速度限幅之前）算好了，这里不要
             #   用限幅后的步长重算 —— 那正是把它锁死的写法。见上面的注释。
             # 同点到位则跳过；空闲但未到位时重发，执行中的同点已在限速前跳过。
-            if distance < DEAD_ZONE_MM:
+            # 只有当总目标差距（span）本身已进入死区时，才进入死区到位跳过判定；
+            # 只要总目标还在远方（span >= DEAD_ZONE_MM），哪怕这一拍步距只有 1~2mm，也必须连续下发！
+            if span < DEAD_ZONE_MM:
                 actual_gap = None
                 actual = getattr(self, "actual_game", None)
                 if actual is not None:
                     try:
                         ax, ay = self.game_to_physical_raw(actual[0], actual[1])
-                        actual_gap = max(abs(phys_x - ax), abs(phys_y - ay))
+                        actual_gap = max(abs(goal_phys_x - ax), abs(goal_phys_y - ay))
                     except (ValueError, OverflowError):
                         actual_gap = None
                 if actual_gap is None or actual_gap < DEAD_ZONE_MM:
