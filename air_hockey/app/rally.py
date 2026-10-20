@@ -92,7 +92,6 @@ class RallyController:
         self._last_seen_at = 0.0
         self._last_active_state = RallyState.WAITING
         self._state_changed_at = 0.0
-        self._last_vy = 0.0
 
     def can_retrieve(self, stone) -> bool:
         """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
