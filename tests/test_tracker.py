@@ -119,3 +119,36 @@ def test_scheduled_predictions_preserve_state_and_missing_detection_budget():
         assert recovered.state.value == "tentative"
         assert recovered.missed_frames == 0
         assert tracker.update(make_detection(110, 200, 1.6))[0].state.value == "active"
+
+
+def test_single_far_false_detection_does_not_take_over_live_track():
+    tracker = StoneTracker(min_confirmed_hits=1, replacement_hits=2)
+    for i in range(3):
+        tracker.update(make_detection(100 + i, 200, i * 0.005))
+    # 一帧远处误检：旧轨迹保留（按漏检外推），不换 ID
+    track = tracker.update(make_detection(900, 600, 0.015))[0]
+    assert track.track_id == 1 and track.state.value == "lost"
+    # 真冰壶下一帧回来：仍是原轨迹
+    track = tracker.update(make_detection(104, 200, 0.020))[0]
+    assert track.track_id == 1 and track.state.value == "active"
+
+
+def test_two_scattered_far_detections_do_not_take_over():
+    tracker = StoneTracker(min_confirmed_hits=1, replacement_hits=2)
+    tracker.update(make_detection(100, 200, 0.0))
+    tracker.update(make_detection(900, 600, 0.005))
+    track = tracker.update(make_detection(500, 100, 0.010))[0]
+    assert track.track_id == 1
+
+
+def test_consistent_far_detections_take_over_after_confirmation():
+    tracker = StoneTracker(min_confirmed_hits=1, replacement_hits=2)
+    tracker.update(make_detection(100, 200, 0.0))
+    assert tracker.update(make_detection(900, 600, 0.005))[0].track_id == 1
+    track = tracker.update(make_detection(905, 600, 0.010))[0]
+    assert track.track_id == 2 and track.state.value == "active"
+
+
+def test_without_live_track_first_detection_is_immediate():
+    tracker = StoneTracker(min_confirmed_hits=1, replacement_hits=2)
+    assert tracker.update(make_detection(900, 600, 0.0))[0].state.value == "active"

@@ -18,6 +18,19 @@ from game_state import CurlingState
 from .state import PredictionState
 
 
+def default_max_simulation_steps(substep: float) -> int:
+    """按物理参数推算步数预算：最高速在摩擦下减到停止所需时长再留 25% 余量。
+
+    固定 4000 步（约 16.7s）只比最高速停止时长（1100/72 ≈ 15.3s）多 9%，
+    摩擦参数一旦按实台辨识变小就会耗尽预算、实时线程抛错。预算随参数自动放宽，
+    且不低于原来的 PREDICTION_MAX_SIMULATION_STEPS。
+    """
+    if core.STONE_FRICTION_DECELERATION <= 0.0:
+        return core.PREDICTION_MAX_SIMULATION_STEPS
+    stop_time = core.MAX_STONE_SPEED / core.STONE_FRICTION_DECELERATION
+    return max(core.PREDICTION_MAX_SIMULATION_STEPS, math.ceil(1.25 * stop_time / substep))
+
+
 class TrajectoryPredictor:
     """基于物理微步模拟的冰壶轨迹预测器。"""
 
@@ -61,7 +74,8 @@ class TrajectoryPredictor:
         """
         substep = self._substep if self._substep is not None else core.PREDICTION_SUBSTEP
         point_interval = self._point_interval if self._point_interval is not None else core.PREDICTION_POINT_INTERVAL
-        max_simulation_steps = self._max_simulation_steps if self._max_simulation_steps is not None else core.PREDICTION_MAX_SIMULATION_STEPS
+        max_simulation_steps = (self._max_simulation_steps if self._max_simulation_steps is not None
+                                else default_max_simulation_steps(substep))
         stop_speed = self._stop_speed if self._stop_speed is not None else core.STONE_STOP_SPEED
         actual_obstacle_radius = obstacle_radius if obstacle_radius is not None else core.MALLET_RADIUS
         if not math.isfinite(actual_obstacle_radius) or actual_obstacle_radius < 0.0:

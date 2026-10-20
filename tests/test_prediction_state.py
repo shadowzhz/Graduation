@@ -166,3 +166,19 @@ def test_vision_runtime_forwards_prediction_state():
     assert isinstance(result.prediction, PredictionState)
     assert result.prediction.endpoint == result.trajectory[-1]
     assert result.trajectory_debug.predicted_endpoint == result.prediction.endpoint
+
+
+def test_default_budget_covers_lower_identified_friction():
+    """实台辨识出的摩擦变小时，默认预算要自动覆盖最高速滑到停止。"""
+    from unittest.mock import patch
+    from air_hockey import core_config as core_module
+    from air_hockey.prediction.predictor import default_max_simulation_steps
+    # 摩擦 45 时旧的固定 4000 步预算会抛 RuntimeError（实测滑行约 17.2s）
+    with patch.object(core_module, "STONE_FRICTION_DECELERATION", 45.0):
+        steps = default_max_simulation_steps(core_module.PREDICTION_SUBSTEP)
+        assert steps * core_module.PREDICTION_SUBSTEP > core_module.MAX_STONE_SPEED / 45.0
+        prediction = TrajectoryPredictor().predict(300.0, 380.0, 0.0, 0.0)
+        assert prediction.duration == 0.0
+        # 沿中线横向往返弹墙，一路滑到停止，不应耗尽预算
+        prediction = TrajectoryPredictor().predict(300.0, 380.0, core_module.MAX_STONE_SPEED, 0.0)
+        assert prediction.duration > 4000 * core_module.PREDICTION_SUBSTEP

@@ -427,3 +427,28 @@ def test_recover_works_when_earlier_snapshot_file_exists():
         assert len(document["frames"]) == 2
         assert [frame["timestamp"] for frame in document["frames"]] == [1.0, 2.0]
         assert not path.with_name(path.name + ".journal").exists()
+
+
+def _count_fsyncs_while_recording(sync_interval, frames=200):
+    from unittest.mock import patch
+    import air_hockey.recording.recorder as recorder_module
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "throttle.json"
+        recorder = RuntimeRecorder(path, sync_interval=sync_interval)
+        real_fsync = recorder_module.os.fsync
+        calls = []
+        with patch.object(recorder_module.os, "fsync", side_effect=lambda fd: (calls.append(fd), real_fsync(fd))):
+            for index in range(frames):
+                recorder.record_frame(timestamp=float(index), fps=200.0)
+            # 未 close 前每一帧都已 flush 到日志文件（进程崩溃可恢复）
+            journal = path.with_name(path.name + ".journal")
+            assert len(journal.read_text(encoding="utf-8").splitlines()) == frames + 1
+            recording_calls = len(calls)
+        recorder.close()
+        assert len(json.loads(path.read_text(encoding="utf-8"))["frames"]) == frames
+        return recording_calls
+
+
+def test_journal_fsync_is_rate_limited_but_every_frame_is_flushed():
+    assert _count_fsyncs_while_recording(sync_interval=60.0) <= 1
+    assert _count_fsyncs_while_recording(sync_interval=0.0) == 200

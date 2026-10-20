@@ -1,7 +1,8 @@
 """真实运行数据记录。
 
 RuntimeRecorder 从实时 VisionResult 中抽取 CurlingState / PredictionState / timestamp / FPS，
-逐帧同步日志，结束时流式写出统一 JSON；异常退出的日志可恢复。
+逐帧写入日志（每帧 flush 到系统缓存，fsync 按 sync_interval 限频），
+结束时流式写出统一 JSON；异常退出的日志可恢复。
 未设置输出路径时仅在内存中记录，供有限长度的离线仿真使用。
 """
 
@@ -9,7 +10,9 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -83,7 +86,19 @@ class RuntimeRecorder:
         path: Optional[str | Path] = None,
         source: str = "runtime",
         meta: Optional[dict[str, Any]] = None,
+        sync_interval: float = 0.5,
     ) -> None:
+        """sync_interval：两次 fsync 的最小间隔（秒），0 = 每帧 fsync。
+
+        每帧都 flush 到系统缓存，进程崩溃不丢帧；fsync 只防断电，
+        在 Jetson eMMC/SD 卡上单次可达数毫秒到数十毫秒，200fps 逐帧 fsync
+        会直接拖垮处理线程。限频后断电最多丢最后 sync_interval 秒。
+        """
+        sync_interval = float(sync_interval)
+        if not math.isfinite(sync_interval) or sync_interval < 0.0:
+            raise ValueError("sync_interval must be finite and non-negative")
+        self.sync_interval = sync_interval
+        self._last_sync = 0.0
         self.path = None if path is None else Path(path)
         self.source = source
         self.meta = dict(meta or {})
@@ -159,7 +174,10 @@ class RuntimeRecorder:
             try:
                 self._journal.write(line)
                 self._journal.flush()
-                os.fsync(self._journal.fileno())
+                now = time.monotonic()
+                if now - self._last_sync >= self.sync_interval:
+                    os.fsync(self._journal.fileno())
+                    self._last_sync = now
             except OSError as exc:
                 self._error = exc
                 raise

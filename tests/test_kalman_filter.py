@@ -122,6 +122,8 @@ def test_invalid_parameters_rejected():
         {"measurement_noise": -1.0},
         {"acceleration_noise": -1.0},
         {"initial_velocity_variance": 0.0},
+        {"maneuver_gate": 0.0},
+        {"maneuver_gate": float("nan")},
     ):
         try:
             KalmanFilter(**kwargs)
@@ -291,3 +293,56 @@ def test_vision_runtime_curling_state_continuous_across_frames():
             # 状态连续：单帧位移有界
             assert math.hypot(curling.x - previous.x, curling.y - previous.y) < 100.0
         previous = curling
+
+
+def _strike_sequence(kf, fps=200, noise=1.0, seed=1):
+    """静止 0.5s 后被击打成 vy=-800，返回击球后 50ms 的速度估计与静止期最大 |vy|。"""
+    rng = random.Random(seed)
+    dt = 1.0 / fps
+    y, vy = 600.0, 0.0
+    hit = int(0.5 * fps)
+    still_max = 0.0
+    after_50ms = None
+    for i in range(hit + int(0.1 * fps)):
+        if i == hit:
+            vy = -800.0
+        y += vy * dt
+        state = kf.update(300.0 + rng.gauss(0, noise), y + rng.gauss(0, noise), i * dt)
+        if int(0.25 * fps) <= i < hit:
+            still_max = max(still_max, abs(state.vy))
+        if i == hit + round(0.05 / dt):
+            after_50ms = state.vy
+    return after_50ms, still_max
+
+
+def test_maneuver_gate_tracks_strike_quickly_without_adding_jitter():
+    baseline_vy, baseline_still = _strike_sequence(KalmanFilter())
+    gated = KalmanFilter(maneuver_gate=20.0)
+    gated_vy, gated_still = _strike_sequence(gated)
+    # 原常速模型 50ms 后只有真值的一小部分；机动检测后接近 -800
+    assert baseline_vy > -200.0
+    assert -900.0 < gated_vy < -650.0
+    assert gated.maneuver_count >= 1
+    # 静止期没有误触发，抖动与原模型一致
+    assert abs(gated_still - baseline_still) < 1e-9
+
+
+def test_maneuver_gate_recovers_after_wall_bounce():
+    kf = KalmanFilter(maneuver_gate=20.0)
+    dt = 1.0 / 200
+    x, vx = 300.0, -800.0
+    bounce = None
+    for i in range(200):
+        x += vx * dt
+        if x < 50.0:
+            x, vx = 100.0 - x, -vx * 0.97
+            bounce = bounce if bounce is not None else i
+        state = kf.update(x, 380.0, i * dt)
+        if bounce is not None and i == bounce + 10:
+            assert abs(state.vx - vx) < 0.1 * abs(vx)
+            return
+    assert False, "没有发生弹墙"
+
+
+def test_maneuver_gate_disabled_by_default():
+    assert KalmanFilter().maneuver_gate is None

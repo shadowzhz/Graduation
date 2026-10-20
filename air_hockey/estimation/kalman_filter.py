@@ -31,6 +31,7 @@ class KalmanFilter:
         acceleration_noise: float = 200.0,
         initial_velocity_variance: float = 1_000_000.0,
         motion_model: str = "constant_velocity",
+        maneuver_gate: float | None = None,
     ) -> None:
         if measurement_noise <= 0.0:
             raise ValueError("measurement_noise must be positive")
@@ -40,10 +41,18 @@ class KalmanFilter:
             raise ValueError("initial_velocity_variance must be positive")
         if motion_model not in ("constant_velocity", "friction", "collision_aware"):
             raise ValueError("motion_model must be 'constant_velocity', 'friction' or 'collision_aware'")
+        if maneuver_gate is not None and (not math.isfinite(maneuver_gate) or maneuver_gate <= 0.0):
+            raise ValueError("maneuver_gate must be finite and positive")
         self.measurement_noise = float(measurement_noise)
         self.acceleration_noise = float(acceleration_noise)
         self.initial_velocity_variance = float(initial_velocity_variance)
         self.motion_model = motion_model
+        # 机动检测：击球/弹墙是速度突变，小 Q 的常速模型要几百毫秒才跟上。
+        # 归一化新息平方 NIS 超过门限时认为发生机动：以本次观测重新初始化位置，
+        # 速度方差恢复为初始值，相当于从突变后重新做最小二乘拟合，旧速度不再拖累估计。
+        # 平稳滑行时仍用小 Q 抑制抖动。None = 关闭（离线评估默认）。
+        self.maneuver_gate = None if maneuver_gate is None else float(maneuver_gate)
+        self.maneuver_count = 0
         self.reset()
 
     def reset(self) -> None:
@@ -51,6 +60,7 @@ class KalmanFilter:
         self._x = np.zeros(_STATE_DIM)
         self._P = np.eye(_STATE_DIM)
         self._last_timestamp = None
+        self._last_measurement = None
         self._initialized = False
         self._friction_started = False
         self._confidence = 0.0
@@ -90,21 +100,36 @@ class KalmanFilter:
 
         if not self._initialized:
             self._initialize(measurement, timestamp)
+            self._last_measurement = measurement
             self._remember(confidence, radius)
             return self._to_curling_state()
 
-        self._advance(self._elapsed(timestamp))
+        dt = self._elapsed(timestamp)
+        previous_measurement = self._last_measurement
+        self._advance(dt)
 
         H = self._measurement_matrix()
         Ht = H.T
         R = np.eye(_MEASUREMENT_DIM) * self.measurement_noise**2
         innovation = measurement - H @ self._x
         S = H @ self._P @ Ht + R
+        if (self.maneuver_gate is not None and dt > 0.0 and previous_measurement is not None
+                and float(innovation @ np.linalg.solve(S, innovation)) > self.maneuver_gate):
+            # 从上一次原始观测重新起步（速度未知），本次观测照常更新：
+            # 等价于从最近两次观测重新开始最小二乘拟合，触发这一帧就有新速度。
+            # 不用滤波后的位置 —— 它在机动后已滞后几帧，两点差分会严重高估速度。
+            self.maneuver_count += 1
+            self._initialize(previous_measurement, timestamp)
+            self._friction_started = False
+            self._advance(dt)
+            innovation = measurement - H @ self._x
+            S = H @ self._P @ Ht + R
         gain = self._P @ Ht @ np.linalg.inv(S)
         self._x = self._x + gain @ innovation
         self._P = (np.eye(_STATE_DIM) - gain @ H) @ self._P
 
         self._last_timestamp = timestamp
+        self._last_measurement = measurement
         self._remember(confidence, radius)
         return self._to_curling_state()
 

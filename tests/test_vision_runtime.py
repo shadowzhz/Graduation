@@ -328,7 +328,7 @@ def test_explicit_two_hit_tracker_confirms_on_detection_not_prediction():
     assert [result.track_confirmed for result in results] == [False, False, True]
 
 
-def test_new_far_identity_is_immediately_confirmed():
+def test_new_far_identity_takes_over_after_two_consistent_hits():
     detections = [
         Detection(center_x=x, center_y=300.0, radius=25.0, area=1960.0,
                   timestamp=1.0 + index * 0.033)
@@ -348,8 +348,8 @@ def test_new_far_identity_is_immediately_confirmed():
         identities.append(result.track.track_id)
         states.append(result.track.state)
 
-    assert identities == [1, 1, 2, 2]
-    assert states == [TrackState.ACTIVE] * 4
+    assert identities == [1, 1, 1, 2]
+    assert states == [TrackState.ACTIVE, TrackState.ACTIVE, TrackState.LOST, TrackState.ACTIVE]
     assert [result.track_confirmed for result in results] == [True] * 4
 
 
@@ -554,20 +554,26 @@ def test_confirmation_is_revoked_after_the_grace_period_expires():
     assert results[20].track is None
 
 
-def test_fast_reversal_reacquires_outside_local_roi_without_confirmation_wait():
+def test_fast_reversal_reacquires_outside_local_roi_after_one_confirming_frame():
     runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
     old_identity = None
-    for sequence, y in enumerate((500, 450, 570), 1):
+    results = []
+    for sequence, y in enumerate((500, 450, 570, 600), 1):
         image = np.zeros((720, 1280, 3), dtype=np.uint8)
         cv2.circle(image, (640, y), 30, (0, 0, 255), -1)
         result = runtime.process_frame(Frame(image, timestamp=1.0 + (sequence - 1) * 0.1))
+        results.append(result)
         if sequence == 2:
             old_identity = result.track.track_id
-    assert abs(result.detection.center_y - 570) < 1
+    # 远处第一次出现：只记为候选，旧轨迹按漏检外推，仍可用于决策
+    assert results[2].track.track_id == old_identity
+    assert results[2].track.state == TrackState.LOST and results[2].track_confirmed
+    # 第二次在一致位置出现：接管
+    assert abs(result.detection.center_y - 600) < 1
     assert result.track.track_id != old_identity
     assert result.track.state == TrackState.ACTIVE and result.track.hits == 1
     assert result.track_confirmed
-    expected = runtime.camera_geometry.undistorted_to_table(640, 570)
+    expected = runtime.camera_geometry.undistorted_to_table(640, 600)
     assert math.dist(result.curling_state.position, expected) < 1e-6
 
 
@@ -576,7 +582,7 @@ def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
         table_calibration_file=None, disable_undistort=True, detection_interval=1,
     )
     results = []
-    for sequence, x in enumerate([500, 503, 506, 509, 512, None, None, None, 800], 1):
+    for sequence, x in enumerate([500, 503, 506, 509, 512, None, None, None, 800, 800], 1):
         hsv = np.zeros((720, 1280, 3), dtype=np.uint8)
         if x is not None:
             cv2.circle(hsv, (x, 300), 30, (175, 255, 255), -1)
@@ -596,6 +602,7 @@ def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
                             previous.curling_state.x + previous.curling_state.vx * 0.005)
         assert math.isclose(missed.curling_state.vx, previous.curling_state.vx)
 
+    assert results[-2].track.track_id == 1     # 远处第一次出现只是候选
     new = results[-1]
     assert new.track.track_id == 2
     undistorted = runtime.camera_geometry.raw_to_undistorted(800.0, 300.0)
@@ -643,7 +650,13 @@ def test_new_identity_does_not_inherit_recovery_phase_or_reaction_timer():
     runtime.reaction_timer = 10.0
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
-    new = runtime.process_frame(Frame(image, timestamp=1.1))
+    pending = runtime.process_frame(Frame(image, timestamp=1.1))
+    assert pending.track.track_id == old_identity
+    runtime.stalled_phase = "striking"
+    runtime.reaction_timer = 10.0
+    # 候选帧里软件球槌又前进了 0.1s；放回原处，只验证"新身份不继承旧阶段"
+    runtime.ai_current_pos[:] = (core.RINK_CENTER_X, runtime.ai_home_y)
+    new = runtime.process_frame(Frame(image, timestamp=1.2))
     assert new.track.track_id != old_identity and new.track_confirmed
     assert new.ai_target == new.curling_state.position
     assert new.ai_decision.stalled_stone_phase == "idle"
@@ -911,3 +924,30 @@ def test_adaptive_roi_boundary_and_edge_cases():
     roi_fast = _compute_dynamic_roi(track_fast, pred_pos=(500.0, 300.0), img_w=1280, img_h=720)
     assert roi_fast.x <= orig_rx
     assert roi_fast.x + roi_fast.width >= orig_rx + 140
+
+
+def test_default_detector_rejects_mallet_sized_red_blob():
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image, (400, 300), 70, (0, 0, 255), -1)      # 球槌尺寸（约 2.2 倍冰壶）
+    assert runtime.detector.detect(Frame(image)) is None
+    cv2.circle(image, (900, 300), 31, (0, 0, 255), -1)      # 现场冰壶尺寸
+    detection = runtime.detector.detect(Frame(image))
+    assert detection is not None and abs(detection.center_x - 900) < 1.0
+
+
+def test_prediction_failure_does_not_kill_runtime_and_ai_still_defends():
+    class FailingPredictor:
+        def predict(self, *args, **kwargs):
+            raise RuntimeError("prediction exceeded max_simulation_steps")
+
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True,
+                            predictor=FailingPredictor())
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image, (640, 600), 30, (0, 0, 255), -1)
+    result = runtime.process_frame(Frame(image, timestamp=1.0))
+    assert result.curling_state is not None
+    assert result.prediction is None and result.trajectory is None
+    assert result.ai_decision is not None
+    assert math.isfinite(result.ai_decision.target_x) and math.isfinite(result.ai_decision.target_y)
+    assert runtime.prediction_errors == 1

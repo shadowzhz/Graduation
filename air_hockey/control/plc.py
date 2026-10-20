@@ -881,6 +881,10 @@ class PLCInterface:
             # 限速开启时，所有斜坡步均由软件规划保证连续平滑，统一保持 BufferMode=5（混合滤波），
             # 彻底杜绝中途停稳造成的卡顿；只有未开启限速（slew<=0）且步距超阈值时才发模式 1。
             buffer_mode = 1 if (self.target_slew_mm <= 0.0 and distance > self.blend_threshold_mm + COORD_EPSILON) else 5
+            # 精磨距离和诊断步距必须用**实际发出去的步长**（加速度限幅、软限位兜底之后）。
+            # 限幅前的 distance 可能比实际步长大好几倍（目标反向时实测 20mm vs 6.5mm），
+            # 精磨距离按它算就会超过整段运动，TO 把整段圆掉、到不了目标点。
+            distance = max(abs(phys_x - origin_x), abs(phys_y - origin_y))
         else:
             distance = None
             buffer_mode = 5

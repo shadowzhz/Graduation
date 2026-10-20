@@ -1247,3 +1247,19 @@ def test_envelope_recovery_from_actual_game_steps_smoothly_without_jump():
         assert py2 >= protocol.PHYSICAL_Y_MIN
     finally:
         protocol.set_motion_margin(original_margin)
+
+
+def test_prepare_move_reports_step_actually_sent_after_accel_limit():
+    """目标突然反向时，加速度限幅让实际步长远小于限速步长；
+    精磨距离/诊断步距必须按实际步长算，否则精磨距离超过整段运动。"""
+    client = PLCInterface(target_slew_mm=20.0, target_accel_mm_s2=15000.0,
+                          period=0.03, blend_threshold_mm=10.0)
+    client._last_phys_x, client._last_phys_y = 0.0, 0.0
+    client._last_step = (20.0, 0.0)
+    client._last_send_at = time.monotonic() - 0.03
+    goal = client.physical_to_game(-100.0, 0.0)
+    phys_x, phys_y, _mode, distance = client._prepare_move(*goal)
+    sent = max(abs(phys_x), abs(phys_y))
+    assert sent < 10.0
+    assert abs(distance - sent) < 1e-9
+    assert min(client.blend_threshold_mm, distance * protocol.TRANSITION_RATIO) < sent

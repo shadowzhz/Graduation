@@ -20,8 +20,10 @@ class StoneTracker:
     # max_missed_frames 最大允许漏检帧数
     # velocity_alpha    平滑系数
     # min_confirmed_hits 最少硬检测命中次数
+    # replacement_hits  已有轨迹时，远处新目标接管轨迹所需的连续命中次数（1 = 立即接管）
+    # max_speed         候选确认时允许的最大像素速度（px/s），冰壶最高约 1100 单位/s ≈ 2500px/s
     def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2,
-                 min_confirmed_hits=2) -> None:
+                 min_confirmed_hits=2, replacement_hits=1, max_speed=3000.0) -> None:
         if max_distance <= 0.0:
             raise ValueError("最大允许移动距离必须有效")
         if max_missed_frames < 0:
@@ -30,11 +32,16 @@ class StoneTracker:
             raise ValueError("平滑系数必须在 (0, 1]")
         if int(min_confirmed_hits) < 1 or int(min_confirmed_hits) != min_confirmed_hits:
             raise ValueError("目标确认命中次数必须是正整数")
+        if int(replacement_hits) < 1 or int(replacement_hits) != replacement_hits:
+            raise ValueError("轨迹接管命中次数必须是正整数")
         self.max_distance = float(max_distance)
         self.max_missed_frames = int(max_missed_frames)
         self.velocity_alpha = float(velocity_alpha)
         self.min_confirmed_hits = int(min_confirmed_hits)
+        self.replacement_hits = int(replacement_hits)
+        self.max_speed = float(max_speed)
         self._track = None
+        self._candidate = None          # 等待接管的远处候选 (detection, 连续命中次数)
         self._next_track_id = 1     # 准备分配下一个唯一的 ID,用于区分不同的目标，但是目前只考虑使用一个冰壶
 
     # 外部调用函数，外部可以直接查看当前轨迹
@@ -48,6 +55,7 @@ class StoneTracker:
         if detection is None:                           # 如果当前帧没检测到目标
             return self._handle_missing_detection()     # 漏检计数
         if self._track is None:                         # 如果没有轨迹
+            self._candidate = None
             self._track = self._create_track(detection) # 创建对象
             return [self._track]
 
@@ -58,6 +66,7 @@ class StoneTracker:
         # 如果距离过大，丢弃该检测
         if min(predicted_distance, actual_distance) > self.max_distance:        # min 是为了容忍一定的误差
             return self._handle_unmatched_detection(detection)
+        self._candidate = None
         self._update_track(detection)
         return [self._track]
 
@@ -81,6 +90,7 @@ class StoneTracker:
 
     def reset(self) -> None:
         self._track = None
+        self._candidate = None
 
     def predict_position(self, timestamp: float) -> tuple[float, float]:
         """根据最后已知速度外推指定时间戳的位置。"""
@@ -136,5 +146,19 @@ class StoneTracker:
         return [self._track]
 
     def _handle_unmatched_detection(self, detection):
+        hits = 1
+        if self._candidate is not None:
+            previous, previous_hits = self._candidate
+            # 两次候选之间允许的位移随时间间隔放宽：低帧率下快球一帧能走很远
+            dt = max(0.0, float(detection.timestamp) - float(previous.timestamp))
+            gate = self.max_distance + self.max_speed * dt
+            if hypot(detection.center_x - previous.center_x,
+                     detection.center_y - previous.center_y) <= gate:
+                hits = previous_hits + 1
+        if hits < self.replacement_hits:
+            # 还没确认：旧轨迹按漏检处理（宽限期内继续外推），候选留待下一帧
+            self._candidate = (detection, hits)
+            return self._handle_missing_detection()
+        self._candidate = None
         self._track = self._create_track(detection)
         return [self._track]

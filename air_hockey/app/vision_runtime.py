@@ -28,6 +28,16 @@ if TYPE_CHECKING:
 DETECTION_INTERVAL = 1
 MAX_DETECTION_GAP = 0.08
 AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
+# 实时估计器的机动检测门限（2 自由度 NIS）。击球/弹墙后速度在约 50ms 内收敛，
+# 原常速模型需约 400ms；静止时噪声与原来相同。离线评估不受影响。
+REALTIME_MANEUVER_GATE = 20.0
+# 冰壶像素面积上限（按等效半径 50px 计）。现场记录（rally.json）里冰壶半径 30.7~33.3px，
+# 红色球槌半径约为冰壶的 2.2 倍（~70px），面积约 5 倍，超过的红色块一律不算冰壶。
+# 用面积而不是外接圆半径：冰壶贴着红色场地线时外接圆会被线拉大，面积基本不变。
+MAX_PUCK_AREA_PX = math.pi * 50.0 ** 2
+# 已有轨迹时，远处出现的新目标要连续命中这么多次才接管轨迹；
+# 没有轨迹时首次检测仍立即响应。防止一帧误检（球槌、红色标记）把机器拉走。
+TRACK_REPLACEMENT_HITS = 2
 
 
 @dataclass
@@ -166,6 +176,7 @@ class VisionRuntime:
             upper=tuple(upper),
             min_area=500.0,
             min_radius=25.0,
+            max_area=MAX_PUCK_AREA_PX,
             # ponytail: rink-line overlaps reach 0.578; lower values risk matching red markings.
             min_circularity=0.55,
         )
@@ -175,8 +186,9 @@ class VisionRuntime:
             # 很容易连丢好几帧，轨道一断 rally 就切回 READY、机械臂被叫回去，
             # 表现就是"接不到球"。×8 ≈ 48ms 更实际。
             max_missed_frames=self.detection_interval * 8, min_confirmed_hits=1,
+            replacement_hits=TRACK_REPLACEMENT_HITS,
         )
-        self.kalman = kalman or KalmanFilter()
+        self.kalman = kalman or KalmanFilter(maneuver_gate=REALTIME_MANEUVER_GATE)
         self.predictor = predictor or TrajectoryPredictor()
         self._reuse_prediction_for_ai = ai is None
         # mallet_speed 给了才会做"提前量"（球槌响应延迟补偿）；None 时行为与原来一致。
@@ -219,6 +231,8 @@ class VisionRuntime:
         self.stalled_phase = "idle"
         self.ai_current_pos = [core.RINK_CENTER_X, self.ai_home_y]
         self._ai_feedback_position = None
+        self.prediction_errors = 0
+        self.last_prediction_error: Optional[Exception] = None
 
     def set_ai_feedback(self, feedback) -> None:
         """只接受新鲜的轴位置；反馈丢失时不把旧位置当作实机当前位置。"""
@@ -344,15 +358,25 @@ class VisionRuntime:
 
             # 预测数据层：业务层只与 PredictionState 交互，不再直接传递裸点列表
             predict_start = time.perf_counter() if self.profile else 0.0
-            prediction_state = self.predictor.predict(curling)
+            try:
+                prediction_state = self.predictor.predict(curling)
+                ai_prediction = prediction_state
+            except (RuntimeError, ValueError) as exc:
+                # 预测失败（步数预算耗尽 / 非有限状态）不能打死实时线程。
+                # 结果里如实记为"无预测"，AI 退化为按当前位置防守（单点轨迹）。
+                self.prediction_errors += 1
+                self.last_prediction_error = exc
+                prediction_state = None
+                ai_prediction = PredictionState([curling.position], curling.position, 0.0, curling)
             if self.profile:
                 self.last_predict_ms = (time.perf_counter() - predict_start) * 1000
-            table_trajectory = prediction_state.trajectory
-            trajectory_debug = TrajectoryDebug(
-                position=curling.position,
-                direction=curling.direction,
-                predicted_endpoint=prediction_state.endpoint,
-            )
+            if prediction_state is not None:
+                table_trajectory = prediction_state.trajectory
+                trajectory_debug = TrajectoryDebug(
+                    position=curling.position,
+                    direction=curling.direction,
+                    predicted_endpoint=prediction_state.endpoint,
+                )
 
             state = GameState(
                 ai_x=self.ai_current_pos[0],
@@ -371,7 +395,7 @@ class VisionRuntime:
 
             ai_start = time.perf_counter() if self.profile else 0.0
             if self._reuse_prediction_for_ai:
-                decision = self.ai.update(state, dt, prediction=prediction_state)
+                decision = self.ai.update(state, dt, prediction=ai_prediction)
             else:
                 decision = self.ai.update(state, dt)
             if self.profile:
