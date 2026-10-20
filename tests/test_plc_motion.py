@@ -1261,3 +1261,30 @@ def test_prepare_move_reports_step_actually_sent_after_accel_limit():
     assert sent < 10.0
     assert abs(distance - sent) < 1e-9
     assert min(client.blend_threshold_mm, distance * protocol.TRANSITION_RATIO) < sent
+
+
+@memory_binding()
+def test_worker_cycle_feeds_latency_report_and_motion_snapshot():
+    """真实工作线程每个周期都要喂延迟统计；记录用的快照要带实际位置和最近下发点。"""
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, sequence_trigger=True,
+                   client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        link.latency_report()                       # 清掉授权前的窗口
+        assert link.set_target(300, 300)
+        assert until(lambda: client.last_send_state == "sent")
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 3)
+        text, _hints = link.latency_report()
+        assert "S7 读 -" not in text and "轴落后指令" in text, text
+        # 内存 PLC 的轴不会动：指令发出去了、实际位置没跟上，必须统计成"落后"
+        assert "轴落后指令 0% 周期" not in text, text
+        snapshot = link.motion_snapshot()
+        assert snapshot is not None and snapshot["armed"]
+        assert snapshot["sent"] is not None and snapshot["sent"]["age"] >= 0.0
+        assert snapshot["age"] >= 0.0
+    finally:
+        assert link.stop(timeout=2.0)

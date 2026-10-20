@@ -37,7 +37,8 @@ from game_state import CurlingState
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 
 DOCUMENT_KEYS = {"format", "version", "source", "meta", "frames"}
-FRAME_KEYS = {"index", "timestamp", "fps", "curling_state", "prediction", "ai_decision", "plc_request"}
+FRAME_KEYS = {"index", "timestamp", "fps", "curling_state", "prediction", "ai_decision", "plc_request",
+              "plc_state"}
 STATE_KEYS = {"x", "y", "vx", "vy", "timestamp", "confidence", "radius"}
 PREDICTION_KEYS = {"trajectory", "endpoint", "duration", "source_state"}
 DECISION_KEYS = {"target_x", "target_y", "stalled_stone_phase", "reaction_timer"}

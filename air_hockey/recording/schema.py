@@ -2,7 +2,9 @@
 
 所有记录统一为一个版本化 JSON 文档，帧级字段一致：
     format / version / source / meta / frames
-每帧记录 timestamp、fps、curling_state、prediction、ai_decision、plc_request。
+每帧记录 timestamp、fps、curling_state、prediction、ai_decision、plc_request、plc_state。
+plc_state 是接 PLC 时的轴状态快照（实际位置、最近一次下发点、busy、seq_ack 等），
+其中的 age 字段表示"距记录时多久以前"，用来和帧时间对齐计算延迟。
 因此真实摄像头运行与仿真的数据可以直接对比、复用同一套分析工具。
 """
 
@@ -69,6 +71,7 @@ def build_frame(
     prediction: Optional[PredictionState] = None,
     ai_decision=None,
     plc_request=None,
+    plc_state: Optional[dict] = None,
 ) -> dict:
     """构建单帧记录。"""
     return {
@@ -79,6 +82,7 @@ def build_frame(
         "prediction": None if prediction is None else prediction_to_dict(prediction),
         "ai_decision": ai_decision_to_dict(ai_decision),
         "plc_request": plc_request_to_dict(plc_request),
+        "plc_state": None if plc_state is None else dict(plc_state),
     }
 
 

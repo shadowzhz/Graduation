@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from air_hockey import core_config
+from air_hockey.control.latency import LatencyProbe
 
 try:
     import snap7
@@ -1130,6 +1131,9 @@ class PLCLink:
         self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0,
                                 "mode1": 0, "mode5": 0}
         self._stats_dists = []
+        # 现场延迟排查：PC → PLC → 轴 分段统计（见 control/latency.py）
+        self.latency = LatencyProbe(self.period)
+        self._sent_snapshot = None      # (monotonic 时刻, 物理 x, 物理 y) 最近一次成功下发
 
     def start(self):
         with self._lock:
@@ -1331,6 +1335,30 @@ class PLCLink:
         left, top = self.physical_to_game(COMMAND_X_MIN, COMMAND_Y_MIN)
         right, bottom = self.physical_to_game(COMMAND_X_MAX, COMMAND_Y_MAX)
         return left, right, top, bottom
+
+    def latency_report(self):
+        """延迟排查汇总（一行文本, 结论提示列表），调用后清零统计窗口。"""
+        return self.latency.report()
+
+    def motion_snapshot(self):
+        """给运行记录用的轴状态快照（游戏坐标）；时间用"距今多久"表示，与时钟源无关。"""
+        now = time.monotonic()
+        with self._lock:
+            feedback, sent, armed = self._feedback, self._sent_snapshot, self._armed
+        if not feedback.valid:
+            return None
+        snapshot = {
+            "age": now - feedback.stamp, "x": feedback.x, "y": feedback.y,
+            "busy": bool(feedback.busy), "armed": bool(armed),
+            "seq_ack": feedback.seq_ack, "remaining": feedback.mc_remaining, "sent": None,
+        }
+        if sent is not None:
+            try:
+                sent_x, sent_y = self.physical_to_game(sent[1], sent[2])
+                snapshot["sent"] = {"age": now - sent[0], "x": sent_x, "y": sent_y}
+            except (ValueError, OverflowError):
+                pass
+        return snapshot
 
     def set_target(self, game_x, game_y):
         try:
@@ -1591,6 +1619,7 @@ class PLCLink:
             self._invalidate_feedback()
             return
         client.keep_alive()
+        status_done = time.monotonic()
         if not client.connected or self._stop_event.is_set():
             self._invalidate_feedback()
             return
@@ -1631,6 +1660,16 @@ class PLCLink:
             target = (self._target if safe and self._armed
                       and not self._stop_event.is_set()
                       and time.monotonic() - self._target_at <= TARGET_MAX_AGE else None)
+            armed_now = self._armed
+        # 延迟排查统计（非必要功能，任何异常都不能影响通信）
+        try:
+            self.latency.on_status(
+                status_done, (status_done - cleared_at) * 1000.0,
+                (float(status["x_pos"]), float(status["y_pos"])), armed=armed_now,
+                busy=feedback.busy, seq_ack=feedback.seq_ack,
+                remaining=feedback.mc_remaining, ob1_ms=feedback.ob1_ms)
+        except Exception:
+            pass
         if revoked:
             def _limit_note(px, py):
                 """把原始位置和行程比一下 —— 故障出现时一眼看出是不是碰到了限位开关。"""
@@ -1676,9 +1715,12 @@ class PLCLink:
                 target = (self._target if self._armed and not self._stop_event.is_set()
                           and time.monotonic() - self._target_at <= TARGET_MAX_AGE
                           and time.monotonic() - feedback.stamp <= TARGET_MAX_AGE else None)
+                target_at = self._target_at
             if target is None:
                 self.cycle_count += 1
                 return
+            send_start = time.monotonic()
+            sent_sequence = None
             if self.sequence_trigger:
                 # 序号模式：写目标块 + 递增的序号，PLC 比较后执行，不需要脉宽。
                 # ★ 序号只在**真的下发成功**时推进 —— 死区跳过不能推进，
@@ -1688,10 +1730,22 @@ class PLCLink:
                 if client.connected and client.last_send_state == "sent":
                     self._sequence = candidate
                     self._sequence_sent += 1
+                    sent_sequence = candidate
             else:
                 client.send_linear_move(*target)
                 if client.connected and client.last_send_state == "sent":
                     self._trigger_high_at = time.monotonic()
+            send_done = time.monotonic()
+            try:
+                sent_x = getattr(client, "_last_phys_x", None)
+                sent_y = getattr(client, "_last_phys_y", None)
+                if client.connected and client.last_send_state == "sent" and sent_x is not None:
+                    with self._lock:
+                        self._sent_snapshot = (send_done, sent_x, sent_y)
+                    self.latency.on_send(send_done, (send_done - send_start) * 1000.0,
+                                         send_start - target_at, sent_x, sent_y, seq=sent_sequence)
+            except Exception:
+                pass
             # 现场诊断累计。整个累计块必须容错 —— 诊断是"非必要"的，
             # 绝不能让它的任何异常把 worker 线程打死（那会让后续命令全部失效）。
             try:

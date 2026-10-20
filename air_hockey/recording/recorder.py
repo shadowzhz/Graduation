@@ -133,7 +133,7 @@ class RuntimeRecorder:
     def closed(self) -> bool:
         return self._closed
 
-    def record(self, result, *, ai_decision=None, plc_request=None) -> None:
+    def record(self, result, *, ai_decision=None, plc_request=None, plc_state=None) -> None:
         """记录一帧 VisionResult（取 curling_state / prediction / timestamp / fps 及控制输出）。"""
         self.record_frame(
             timestamp=result.frame.timestamp,
@@ -142,6 +142,7 @@ class RuntimeRecorder:
             prediction=result.prediction,
             ai_decision=ai_decision,
             plc_request=plc_request,
+            plc_state=plc_state,
         )
 
     def record_frame(
@@ -152,6 +153,7 @@ class RuntimeRecorder:
         prediction=None,
         ai_decision=None,
         plc_request=None,
+        plc_state=None,
     ) -> None:
         """记录一帧原始字段。"""
         if self._closed:
@@ -166,6 +168,7 @@ class RuntimeRecorder:
             prediction,
             ai_decision,
             plc_request,
+            plc_state,
         )
         if self._journal is None:
             self._frames.append(frame)

@@ -89,6 +89,24 @@ class LatencySamples:
             return {key: self.distribution(values) for key, values in self._values.items()}
 
 
+def print_latency_report(decision_ages, plc):
+    """[延迟] 分段延迟汇总：视觉段 + PC→PLC→轴 段（见 air_hockey/control/latency.py）。"""
+    ages = sorted(decision_ages)
+    decision_ages.clear()
+    if ages:
+        vision = (f"视觉 帧读出→目标交给PLC线程 p50 {ages[len(ages) // 2]:.1f}ms "
+                  f"p95 {ages[min(len(ages) - 1, int(len(ages) * 0.95))]:.1f}ms")
+    else:
+        vision = "视觉 本窗口无目标"
+    if plc is None:
+        print(f"[延迟] {vision}")
+        return
+    text, hints = plc.latency_report()
+    print(f"[延迟] {vision} | {text}")
+    for hint in hints:
+        print(f"[延迟] [!] {hint}")
+
+
 def run_game(plc_ip=None, plc_rate=30.0):
     """启动仿真子进程，显式设置 cwd 避免相对路径资源加载报错。"""
     command = [sys.executable, str(SIM_ROOT / "air_hockey.py")]
@@ -401,6 +419,8 @@ def run_vision(args):
 
     stop = threading.Event()
     skipped_frames = [0]
+    # 延迟排查：帧读出（frame.timestamp）到目标交给 PLC 线程的耗时（ms）
+    decision_ages = deque(maxlen=4096)
     gst_pts_count = [0]
 
     def processing_loop():
@@ -446,10 +466,13 @@ def run_vision(args):
                                             mallet_position=runtime.ai_current_pos)
                 plc_prepare_start = time.perf_counter() if samples is not None else 0.0
                 plc_request = submit_rally_target(result, plc_adapter, plc, dry_run=args.dry_run)
+                if plc_request is not None:
+                    decision_ages.append((time.perf_counter() - frame.timestamp) * 1000.0)
                 if samples is not None:
                     samples.add("plc_prepare_submit_ms", (time.perf_counter() - plc_prepare_start) * 1000.0)
                 if recorder is not None:
-                    recorder.record(result, ai_decision=decision, plc_request=plc_request)
+                    recorder.record(result, ai_decision=decision, plc_request=plc_request,
+                                    plc_state=None if plc is None else plc.motion_snapshot())
 
                 status_text = format_status(
                     result,
@@ -529,6 +552,7 @@ def run_vision(args):
                             f"(检测 {runtime.detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
                             f"{plc_line}"
                         )
+                    print_latency_report(decision_ages, plc)
         except Exception as exc:
             processing_failure[0] = exc
             traceback.print_exc()
