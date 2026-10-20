@@ -461,7 +461,7 @@ def test_vision_runtime_without_detection():
 
 
 def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limit():
-    from main import submit_rally_target
+    from air_hockey.app.live import submit_rally_target
 
     runtime = VisionRuntime(
         table_roi=(0, 0, 1280, 720), table_calibration_file=None, disable_undistort=True,

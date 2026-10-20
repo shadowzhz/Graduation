@@ -268,7 +268,7 @@ python3 -c "from air_hockey.recording import RuntimeRecorder; RuntimeRecorder.re
 
 ```text
 Graduation/
-├── main.py                     # 统一入口（视觉 / headless / 仿真 / 记录 / PLC 输出）
+├── main.py                     # 命令行入口：参数解析与校验，分发到实时回合 / 仿真
 ├── README.md                   # 本文档
 ├── HANDOFF.md                  # 当前状态与现场调试交接（最新）
 ├── air_hockey/                 # 核心算法包
@@ -286,7 +286,9 @@ Graduation/
 │   ├── simulation/             # 无摄像头运动仿真测试环境
 │   ├── evaluation/             # 多组实验误差评估与报告
 │   ├── calibration/            # 相机内参标定与去畸变工具
-│   ├── app/                    # VisionRuntime 运行核心 + 渲染 + FPS GUI
+│   ├── app/                    # 实时应用层：
+│   │                           #   live.py 实时回合线程编排与 PLC 下发；vision_runtime.py 视觉→AI 核心
+│   │                           #   rally.py 回合控制；preview.py Tk 窗口与预览编码；renderer.py 标注；perf.py 性能统计
 │   └── tools/                  # 标定脚本 + probe_* 手动诊断脚本（需相机/PLC，非自动化测试）
 ├── calibration/                # 相机内参在库；table_homography.npz 须在实台标定后生成
 ├── sim_gui/                    # 桌面仿真 GUI（game.py）与 GUI 配置（gui_config.py）

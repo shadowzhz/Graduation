@@ -5,7 +5,7 @@ import numpy as np
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
 from air_hockey.vision.types import Detection
-from main import DISPLAY_WIDTH, encode_preview_ppm
+from air_hockey.app.preview import DISPLAY_WIDTH, PreviewBrightness, encode_preview_ppm
 
 TABLE_ROI = (350, 0, 580, 650)
 
@@ -70,3 +70,15 @@ def test_encode_preview_brightness_gain_does_not_change_camera_frame():
 
     assert tuple(rgb[330, 500]) == (30, 40, 50)
     assert np.all(result.frame.image == (100, 80, 60))
+
+
+def test_preview_brightness_compensates_flicker_and_follows_slowly():
+    brightness = PreviewBrightness()
+    bright = np.full((80, 80, 3), 120, dtype=np.uint8)
+    dark = np.full((80, 80, 3), 60, dtype=np.uint8)
+
+    assert brightness.gain(bright) == 1.0
+    # 突然变暗一半：放大补偿，但不超过 1.33 上限
+    assert brightness.gain(dark) == 1.33
+    # 参考亮度缓慢跟随（每帧 0.5%），不会一帧就跳到新亮度
+    assert 119.0 < brightness.reference < 120.0

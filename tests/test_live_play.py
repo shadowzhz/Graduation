@@ -17,7 +17,7 @@ from air_hockey.control import PlcControlAdapter
 from air_hockey.control import plc as protocol
 from air_hockey.control.plc import PLCFeedback, PLCLink
 from air_hockey.physics import StoneMotion, goal_scorer
-from main import submit_rally_target
+from air_hockey.app.live import submit_rally_target
 
 
 def _contact_game(stone):

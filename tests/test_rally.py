@@ -23,7 +23,7 @@ from air_hockey.control.plc import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.vision.types import Detection, Track, TrackState
 from air_hockey.game_state import CurlingState, GameState
-from main import submit_rally_target
+from air_hockey.app.live import submit_rally_target
 
 
 def observation(t, *, x=420.0, y=500.0, vx=0.0, vy=-300.0, hard=True,
