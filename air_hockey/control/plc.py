@@ -791,7 +791,7 @@ class PLCInterface:
             dx = phys_x - origin_x
             dy = phys_y - origin_y
             span = max(abs(dx), abs(dy))
-            now_mono = time.monotonic()
+            now_mono = time.perf_counter()
             dt = (now_mono - self._last_send_at
                   if self._last_send_at is not None else self.period)
             if dt <= 0.0 or not math.isfinite(dt):
@@ -884,7 +884,7 @@ class PLCInterface:
         if self._last_phys_x is not None:
             self._last_step = (phys_x - self._last_phys_x, phys_y - self._last_phys_y)
         self._last_phys_x, self._last_phys_y = phys_x, phys_y
-        self._last_send_at = time.monotonic()
+        self._last_send_at = time.perf_counter()
         self.last_buffer_mode = buffer_mode
         if distance is not None:
             self.last_send_dist_mm = distance
@@ -1056,7 +1056,7 @@ class PLCInterface:
     def keep_alive(self):
         if not self.connected:
             return
-        now = time.monotonic()
+        now = time.perf_counter()
         if now - self.last_heartbeat_time <= 0.1:
             return
         self.heartbeat_state = not self.heartbeat_state
@@ -1126,14 +1126,14 @@ class PLCLink:
         self._echo_seen = False
         self.cycle_count = 0
         # 统计实际频率、同点跳过、模式分布和目标步距；不把它们直接当作 801 的原因。
-        self._stats_at = time.monotonic()
+        self._stats_at = time.perf_counter()
         self._stats_cycles = 0
         self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0,
                                 "mode1": 0, "mode5": 0}
         self._stats_dists = []
         # 现场延迟排查：PC → PLC → 轴 分段统计（见 control/latency.py）
         self.latency = LatencyProbe(self.period)
-        self._sent_snapshot = None      # (monotonic 时刻, 物理 x, 物理 y) 最近一次成功下发
+        self._sent_snapshot = None      # (perf_counter 时刻, 物理 x, 物理 y) 最近一次成功下发
 
     def start(self):
         with self._lock:
@@ -1194,7 +1194,7 @@ class PLCLink:
     def diagnostics(self):
         """返回并重置通信频率、BufferMode 分布和相邻目标步距，不代表电机执行确认。"""
         with self._lock:
-            now = time.monotonic()
+            now = time.perf_counter()
             elapsed = max(1e-9, now - self._stats_at)
             counters = dict(self._stats_counters)
             dists = self._stats_dists
@@ -1311,7 +1311,7 @@ class PLCLink:
         with self._lock:
             return (self._armed and self._client.connected and not self._stop_event.is_set()
                     and self._motion_safe(self._feedback)
-                    and time.monotonic() - self._feedback.stamp <= TARGET_MAX_AGE)
+                    and time.perf_counter() - self._feedback.stamp <= TARGET_MAX_AGE)
 
     def game_to_physical(self, x, y):
         return _game_to_physical(self.zone, x, y)
@@ -1342,7 +1342,7 @@ class PLCLink:
 
     def motion_snapshot(self):
         """给运行记录用的轴状态快照（游戏坐标）；时间用"距今多久"表示，与时钟源无关。"""
-        now = time.monotonic()
+        now = time.perf_counter()
         with self._lock:
             feedback, sent, armed = self._feedback, self._sent_snapshot, self._armed
         if not feedback.valid:
@@ -1369,7 +1369,7 @@ class PLCLink:
             if self._stop_event.is_set():
                 return False
             self._target = x, y
-            self._target_at = time.monotonic()
+            self._target_at = time.perf_counter()
         return True
 
     def clear_target(self):
@@ -1547,7 +1547,7 @@ class PLCLink:
             self._messages.put(f"PLC 连接失败：{self._client.last_error}")
 
     def _publish(self, status):
-        now = time.monotonic()
+        now = time.perf_counter()
         try:
             x, y = self.physical_to_game(status["x_pos"], status["y_pos"])
         except (ValueError, OverflowError):
@@ -1601,7 +1601,7 @@ class PLCLink:
         if not self.sequence_trigger:
             # ---- 脉冲模式的脉宽纪律（序号模式完全不需要）----
             if self._trigger_high_at is not None:
-                remaining_high = self.trigger_low_time - (time.monotonic() - self._trigger_high_at)
+                remaining_high = self.trigger_low_time - (time.perf_counter() - self._trigger_high_at)
                 if remaining_high > 0.0 and self._stop_event.wait(remaining_high):
                     return
             try:
@@ -1613,13 +1613,13 @@ class PLCLink:
                 return
             self._trigger_high_at = None
         # 状态读取与心跳的耗时已算在低电平内，只补剩余的脉宽。
-        cleared_at = time.monotonic()
+        cleared_at = time.perf_counter()
         status = client.read_status_and_position()
         if status is None or not client.connected:
             self._invalidate_feedback()
             return
         client.keep_alive()
-        status_done = time.monotonic()
+        status_done = time.perf_counter()
         if not client.connected or self._stop_event.is_set():
             self._invalidate_feedback()
             return
@@ -1645,7 +1645,7 @@ class PLCLink:
             fault = (feedback.axis_fault or feedback.comm_lost or feedback.comm_lost_latch
                      or feedback.group_stop or feedback.kinematics_error != 0
                      or (not feedback.plc_echo_ok
-                         and time.monotonic() - self._echo_change_at >= ECHO_TIMEOUT)
+                         and time.perf_counter() - self._echo_change_at >= ECHO_TIMEOUT)
                      or (self._armed and not safe))
             if fault:
                 revoked = self._armed or self._arm_pending
@@ -1659,7 +1659,7 @@ class PLCLink:
                 self._arm_pending = False
             target = (self._target if safe and self._armed
                       and not self._stop_event.is_set()
-                      and time.monotonic() - self._target_at <= TARGET_MAX_AGE else None)
+                      and time.perf_counter() - self._target_at <= TARGET_MAX_AGE else None)
             armed_now = self._armed
         # 延迟排查统计（非必要功能，任何异常都不能影响通信）
         try:
@@ -1707,19 +1707,19 @@ class PLCLink:
         # db_write cannot be guaranteed; no subsequent target remains queued.
         if target is not None:
             # 把"触发低电平"的剩余时间补满，然后才抬起来下发。
-            remaining_low = self.trigger_low_time - (time.monotonic() - cleared_at)
+            remaining_low = self.trigger_low_time - (time.perf_counter() - cleared_at)
             if remaining_low > 0.0 and self._stop_event.wait(remaining_low):
                 return
             # 等待脉宽期间生产者可能更新、清除目标或撤销授权，发送前取最新意图。
             with self._lock:
                 target = (self._target if self._armed and not self._stop_event.is_set()
-                          and time.monotonic() - self._target_at <= TARGET_MAX_AGE
-                          and time.monotonic() - feedback.stamp <= TARGET_MAX_AGE else None)
+                          and time.perf_counter() - self._target_at <= TARGET_MAX_AGE
+                          and time.perf_counter() - feedback.stamp <= TARGET_MAX_AGE else None)
                 target_at = self._target_at
             if target is None:
                 self.cycle_count += 1
                 return
-            send_start = time.monotonic()
+            send_start = time.perf_counter()
             sent_sequence = None
             if self.sequence_trigger:
                 # 序号模式：写目标块 + 递增的序号，PLC 比较后执行，不需要脉宽。
@@ -1734,8 +1734,8 @@ class PLCLink:
             else:
                 client.send_linear_move(*target)
                 if client.connected and client.last_send_state == "sent":
-                    self._trigger_high_at = time.monotonic()
-            send_done = time.monotonic()
+                    self._trigger_high_at = time.perf_counter()
+            send_done = time.perf_counter()
             try:
                 sent_x = getattr(client, "_last_phys_x", None)
                 sent_y = getattr(client, "_last_phys_y", None)
@@ -1778,7 +1778,7 @@ class PLCLink:
         client = self._client
         try:
             while not self._stop_event.is_set():
-                cycle_start = time.monotonic()
+                cycle_start = time.perf_counter()
                 try:
                     if client.connected:
                         self._drain_commands()
@@ -1791,7 +1791,7 @@ class PLCLink:
                     self._messages.put(f"PLC 通信异常：{exc}")
                     self._invalidate_feedback()
                     client.disconnect()
-                remaining = self.period - (time.monotonic() - cycle_start)
+                remaining = self.period - (time.perf_counter() - cycle_start)
                 if remaining > 0:
                     self._stop_event.wait(remaining)
         finally:

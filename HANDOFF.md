@@ -30,6 +30,15 @@
 - 软件链路仿真（理想轴）：击球后 29~53 ms AI 目标对准拦截点，slew 12 时指令位置约 170~200 ms 到位。
 - 新增 `[延迟]` 分段统计（`air_hockey/control/latency.py`）和记录里的 `plc_state`，下次实机运行即可定位瓶颈。
 
-## 6. 下一步待办事项
+## 6. 现场延迟数据（2026-10-20 lag_test，Windows）
+- 相机：漏了 --camera-fast，停在 YUY2 **9.9 FPS**（目标每 100ms 才更新）。已改为默认 MJPG（--camera-slow 退回），并在采集 < 30 FPS 时告警。
+- 时钟：Windows Python < 3.13 的 time.monotonic 只有 15.6ms 分辨率，PLC 线程周期调度因此掉到 22~30Hz、统计值被量化。PLC 侧已全部改用 time.perf_counter（也消除了与视觉时间戳混用两种时钟的问题）。
+- PLC 序号确认 16~31ms、OB1 约 3ms：**PLC 收指令不慢**。
+- 但轴执行有两类问题（全部 MC errorid=0）：
+  1. 已确认的新指令不执行：busy=False 原地不动 13 次，每次 212~409ms（一次 1.6s）；
+  2. 连续运动时轴固定落后指令约 300~420ms（短作业 BufferMode=5 排队）。
+  需要看 PLC 侧触发 MC_MoveLinearAbsolute 的程序（Execute 上升沿处理、Velocity/Acceleration/Jerk 输入、BufferMode）。
+
+## 7. 下一步待办事项
 - [ ] 确保球台现场视野内无红色杂物（如人类球槌、备用球），确保单目标检测器 100% 锁在真球上。
 - [ ] 实机对打测试 35Hz 连续指令下发与快球门线堵截拦截率。

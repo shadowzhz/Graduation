@@ -395,12 +395,12 @@ def test_vision_runtime_ai_uses_fresh_axis_feedback_not_software_position():
     frame = lambda sequence, timestamp: Frame(
         image=np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=timestamp, sequence=sequence
     )
-    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.monotonic(), x=210.0, y=160.0))
+    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.perf_counter(), x=210.0, y=160.0))
     runtime.process_frame(frame(1, 1.0))
     assert ai.positions[0] == (210.0, 160.0)
     assert runtime.ai_current_pos == [210.0, 160.0]
 
-    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.monotonic() - 1, x=999.0, y=999.0))
+    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.perf_counter() - 1, x=999.0, y=999.0))
     runtime.process_frame(frame(2, 1.05))
     assert ai.positions[1] == (210.0, 160.0)
     assert runtime.ai_current_pos != [999.0, 999.0]
@@ -669,7 +669,7 @@ def test_no_puck_updates_feedback_pose_and_smoothly_returns_fallback_to_ready():
     runtime.stalled_phase = "striking"
     runtime.reaction_timer = 0.35
     runtime.target[:] = (400.0, 200.0)
-    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.monotonic(), x=210.0, y=160.0))
+    runtime.set_ai_feedback(SimpleNamespace(valid=True, stamp=time.perf_counter(), x=210.0, y=160.0))
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     result = runtime.process_frame(Frame(image, timestamp=1.0))
     assert result.track is None and result.ai_decision is None

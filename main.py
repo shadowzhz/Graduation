@@ -330,9 +330,10 @@ def run_vision(args):
 
     camera = CameraManager(CameraConfig(
         device=args.camera_device,
-        # --camera-fast 才会在 open 阶段真的把格式协商成 MJPG。
-        # 不加这个开关时行为与原来完全一致（yu yv422 10 fps）。
-        fourcc="MJPG" if args.camera_fast else None,
+        # 默认在 open 阶段就把格式协商成 MJPG（Windows 上不这样做会停在 YUY2 10 FPS）。
+        # 2026-10-20 现场：漏了这个开关时采集只有 9.9 FPS，两种格式下冰壶像素半径相同（约 31px），
+        # 视野一致，所以改为默认开启；--camera-slow 退回旧行为。
+        fourcc=None if args.camera_slow else "MJPG",
     ))
     try:
         camera.start()
@@ -483,13 +484,13 @@ def run_vision(args):
                 plc_gate = None
                 if plc is not None:
                     safe = (feedback is not None and PLCLink._motion_safe(feedback)
-                            and 0 <= time.monotonic() - feedback.stamp <= TARGET_MAX_AGE
+                            and 0 <= time.perf_counter() - feedback.stamp <= TARGET_MAX_AGE
                             and plc.connected)
                     armed = plc.armed
                     plc_gate = armed, safe
                     status_text += f" | PLC armed={armed} safe={safe}"
                     if (not plc.connected or feedback is None or not feedback.valid
-                            or time.monotonic() - feedback.stamp > TARGET_MAX_AGE):
+                            or time.perf_counter() - feedback.stamp > TARGET_MAX_AGE):
                         status_text += " | PLC 未连接/反馈失效：禁止运动"
                     elif feedback.comm_lost_latch:
                         status_text += " | PLC 通信丢失锁存：请现场检查并复位"
@@ -552,6 +553,10 @@ def run_vision(args):
                             f"(检测 {runtime.detect_ms:.1f} ms) | 采集 {capture.current_fps:.1f} FPS"
                             f"{plc_line}"
                         )
+                    if capture.current_fps and capture.current_fps < 30.0:
+                        print(f"[stats] [!] 相机采集只有 {capture.current_fps:.1f} FPS：目标每 "
+                              f"{1000.0 / capture.current_fps:.0f} ms 才更新一次，反应必然慢。"
+                              "检查像素格式是否为 MJPG（启动行会打印协商格式），不要加 --camera-slow")
                     print_latency_report(decision_ages, plc)
         except Exception as exc:
             processing_failure[0] = exc
@@ -753,8 +758,9 @@ def main():
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
     parser.add_argument("--camera-fast", action="store_true",
-                        help="在打开设备时就把像素格式协商成 MJPG。这台相机不加该开关会停在 yuyv422 的 10 fps，"
-                             "加了约为 100 FPS；但 MJPG 模式的视野/清晰度需现场核对，故默认关闭")
+                        help="（兼容保留，现在默认就是）打开设备时把像素格式协商成 MJPG")
+    parser.add_argument("--camera-slow", action="store_true",
+                        help="不在打开时协商 MJPG（旧行为）。这台相机在 Windows 上会停在 YUY2 10 FPS，仅排查用")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正（必须同时 --disable-homography）")

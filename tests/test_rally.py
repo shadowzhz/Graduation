@@ -365,7 +365,7 @@ def test_occlusion_hold_is_published_after_track_deletion_and_expires():
             cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
         feedback = PLCFeedback(stamp=timestamp, valid=True, x=400, y=220,
                                x_en=True, y_en=True, axes_ready=True)
-        with patch("air_hockey.app.vision_runtime.time.monotonic", return_value=timestamp):
+        with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=timestamp):
             runtime.set_ai_feedback(feedback)
             result = runtime.process_frame(Frame(image, timestamp=timestamp, sequence=sequence))
             tick(controller, result, feedback=feedback)
@@ -380,7 +380,7 @@ def test_occlusion_hold_is_published_after_track_deletion_and_expires():
 
     expired = timestamp + OCCLUSION_HOLD_SECONDS + 0.1
     feedback = replace(feedback, stamp=expired)
-    with patch("air_hockey.app.vision_runtime.time.monotonic", return_value=expired):
+    with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=expired):
         runtime.set_ai_feedback(feedback)
         result = runtime.process_frame(Frame(image, timestamp=expired, sequence=sequence + 1))
         tick(controller, result, feedback=feedback)

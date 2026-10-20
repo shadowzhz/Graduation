@@ -575,12 +575,12 @@ def test_stale_target_does_not_emit_motion_or_revoke_arm():
     try:
         assert client.connect()
         link._echo_seen = True
-        link._echo_change_at = time.monotonic()
+        link._echo_change_at = time.perf_counter()
         link._last_plc_heartbeat = False
         link._armed = True
         link.set_target(450, 180)
         with link._lock:
-            link._target_at = time.monotonic() - protocol.TARGET_MAX_AGE - 0.01
+            link._target_at = time.perf_counter() - protocol.TARGET_MAX_AGE - 0.01
         link._cycle()
         assert client.transport.moves == []
         assert link.armed
@@ -711,7 +711,7 @@ def test_native_motion_error_invalidates_worker_feedback_and_arm():
         try:
             assert client.connect()
             link._echo_seen = True
-            link._echo_change_at = time.monotonic()
+            link._echo_change_at = time.perf_counter()
             link._last_plc_heartbeat = False
             link._armed = True
             link.set_target(450, 180)
@@ -771,7 +771,7 @@ def _clocked_plc(period=0.01, pulse=0.01):
             clock[0] += 0.002
             return super().db_write(*args)
 
-    with memory_binding(), patch.object(protocol.time, "monotonic", side_effect=lambda: clock[0]):
+    with memory_binding(), patch.object(protocol.time, "perf_counter", side_effect=lambda: clock[0]):
         client = MemoryPLC()
         client.transport = TimedS7()
         assert client.connect()
@@ -1190,8 +1190,8 @@ def test_advance_braking_prevents_accel_overshoot_and_warns():
             client.actual_busy = busy
 
             sim_time = 1000.0
-            orig_time = protocol.time.monotonic
-            protocol.time.monotonic = lambda: sim_time
+            orig_time = protocol.time.perf_counter
+            protocol.time.perf_counter = lambda: sim_time
             gx, gy = client.physical_to_game(175.0, 0.0)
             commands = []
             try:
@@ -1203,7 +1203,7 @@ def test_advance_braking_prevents_accel_overshoot_and_warns():
                         client._commit_move(px, py, bm, dist)
                         commands.append(px)
             finally:
-                protocol.time.monotonic = orig_time
+                protocol.time.perf_counter = orig_time
 
             assert commands, "Must produce commands"
             assert max(commands) <= 175.0 + 1e-6
@@ -1254,7 +1254,7 @@ def test_prepare_move_reports_step_actually_sent_after_accel_limit():
                           period=0.03, blend_threshold_mm=10.0)
     client._last_phys_x, client._last_phys_y = 0.0, 0.0
     client._last_step = (20.0, 0.0)
-    client._last_send_at = time.monotonic() - 0.03
+    client._last_send_at = time.perf_counter() - 0.03
     goal = client.physical_to_game(-100.0, 0.0)
     phys_x, phys_y, _mode, distance = client._prepare_move(*goal)
     sent = max(abs(phys_x), abs(phys_y))

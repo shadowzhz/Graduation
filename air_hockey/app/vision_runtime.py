@@ -239,7 +239,7 @@ class VisionRuntime:
         self._ai_feedback_position = None
         if feedback is None or not feedback.valid:
             return
-        age = time.monotonic() - feedback.stamp
+        age = time.perf_counter() - feedback.stamp
         if 0.0 <= age <= 0.25 and all(math.isfinite(value) for value in (feedback.x, feedback.y)):
             self._ai_feedback_position = (feedback.x, feedback.y)
 

@@ -74,7 +74,7 @@ class _LiveTable:
             stamp=timestamp, valid=True, x=self.mallet[0], y=self.mallet[1],
             x_en=True, y_en=True, axes_ready=True, plc_echo_ok=True,
         )
-        with patch("air_hockey.app.vision_runtime.time.monotonic", return_value=timestamp):
+        with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=timestamp):
             self.runtime.set_ai_feedback(feedback)
             result = self.runtime.process_frame(Frame(image, timestamp=timestamp, sequence=self.sequence))
         result.rally = self.controller.update(result, now=timestamp, feedback=feedback)

@@ -45,8 +45,8 @@ class OpenCVBackend:
         # 只有在 VideoCapture() 构造时把 FOURCC 一起传进去，才能真正切到 MJPG
         # （实测 read 中位约 6ms，约 100 FPS 进管线）。
         #
-        # 但该格式的实际视野/清晰度需要在现场核对后再决定是否默认启用，
-        # 所以这里做成显式开关（main.py --camera-fast），默认不变。
+        # 主程序默认传 MJPG（2026-10-20 现场核对：两种格式冰壶像素半径相同、视野一致），
+        # main.py --camera-slow 时 fourcc 为空，走下面的旧路径。
         fast_fourcc = getattr(self.config, "fourcc", None)
         if fast_fourcc:
             params = [

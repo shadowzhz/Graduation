@@ -34,8 +34,8 @@ class CameraConfig:
     #
     # 为 None 时保持原行为：先打开再 set —— 对这台球台相机是无声失败的，
     # 会停在 yuyv422 的 10 fps。设成 "MJPG" 才真的切到 MJPG 高速模式
-    # （实测约 100 FPS 进管线），但该模式的视野/清晰度需现场核对，
-    # 所以主程序用 --camera-fast 显式打开，默认不变。
+    # （实测约 100 FPS 进管线）。
+    # 主程序默认传 "MJPG"（2026-10-20 起），--camera-slow 时传 None 退回旧行为。
     fourcc: Optional[str] = None
 
 @dataclass

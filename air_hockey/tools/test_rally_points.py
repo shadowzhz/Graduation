@@ -124,7 +124,7 @@ class PointTest:
 
     def command(self, command, *, now=None):
         command = command.strip().lower()
-        now = time.monotonic() if now is None else now
+        now = time.perf_counter() if now is None else now
         if command == "q":
             self.clear_pending()
             self.exit_requested = True
@@ -161,7 +161,7 @@ class PointTest:
     def poll(self, *, now=None):
         if self.pending is None:
             return None
-        now = time.monotonic() if now is None else now
+        now = time.perf_counter() if now is None else now
         feedback = self.link.feedback
         failure = self.safety_failure(feedback, now)
         if failure:
@@ -183,7 +183,7 @@ class PointTest:
 
     def status(self):
         feedback = self.link.feedback
-        failure = self.safety_failure(feedback, time.monotonic())
+        failure = self.safety_failure(feedback, time.perf_counter())
         target_text = "target=none"
         if self.pending is not None:
             name, target = self.points[self.pending]
@@ -228,9 +228,9 @@ def run_live(link, points):
             if message:
                 print(message)
                 last_status = 0.0
-            if time.monotonic() - last_status >= 0.5:
+            if time.perf_counter() - last_status >= 0.5:
                 print(session.status(), flush=True)
-                last_status = time.monotonic()
+                last_status = time.perf_counter()
             try:
                 command = commands.get(timeout=DEFAULT_PERIOD)
             except queue.Empty:
