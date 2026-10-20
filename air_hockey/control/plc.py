@@ -875,8 +875,9 @@ class PLCInterface:
             #
             # 现在大跳变时发 1（附加运动）= 明确的"走完当前再走新的"，语义最接近原来
             # 想要的中止重开，而且是**合法值**。
-            # 限速与混合阈值相同时，浮点尾差不能误切成需要停稳的附加运动。
-            buffer_mode = 1 if distance > self.blend_threshold_mm + COORD_EPSILON else 5
+            # 限速开启时，所有斜坡步均由软件规划保证连续平滑，统一保持 BufferMode=5（混合滤波），
+            # 彻底杜绝中途停稳造成的卡顿；只有未开启限速（slew<=0）且步距超阈值时才发模式 1。
+            buffer_mode = 1 if (self.target_slew_mm <= 0.0 and distance > self.blend_threshold_mm + COORD_EPSILON) else 5
         else:
             distance = None
             buffer_mode = 5

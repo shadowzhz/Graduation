@@ -388,3 +388,28 @@ def test_occlusion_hold_is_published_after_track_deletion_and_expires():
     assert request is not None
     assert link._target == READY_POSITION
     assert not link.armed
+
+def test_midline_hysteresis_and_velocity_deadband_prevent_chatter():
+    """验证中线迟滞带与速度死区彻底消除边界高频横跳。"""
+    controller = RallyController()
+
+    # 1. 冰壶从中线切入机器半场立即进入进攻态
+    dec1 = tick(controller, observation(1.0, x=300, y=379.0, vy=0))
+    assert dec1.state == RallyState.ATTACKING
+
+    # 2. 冰壶在 380~392 之间微弱漂移，状态必须锁死在进攻态，严禁跳回 DEFENDING
+    for y in (381.0, 385.0, 391.0):
+        dec = tick(controller, observation(1.1, x=300, y=y, vy=0))
+        assert dec.state == RallyState.ATTACKING, f"y={y} 应保持 ATTACKING"
+
+    # 3. 冰壶退过 392 之后，才平滑切回 DEFENDING
+    dec_def = tick(controller, observation(1.3, x=300, y=395.0, vy=0))
+    assert dec_def.state == RallyState.DEFENDING
+
+    # 4. 在人类半场，冰壶速度在零点附近波动（vy=10）不应误判为 outgoing 放弃防守
+    dec_slow = tick(controller, observation(1.4, x=450, y=500.0, vy=10.0))
+    assert dec_slow.state == RallyState.DEFENDING
+
+    # 5. 只有明确向玩家球门飞去（vy > 20）才触发回位 READY
+    dec_out = tick(controller, observation(1.5, x=450, y=500.0, vy=100.0))
+    assert dec_out.state in (RallyState.RECOVERING, RallyState.WAITING) and dec_out.target == READY_POSITION

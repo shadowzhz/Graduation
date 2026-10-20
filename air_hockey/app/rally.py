@@ -63,6 +63,11 @@ DEFAULT_DEFENSE_FORWARD_LIMIT = None
 OCCLUSION_HOLD_SECONDS = 1.0       # 刚丢多久之内算"可能只是被挡"
 OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡的"（球台单位，约 139mm）
 
+# 迟滞与防抖参数：消除状态机在分界线和速度零点附近的高频横跳
+MIDLINE_HYSTERESIS = 12.0          # 中线迟滞带（球台单位，约 11mm），进攻态需退至 392 才解除
+OUTGOING_VEL_THRESHOLD = 20.0      # 人类半场离开球门的速度阈值，低于此值不提前放弃防守
+STATE_DWELL_SECONDS = 0.08         # 最小状态驻留时间（80ms），防止单帧图像噪点引起状态来回抽搐
+
 class RallyController:
     def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT,
                  reachable_bounds: tuple | None = None):
@@ -81,6 +86,8 @@ class RallyController:
         self._last_target = None
         self._last_seen_at = 0.0
         self._last_active_state = RallyState.WAITING
+        self._state_changed_at = 0.0
+        self._last_vy = 0.0
 
     def can_retrieve(self, stone) -> bool:
         """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
@@ -123,23 +130,34 @@ class RallyController:
             target = None
             reason = "invalid/stale puck state; target cleared"
         elif result.track_confirmed and stone is not None:
-            direction = ("still" if stone.speed <= core.STONE_STOP_SPEED else
-                         "incoming" if stone.vy < 0 else "outgoing" if stone.vy > 0 else "lateral")
-            # 用上面已经带 STONE_STOP_SPEED 死区的 direction 判断，
-            # 不要用 stone.vy 的原始符号。
-            #
-            # stone.vy 是卡尔曼滤波的估计值，静止冰壶的 vy 会在 0 附近抖正负。
-            # 用符号判断会让这一支每帧翻转：vy 略正走 else（状态留在 RECOVERING、
-            # target 保持 READY），vy 略负走 if（状态 DEFENDING、target 换成 AI 目标）。
-            # 实机 165FPS 下实测目标在 (300,140)/(338,140) 之间交替 207/102 次，
-            # DEFENDING<->RECOVERING 各 119/118 次；机械臂因此被反复中止、几乎不动。
-            #
-            # direction 为 "still" 时（速度低于 STONE_STOP_SPEED）按"未知速度，
-            # 先准备防守"处理，这与 test_human_half_unknown_velocity_* 的约定一致。
-            machine_half = stone.y <= core.RINK_CENTER_Y
+            # 速度方向判断引入死区：在真人半场只有明确朝对方门滑行（vy > 20）才算 outgoing；
+            # 速度在零点附近波动或横向滑动时维持防守准备，避免水平横跳。
+            if stone.speed <= core.STONE_STOP_SPEED:
+                direction = "still"
+            elif stone.vy > OUTGOING_VEL_THRESHOLD:
+                direction = "outgoing"
+            elif stone.vy < -core.STONE_STOP_SPEED:
+                direction = "incoming"
+            else:
+                direction = "lateral"
+
+            # 中线空间迟滞：若当前正在进攻，冰壶需退回到中线以远（> 380 + 12 = 392）才解除进攻；
+            # 尚未进攻时，冰壶一旦踏入机器半场（<= 380）立即触发进攻。
+            if previous == RallyState.ATTACKING:
+                machine_half = stone.y <= (core.RINK_CENTER_Y + MIDLINE_HYSTERESIS)
+            else:
+                machine_half = stone.y <= core.RINK_CENTER_Y
+
             puck_stopped = direction == "still"
             if machine_half or direction != "outgoing":
-                self.state = RallyState.ATTACKING if machine_half else RallyState.DEFENDING
+                # 状态防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
+                desired_state = RallyState.ATTACKING if machine_half else RallyState.DEFENDING
+                if (previous in (RallyState.ATTACKING, RallyState.DEFENDING)
+                        and desired_state != previous
+                        and now - self._state_changed_at < STATE_DWELL_SECONDS):
+                    self.state = previous
+                else:
+                    self.state = desired_state
                 decision = result.ai_decision
                 if decision is None or not all(math.isfinite(v) for v in (decision.target_x, decision.target_y)):
                     target = None
@@ -207,7 +225,10 @@ class RallyController:
                 age = now - self._last_seen_at
                 gap = math.dist(position, self._last_target)
                 reason = f"no puck; READY (hold rejected: age={age:.0f}s gap={gap:.0f})"
-        transitions = (() if self.state == previous else
-                       (f"{previous.value} -> {self.state.value}: {reason}",))
+        if self.state != previous:
+            self._state_changed_at = now
+            transitions = (f"{previous.value} -> {self.state.value}: {reason}",)
+        else:
+            transitions = ()
         return RallyDecision(self.state, target, reason, direction, position, source, transitions,
                              held_target=held_target)
