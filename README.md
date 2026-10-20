@@ -41,8 +41,8 @@ TrajectoryPredictor      微步物理：摩擦减速 + 弹墙 + 门柱 + 进球
 AirHockeyAI              守门 / 前压 / 回防决策
   │  AIDecision(target_x, target_y, ...)
   ▼
-RallyController         直接对打：WAITING / DEFENDING / ATTACKING / RECOVERING
-  │  直接发送 AI 防守/击球目标；状态用于显示，不额外等待确认或回位
+RallyController         纯连续物理导引（架空模式决策）：
+  │  直接由物理连续导引生成目标；WAITING/DEFENDING/ATTACKING/RECOVERING 退化为纯观察器标签
   ▼
 PlcControlAdapter        AI 半场限幅 + 时间戳
   │  PlcTarget（固定 600×760 场地逻辑坐标）
@@ -144,7 +144,7 @@ python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 - 机器半场（y≤380）：直接发送现有 AI 的击球目标，包括静止球、分界线附近的球和回位途中收到的球。身后球继续使用侧移、后退、对齐、向真人方向击打的现有流程，不从前面把球推入自家球门。
 - 球返回真人半场：退回防守线；方向明确远离机器时请求 READY `(300,139.52)`。没有回球连帧计数、重新武装或五秒回合等待；下一球可立即更新目标。
 
-实时 AI 关闭仿真反应延迟与随机误差，使用完整预测横坐标，攻击范围覆盖机器半场；仿真难度、Estimator/Predictor 算法和物理参数不变。WAITING/DEFENDING/ATTACKING/RECOVERING 只是当前动作标签，不是运动许可门槛。PLC 新鲜实际位置优先，无 PLC 时使用现有软件球槌位置。机械不可达或已经进入球门的球仍不能保证救回。
+实时 AI 关闭仿真反应延迟与随机误差，使用完整预测横坐标，攻击范围覆盖机器半场；仿真难度、Estimator/Predictor 算法和物理参数不变。已架空 RallyController 状态机的离散模式裁决，控制链路全面转由纯连续物理导引驱动，WAITING/DEFENDING/ATTACKING/RECOVERING 彻底退化为观察器显示标签，绝不作为截断或篡改运动目标的门禁。PLC 新鲜实际位置优先，无 PLC 时使用现有软件球槌位置。机械不可达或已经进入球门的球仍不能保证救回。
 
 接 PLC 时，回收点和到位判断使用 `COMMAND_*` 映射的可请求范围，并保留侧移、回撤、对齐、击打流程；侧向接触不要求先退开完整的两半径加额外间距。确实无法在冰壶朝自家门一侧接触时清目标并提示人工移球，不盲目直穿冰壶回 READY。命令余量、序号握手、AI 提前量和物理参数本轮不变；实际位置越过已配置的 `PHYSICAL_*` 软限位才触发越界撤销，不能把仍在软限位内的旧位置误判为失控。
 

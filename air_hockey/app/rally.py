@@ -1,6 +1,9 @@
-"""实时对打：直接使用 AI 防守/击球目标，状态只用于显示。"""
+"""纯连续物理导引控制器。
 
-from __future__ import annotations
+架空离散状态机的模式切换，目标由连续物理导引函数直接生成。
+RallyState（WAITING / DEFENDING / ATTACKING / RECOVERING）纯粹作为显示与诊断的状态观察器标签，
+彻底杜绝模式切换对运动目标的离散截断与机械顿挫。
+"""
 
 import math
 from dataclasses import dataclass
