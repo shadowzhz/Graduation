@@ -18,6 +18,15 @@ AI_SERVE_SETUP_GAP = 6.0
 # 2026-10-13 现场要求"全部追球"，所以关掉。想恢复防守式保护把它改回 True。
 GUARD_OWN_GOAL_NEAR_LINE = False
 
+# 冲门快球"守门线"模式的迟滞。守门线（Y=防守线）和追球（Y≈冰壶）两种目标在 Y 上
+# 相差约 160 单位（≈210mm），判据若只是单个阈值，速度估计的噪声就会让 Y 目标在两者
+# 之间来回跳（仿真：±15 速度噪声下 1.2s 内跳 37 次），实机表现为前后急刹、反复折返。
+# 进入要求明确冲门，退出要求明确减速或明确偏离球门，中间保持上一次的判断。
+FAST_SHOT_ENTER_VY = -60.0
+FAST_SHOT_EXIT_VY = -20.0
+FAST_SHOT_ENTER_MARGIN = core.STONE_RADIUS
+FAST_SHOT_EXIT_MARGIN = core.STONE_RADIUS * 3.0
+
 
 @dataclass
 class AIDecision:
@@ -47,6 +56,8 @@ class AirHockeyAI:
         # 可覆盖范围（left, right, top, bottom，游戏坐标）：由 main.py 从 PLC 的
         # 实际行程灌进来（plc.reachable_bounds）。None = 不额外限制。
         self.recovery_bounds = recovery_bounds
+        # 冲门快球"守门线"模式（带迟滞，见 FAST_SHOT_* 常量）
+        self._goal_guard = False
 
     def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
         """按难度反应延迟刷新目标。"""
@@ -94,6 +105,7 @@ class AirHockeyAI:
         stone_near_center = state.stone.y <= core.RINK_CENTER_Y + core.STONE_RADIUS + 2.0
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
         if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
+            self._goal_guard = False
             # （safe_* 已经在上面按 recovery_bounds 收窄过了，这里不用再收一次）
             return self._choose_stalled_stone_target(state, safe_left, safe_right, safe_top, safe_bottom)
         stalled_stone_phase = "idle"
@@ -101,6 +113,7 @@ class AirHockeyAI:
 
         stone_in_attack_zone = state.stone.y <= difficulty.attack_line
         if stone_speed <= core.STONE_STOP_SPEED and stone_near_center:
+            self._goal_guard = False
             # ★★★ 关键：目标"冰壶圆心"物理上做不到 —— 球槌和冰壶都是实体，
             # 不可能占同一个圆心。轴开到旁边（约 5 单位）就被死区停住，
             # 于是"顶着球不动"：日志里同一颗球在 (96,238) 附近被回收了 7 轮
@@ -151,17 +164,22 @@ class AirHockeyAI:
                 stalled_stone_phase,
             )
 
-        # 冲门快球拦截优先：当冰壶冲向我方球门时（vy < -50 mm/s 且在球槌前方），
-        # 且预判落点落在大门有效防御区域内（真冲门）：
-        # 严禁前扑迎球（迎球会缩短反应时间导致来不及拦截而漏球）；
-        # 必须坚守在门线附近（Y = ai_home_y），提前横向移动到预判截获点堵截。
-        if state.stone.vy < -50.0 and not stone_behind_ai:
+        # 冲门快球拦截优先：冰壶冲向我方球门（vy 足够负、在球槌前方），
+        # 预测轨迹真的能滑到防守线，且穿过防守线的位置落在球门有效防御区内：
+        # 不前扑迎球（迎球会缩短反应时间导致漏球），守在防守线（Y = ai_home_y）
+        # 提前横移到预判截获点堵截。进入/退出带迟滞，见 FAST_SHOT_* 常量。
+        vy_limit = FAST_SHOT_EXIT_VY if self._goal_guard else FAST_SHOT_ENTER_VY
+        margin = FAST_SHOT_EXIT_MARGIN if self._goal_guard else FAST_SHOT_ENTER_MARGIN
+        fast_shot_on_goal = False
+        if state.stone.vy < vy_limit and not stone_behind_ai:
             if prediction is None:
                 prediction = self.predictor.predict(state.stone)
-            predicted_goal_x = self._predict_stone_x(state, state.ai_home_y, prediction)
-            fast_shot_on_goal = (core.GOAL_LEFT - core.STONE_RADIUS <= predicted_goal_x <= core.GOAL_RIGHT + core.STONE_RADIUS)
-        else:
-            fast_shot_on_goal = False
+            # 滑不到防守线就停下的慢球不算冲门 —— 这种球应该上前击打
+            reaches_line = any(point_y <= state.ai_home_y for _x, point_y in prediction.trajectory)
+            if reaches_line:
+                predicted_goal_x = self._predict_stone_x(state, state.ai_home_y, prediction)
+                fast_shot_on_goal = (core.GOAL_LEFT - margin <= predicted_goal_x <= core.GOAL_RIGHT + margin)
+        self._goal_guard = fast_shot_on_goal
         if fast_shot_on_goal:
             blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_goal_x * difficulty.prediction
             target_x = clamp(blended_x + error, safe_left, safe_right)

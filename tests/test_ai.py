@@ -274,3 +274,39 @@ def test_serve_phase_switches_to_striking_after_arrival():
     state.ai_x = layout.RINK_CENTER_X
     state.ai_y = layout.RINK_CENTER_Y - layout.MALLET_RADIUS - layout.STONE_RADIUS - 6.0
     assert ai.advance_serve_phase(state, 1 / 60) == "striking"
+
+
+LIVE = replace(layout.DIFFICULTIES["普通"], aim_error=0.0, prediction=1.0,
+               reaction_delay=0.0, attack_line=layout.RINK_CENTER_Y)
+
+
+def _live_state(stone_x, stone_y, vx, vy):
+    return replace(make_state(stone_x, stone_y, vx, vy), difficulty=LIVE)
+
+
+def test_fast_shot_guard_has_hysteresis_against_velocity_noise():
+    """冲门球的预测穿线点在门柱附近抖动时，Y 目标不能在防守线和冰壶之间来回跳。"""
+    home = ai_home_y()
+    inside = layout.GOAL_RIGHT + layout.STONE_RADIUS * 0.5    # 进入门限内
+    wobble = layout.GOAL_RIGHT + layout.STONE_RADIUS * 2.0    # 进入门限外、退出门限内
+    outside = layout.GOAL_RIGHT + layout.STONE_RADIUS * 4.0   # 明确偏离球门
+    ai = AirHockeyAI()
+    # 没进入守门模式时，门柱外 2R 的球不算冲门（上前击打）
+    assert ai.choose_target(_live_state(wobble, 330.0, 0.0, -300.0)).target_y > home + 100.0
+    # 明确冲门：进入守门线模式；之后穿线点在门柱附近抖动也保持
+    for x in (inside, wobble, inside, wobble, wobble):
+        assert ai.choose_target(_live_state(x, 330.0, 0.0, -300.0)).target_y == home
+    # 明确偏离球门才退出
+    assert ai.choose_target(_live_state(outside, 330.0, 0.0, -300.0)).target_y > home + 100.0
+    # 速度迟滞：守门模式下 vy 落在进入阈值以上、退出阈值以下仍保持
+    ai = AirHockeyAI()
+    assert ai.choose_target(_live_state(300.0, 200.0, 0.0, -300.0)).target_y == home
+    assert ai.choose_target(_live_state(300.0, 180.0, 0.0, -100.0)).target_y == home
+    assert ai.choose_target(_live_state(300.0, 150.0, 0.0, -45.0)).target_y == home
+
+
+def test_slow_ball_that_stops_before_defense_line_is_attacked_not_guarded():
+    """vy 足够负但滑不到防守线就会停下的慢球，应上前击打而不是退守。"""
+    ai = AirHockeyAI()
+    decision = ai.choose_target(_live_state(300.0, 330.0, 0.0, -70.0))
+    assert decision.target_y > ai_home_y() + 100.0
