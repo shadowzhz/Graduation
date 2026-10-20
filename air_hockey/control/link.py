@@ -25,7 +25,6 @@ from .protocol import (
 
 DEFAULT_PERIOD = 0.03
 RECONNECT_INTERVAL = 2.0
-TRIGGER_LOW_TIME = 0.010
 TARGET_MAX_AGE = 0.25
 ECHO_TIMEOUT = 1.0
 
@@ -34,8 +33,8 @@ class PLCLink:
     """Single-owner worker; start/stop and target publication do no network I/O."""
 
     def __init__(self, ip, rack=0, slot=1, period=DEFAULT_PERIOD,
-                 client_factory=None, zone=None, trigger_low_time=TRIGGER_LOW_TIME,
-                 blend_threshold_mm=BUFFER_MODE_IMMEDIATE_MM, sequence_trigger=False,
+                 client_factory=None, zone=None,
+                 blend_threshold_mm=BUFFER_MODE_IMMEDIATE_MM,
                  target_slew_mm=0.0, target_accel_mm_s2=0.0, limits=None):
         self.ip = ip
         self.zone = validated_zone(DEFAULT_ZONE if zone is None else zone)
@@ -44,17 +43,6 @@ class PLCLink:
         self.period = max(0.005, float(period))
         if not math.isfinite(self.period):
             raise ValueError("PLC period must be finite")
-        # 高、低电平都要跨过 PLC 扫描；仅保证低电平会在高通信频率下漏掉上升沿。
-        self.trigger_low_time = max(0.0, float(trigger_low_time))
-        if not math.isfinite(self.trigger_low_time):
-            raise ValueError("trigger_low_time must be finite")
-        self._trigger_high_at = None
-        # ★ 序号握手模式：用序号代替脉冲触发，彻底不受脉宽/扫描周期限制。
-        #   见 COMM_SEQ_OFFSET 的说明和 PLC 侧需要的改动。
-        self.sequence_trigger = bool(sequence_trigger)
-        # 序号种子取当前时间：避免"app 重启后序号恰好和 PLC 里记的重合，
-        # 第一条指令被当成旧指令丢掉"这种极难查的问题。
-        self._sequence = int(time.time()) % 1000000 + 1
         self._sequence_sent = 0
         self._requires_snap7 = client_factory is None
         self.blend_threshold_mm = float(blend_threshold_mm)
@@ -94,7 +82,7 @@ class PLCLink:
         # 统计实际频率、同点跳过、模式分布和目标步距；不把它们直接当作 801 的原因。
         self._stats_at = time.perf_counter()
         self._stats_cycles = 0
-        self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0,
+        self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "backlog": 0, "other": 0,
                                 "mode1": 0, "mode5": 0}
         self._stats_dists = []
         # 现场延迟排查：PC → PLC → 轴 分段统计（见 control/latency.py）
@@ -110,7 +98,6 @@ class PLCLink:
             self._feedback = PLCFeedback()
             self._armed = False
             self._arm_pending = False
-            self._trigger_high_at = None
             while not self._commands.empty():
                 try:
                     self._commands.get_nowait()
@@ -167,12 +154,12 @@ class PLCLink:
             cycles = self.cycle_count - self._stats_cycles
             self._stats_at = now
             self._stats_cycles = self.cycle_count
-            self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0,
+            self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "backlog": 0, "other": 0,
                                     "mode1": 0, "mode5": 0}
             self._stats_dists = []
             # 序号模式的诊断：PLC 已处理到哪
             seq_ack = self._feedback.seq_ack
-            seq_now = self._sequence
+            seq_now = getattr(self._client, "sequence", None)
             seq_sent = self._sequence_sent
 
         mode_total = counters["mode1"] + counters["mode5"]
@@ -182,6 +169,8 @@ class PLCLink:
 
         text = (f"周期 {cycles / elapsed:5.1f}Hz | 下发 {counters['sent'] / elapsed:5.1f}Hz | "
                 f"死区跳过 {counters['deadzone']} | 执行中同点跳过 {counters['pending']}")
+        if counters["backlog"]:
+            text += f" | 轴积压暂停追加 {counters['backlog']}"
         if mode_total:
             stop_pct = 100.0 * counters["mode1"] / mode_total
             text += (f" | BufferMode 混合 {counters['mode5']} / 附加停稳 {counters['mode1']}"
@@ -216,17 +205,16 @@ class PLCLink:
                 text += "  ← 频繁要求够不到的位置，机械臂长期顶在命令限位上"
         if clamp_stats is not None:
             clamp_stats.reset()
-        # ★ 序号模式的直接指标：PLC 落后几条指令。落后多 = 它跟不上。
-        if self.sequence_trigger:
-            if seq_ack is None:
-                text += f" | 序号模式 已发 {seq_sent} 条（PLC 未回报 ack，检查 DB1.146）"
-            else:
-                # seq_now 是**序号值**（从时间戳起算），seq_sent 是**发送条数** ——
-                # 两者不是一回事，显示时要分清，否则看起来像 "已发 403 / PLC 939123"。
-                lag = (seq_now - seq_ack) & 0x7FFFFFFF
-                text += f" | 序号模式 已发 {seq_sent} 条 / PLC 落后 {lag}"
-                if lag > 3:
-                    text += "  ← PLC 跟不上，指令在积压"
+        # ★ 序号握手的直接指标：PLC 落后几条指令。落后多 = 它跟不上。
+        if seq_ack is None or seq_now is None:
+            text += f" | 序号 已发 {seq_sent} 条（PLC 未回报 ack，检查 DB1.146）"
+        else:
+            # seq_now 是**序号值**（从时间戳起算），seq_sent 是**发送条数** ——
+            # 两者不是一回事，显示时要分清，否则看起来像 "已发 403 / PLC 939123"。
+            lag = (seq_now - seq_ack) & 0x7FFFFFFF
+            text += f" | 序号 已发 {seq_sent} 条 / PLC 落后 {lag}"
+            if lag > 3:
+                text += "  ← PLC 跟不上，指令在积压"
         # ★★ 用**实测周期**做安全自检 —— 不要用 --plc-rate 名义值。
         #    实测常只有 60~70Hz（S7 往返耗时主导），而名义可能是 200：
         #    用名义值算会把 slew 12 误判成 2400mm/s（制动 192mm）而狂报警，
@@ -484,7 +472,6 @@ class PLCLink:
             self._target_at = 0.0
             self._armed = False
             self._arm_pending = False
-            self._trigger_high_at = None
             if self._feedback.valid:
                 self._feedback = PLCFeedback()
             # Commands from the old connection must not be replayed on reconnect.
@@ -567,22 +554,7 @@ class PLCLink:
 
     def _cycle(self):
         client = self._client
-        if not self.sequence_trigger:
-            # ---- 脉冲模式的脉宽纪律（序号模式完全不需要）----
-            if self._trigger_high_at is not None:
-                remaining_high = self.trigger_low_time - (time.perf_counter() - self._trigger_high_at)
-                if remaining_high > 0.0 and self._stop_event.wait(remaining_high):
-                    return
-            try:
-                client.clear_trigger()
-            except Exception as exc:
-                self._messages.put(f"PLC 清除运动触发失败：{exc}")
-                client.disconnect()
-                self._invalidate_feedback()
-                return
-            self._trigger_high_at = None
-        # 状态读取与心跳的耗时已算在低电平内，只补剩余的脉宽。
-        cleared_at = time.perf_counter()
+        cycle_start = time.perf_counter()
         status = client.read_status_and_position()
         if status is None or not client.connected:
             self._invalidate_feedback()
@@ -633,7 +605,7 @@ class PLCLink:
         # 延迟排查统计（非必要功能，任何异常都不能影响通信）
         try:
             self.latency.on_status(
-                status_done, (status_done - cleared_at) * 1000.0,
+                status_done, (status_done - cycle_start) * 1000.0,
                 (float(status["x_pos"]), float(status["y_pos"])), armed=armed_now,
                 busy=feedback.busy, seq_ack=feedback.seq_ack,
                 remaining=feedback.mc_remaining, ob1_ms=feedback.ob1_ms)
@@ -675,11 +647,7 @@ class PLCLink:
         # Network I/O is never under the lock. Cancellation of an already executing
         # db_write cannot be guaranteed; no subsequent target remains queued.
         if target is not None:
-            # 把"触发低电平"的剩余时间补满，然后才抬起来下发。
-            remaining_low = self.trigger_low_time - (time.perf_counter() - cleared_at)
-            if remaining_low > 0.0 and self._stop_event.wait(remaining_low):
-                return
-            # 等待脉宽期间生产者可能更新、清除目标或撤销授权，发送前取最新意图。
+            # 状态读取期间生产者可能更新、清除目标或撤销授权，发送前取最新意图。
             with self._lock:
                 target = (self._target if self._armed and not self._stop_event.is_set()
                           and time.perf_counter() - self._target_at <= TARGET_MAX_AGE
@@ -690,20 +658,11 @@ class PLCLink:
                 return
             send_start = time.perf_counter()
             sent_sequence = None
-            if self.sequence_trigger:
-                # 序号模式：写目标块 + 递增的序号，PLC 比较后执行，不需要脉宽。
-                # ★ 序号只在**真的下发成功**时推进 —— 死区跳过不能推进，
-                #   否则 PLC 会拿同一条目标重复触发。
-                candidate = self._sequence + 1
-                client.send_linear_move_sequence(target[0], target[1], candidate)
-                if client.connected and client.last_send_state == "sent":
-                    self._sequence = candidate
-                    self._sequence_sent += 1
-                    sent_sequence = candidate
-            else:
-                client.send_linear_move(*target)
-                if client.connected and client.last_send_state == "sent":
-                    self._trigger_high_at = time.perf_counter()
+            # ★ 序号只在**真的下发成功**时推进（interface 内部），死区/积压跳过不推进。
+            client.send_linear_move(*target)
+            if client.connected and client.last_send_state == "sent":
+                self._sequence_sent += 1
+                sent_sequence = getattr(client, "sequence", None)
             send_done = time.perf_counter()
             try:
                 sent_x = getattr(client, "_last_phys_x", None)
@@ -735,6 +694,8 @@ class PLCLink:
                         self._stats_counters["deadzone"] += 1
                     elif state == "pending":
                         self._stats_counters["pending"] += 1
+                    elif state == "backlog":
+                        self._stats_counters["backlog"] += 1
                     else:
                         self._stats_counters["other"] += 1
             except Exception:
@@ -766,10 +727,6 @@ class PLCLink:
         finally:
             self._invalidate_feedback()
             if client.connected:
-                try:
-                    client.clear_trigger()
-                except Exception as exc:
-                    self._messages.put(f"PLC 清除运动触发失败，请现场确认轴状态：{exc}")
                 if self._disable_on_stop:
                     try:
                         if not client.disable_axes():

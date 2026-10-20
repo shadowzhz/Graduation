@@ -45,7 +45,6 @@ def build_parser():
 
     # 模式开关：默认运行视觉模式；传入 --sim / --game 运行仿真游戏
     parser.add_argument("--sim", "--game", dest="sim", action="store_true", help="启动冰壶仿真游戏（默认运行实时视觉演示）")
-    parser.add_argument("--vision", action="store_true", help="（兼容保留）实时视觉演示模式")
 
     # 视觉模式相关参数
     parser.add_argument("--headless", action="store_true", help="无显示性能测试模式")
@@ -55,10 +54,6 @@ def build_parser():
     parser.add_argument("--dry-run", action="store_true", help="完整回合影子运行：显示/记录请求目标，不发送 PLC 运动或现场轴命令")
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
-    parser.add_argument("--trigger-low-ms", type=float, default=10.0, metavar="MS",
-                        help="运动触发高、低电平均保持的最小脉宽（毫秒，默认 10）。"
-                             "实际通信频率受 S7 往返和两相脉宽限制；"
-                             "未测 PLC 扫描周期不要调小，否则 PLC 可能漏掉上升沿")
     parser.add_argument("--mallet-speed", type=float, default=500.0, metavar="UNITS_PER_SEC",
                         help="球槌可达速度估计（球台单位/秒，默认 500）。用来算提前量："
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
@@ -71,14 +66,6 @@ def build_parser():
                              "**默认不限制**（= ai.py 自身的上限，现场选的是「全部追球」）。"
                              "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
                              "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
-    parser.add_argument("--trigger-mode", choices=("pulse", "sequence"), default="sequence",
-                        help="运动触发方式，默认 sequence（序号握手）。"
-                             "sequence = 写 DB1.DBD142 序号，PLC 比较后执行，"
-                             "**不需要脉宽** → 不受 OB1 扫描周期限制（实测扫描最大 31.7ms，"
-                             "脉冲模式会静默丢指令）。"
-                             "pulse = 抬 DB1.56.0 的 P 沿，脉宽必须跨过扫描周期，"
-                             "周期被锁在约 28ms（35Hz），快球时只能中止重开（一顿一顿）。"
-                             "[!] 用 sequence 之前 PLC 里必须有序号比较逻辑（现场已加）")
     parser.add_argument("--blend-threshold-mm", type=float, default=12.0, metavar="MM",
                         help="相邻两条目标之间步距超过它就改用 BufferMode=1（附加停稳），"
                              "否则用 5（混合）。默认 12，与 --target-slew-mm 默认值相同 —— "
@@ -127,8 +114,6 @@ def build_parser():
                              "用来判断指令速度会不会被 TO 截断")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
-    parser.add_argument("--camera-fast", action="store_true",
-                        help="（兼容保留，现在默认就是）打开设备时把像素格式协商成 MJPG")
     parser.add_argument("--camera-slow", action="store_true",
                         help="不在打开时协商 MJPG（旧行为）。这台相机在 Windows 上会停在 YUY2 10 FPS，仅排查用")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")

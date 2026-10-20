@@ -17,7 +17,7 @@
 
 ### 1. 端到端数据链路
 
-实时链路使用 `CurlingState` / `PredictionState` / `PlcTarget` 与实际轴位置反馈闭环；离线轨迹规划仍保留独立的 `ControlCommand`，PLC 只接收目标位置：
+实时链路使用 `CurlingState` / `PredictionState` / `PlcTarget` 与实际轴位置反馈闭环，PLC 只接收目标位置：
 
 ```text
 CameraManager（Linux / Jetson: GStreamer appsink；Windows: OpenCV DirectShow）
@@ -47,7 +47,7 @@ RallyController         纯连续物理导引（架空模式决策）：
 PlcControlAdapter        AI 半场限幅 + 时间戳
   │  PlcTarget（固定 600×760 场地逻辑坐标）
   ▼
-PLCLink(后台周期线程)      反馈/心跳/安全互锁/触发脉冲 → DB1.20 LREAL 运动目标
+PLCLink(后台周期线程)      反馈/心跳/安全互锁/序号握手 → DB1.20 LREAL 运动目标
   │  DB1/DB18 状态位置反馈（mm → 场地逻辑坐标）
   └─────────────────────────────────────────────────→ VisionRuntime / AirHockeyAI / RallyController
 ```
@@ -77,7 +77,6 @@ Camera -> VisionRuntime
 | `StoneState` | `CurlingState` + `tracking_state`（视觉追踪路径） |
 | `GameState` | AI 决策快照：球槌位置 + 冰壶状态 + 开球/难度等 |
 | `PredictionState` | 预测结果：`trajectory` / `endpoint` / `duration` / `source_state` |
-| `ControlCommand` | 独立轨迹规划模型：`target_position` / `direction` / `speed`；当前 PLC DB 不接收方向/速度 |
 
 ---
 
@@ -90,9 +89,9 @@ Camera -> VisionRuntime
 5. **单目去畸变与坐标系几何映射**：`raw → undistorted → table` 三层解耦；`undistorted → table` 支持**球台四点 Homography**（透视校正），也保留 ROI 线性映射回退；速度用空间微元有限差分换算。
 6. **统一微步物理轨迹预测核心**：`TrajectoryPredictor` 涵盖摩擦阻尼、边墙弹性碰撞、门柱圆弧反弹与进球穿透判定；视觉、仿真、AI **共用同一物理核心**。
 7. **AI 智能防守与对战决策**：实时模式复用本帧预测轨迹计算门线截距，实机视觉控制关闭随机瞄准误差，避免每次反应刷新都横向跳目标；仿真难度与误差不变。身后冰壶按侧移、后退、对齐、击球分段回收，避免斜退穿球造成乌龙。进入球门侧安全退让线（当前逻辑 y≤91）的球不主动向自家球门推，不能保证救回已经越过可安全击球区域的快球；独立仿真调用仍可自行预测。
-8. **轨迹规划与控制适配层**：独立 `TrajectoryPlanner` 可生成 `ControlCommand`；实时 `PlcControlAdapter` 限制 AI 半场目标，`PLCLink` 周期读取轴状态及位置，安全状态成立才下发运动目标。
+8. **控制适配层**：实时 `PlcControlAdapter` 限制 AI 半场目标，`PLCLink` 周期读取轴状态及位置，安全状态成立才下发运动目标。
 9. **仿真 / 评估 / 记录工具链**：无摄像头运动仿真（真实轨迹→观测→Kalman→预测）、多组实验误差评估（JSON + 控制台报告）、真实/仿真统一格式运行日志（含 CurlingState / PredictionState / AIDecision / PLC request）。
-10. **西门子 PLC 工业通信**：按 S7-1500T/TO_Kinematics 联调版的 DB1/DB18 协议收发；只下发 `[X,0,Y,0]` 运动学位置和触发脉冲，冰壶状态与比分不再写入 PLC。
+10. **西门子 PLC 工业通信**：按 S7-1500T/TO_Kinematics 联调版的 DB1/DB18 协议收发；只下发 `[X,0,Y,0]` 运动学位置和递增序号，冰壶状态与比分不再写入 PLC。
 
 计划性跳过检测的帧只外推位置，保留追踪状态和漏检次数；真正执行检测却没找到冰壶时才进入 `lost`，重新检测到后恢复 `active`。运行时漏检会把状态估计推进到当前帧时间；追踪 ID 改变时清空旧估计，新目标不继承旧速度。预测前先限制当前及目标速度，完整预测到停止、进球或障碍接触，不再以 18 个绘制点或反弹次数截断物理过程。`endpoint` / `duration` 是终态位置及完整时长；默认步数预算按最高速在摩擦下滑到停止的时长再加 25% 推算，且不少于 4000 个微步，摩擦参数变化时自动放宽；耗尽预算时预测器明确报错，不返回假终点。实时链路捕获这类错误：本帧记为无预测（`prediction=None`），AI 退化为按当前位置防守，处理线程不中断。
 
@@ -132,7 +131,7 @@ python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 
 **实机使用前提**：确认设备区域安全、硬件急停有效、TIA DB 布局匹配，完成相机内参与球台四点标定；不要用 `--disable-homography` / `--disable-undistort` 驱动实机。连接本身不使能轴；图形界面 E/「轴使能」、H/「轴回零」、C/「轴复位」由现场操作员操作。按 H 或 C 时停止游戏目标；操作完成、轴状态恢复后需重新按 E 授权，仿真游戏还需手动继续。PLC 响应异常、轴未就绪、心跳超时和反馈失效时禁止下发；断线重连也需重新人工使能。机械限位和急停仍由 PLC/硬件负责，软件限幅不能替代。`--headless --plc` 无现场轴使能按钮，不用于首次联调。
 
-**现场安全边界**：实时默认首帧检测就接受并产生动作意图，不再等第二次硬检测。保留现有漏检宽限；轨迹删除后，仅在现有一秒窗口和球槌邻近条件内保持最后的有效目标，超时回 READY；状态过期/非有限值/越界则清目标。遮挡保持由显式 `held_target` 决策发布，不靠状态栏文字判断运动资格。所有目标仍受 PLC 人工授权、报警/心跳/反馈互锁和机械命令范围约束。上位机控制位采用同步 S7 BIT 写入，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`；当前默认 `--trigger-mode sequence` 再更新 `DB1.DBD142` 序号，要求 PLC 已安装对应握手逻辑；`--trigger-mode pulse` 则置 `DB1.56.0`。连接须先成功初始化心跳位并清除直线触发位，才允许后续授权。部分写入失败不能撤回 PLC 已接受的命令；仍须现场验证 PLC 扫描、触发脉宽和独立失联停止。软件清目标或撤销授权只禁止后续下发，不能撤销已经接受的运动，**不得作为急停使用**。
+**现场安全边界**：实时默认首帧检测就接受并产生动作意图，不再等第二次硬检测。保留现有漏检宽限；轨迹删除后，仅在现有一秒窗口和球槌邻近条件内保持最后的有效目标，超时回 READY；状态过期/非有限值/越界则清目标。遮挡保持由显式 `held_target` 决策发布，不靠状态栏文字判断运动资格。所有目标仍受 PLC 人工授权、报警/心跳/反馈互锁和机械命令范围约束。上位机控制位采用同步 S7 BIT 写入，保留 PLC/HMI 的相邻故障、停止、锁存和圆弧位。运动数据先写 `DB1.20..55` 的 36 字节 `[X,0,Y,0] + BufferMode`，再把 `DB1.DBD142` 序号加 1，要求 PLC 已安装序号比较逻辑（原脉冲触发 `DB1.56.0` 已删除，连接时仍会清一次该位）。部分写入失败不能撤回 PLC 已接受的命令；仍须现场验证独立失联停止。软件清目标或撤销授权只禁止后续下发，不能撤销已经接受的运动，**不得作为急停使用**。
 
 ### 直接对打运行方式
 
@@ -177,9 +176,9 @@ Windows 将 `python3` 改为 `python`，相机用 `--camera-device 0`。标定�
 
 GUI/控制台显示当前动作、track_valid、球速度、目标、球槌实际位置、身后球击打阶段及 PLC armed/safe。动作/追踪/授权变化立即打印，不按每帧刷。没有反应时核对检测标记是否跟球、目标是否变化、PLC 是否授权及实际位置是否跟上；不能用仿真成功替代实机接触验证。
 
-`--trigger-mode pulse` 下，`--trigger-low-ms`（默认 10）同时保证运动触发位的高、低电平最小保持时间；状态读取和心跳耗时计入低电平，不额外重复等待。只保证低电平时，高通信频率可能把高电平缩短到一次 S7 往返，导致 PLC 扫描漏掉上升沿。等待结束后只发送最新有效目标，期间被清除的目标不会继续下发。实际频率可能低于 `--plc-rate` 请求值；未测 PLC 扫描周期不要缩短脉宽。DB 地址、BIT、BufferMode、轴速度/加速度和报警互锁不变。
+运动积压保护：每条指令在 TO_Kinematics 里都是一条排队作业（BufferMode=5）。轴忙、且上次下发点领先实际位置超过 4 步（`MAX_BACKLOG_STEPS × --target-slew-mm`，默认 48mm）时，本周期不再追加作业，等轴追上来再继续，避免轴把一串过时的中间点依次走完。诊断行里的"轴积压暂停追加 N"就是被挡下的次数；实机若出现走走停停，调大 `control/interface.py` 的 `MAX_BACKLOG_STEPS`。
 
-运动中报警撤销授权时，工作线程只打印一条 `运动撤销快照`，包含前后使能/就绪/轴故障/busy 状态、当前运动学错误码、原始机械位置、最后已发送的物理目标及 BufferMode。801 表示参与运动系统的轴未就绪，具体原因仍需结合这条快照和 TIA 诊断；不会自动复位或重新授权。人工 E 重新授权会清除本地已发送目标的死区缓存，避免把报警中断的目标当作已完成；报警清除本身不重发目标。Windows 现场可用 `python -u main.py --camera-device 0 --camera-fast --plc 192.168.0.64 --plc-rate 30 --trigger-low-ms 10 2>&1 | Tee-Object -FilePath play_console.log` 保留控制台；故障时提供这条快照而不是仅截取“禁止运动”。
+运动中报警撤销授权时，工作线程只打印一条 `运动撤销快照`，包含前后使能/就绪/轴故障/busy 状态、当前运动学错误码、原始机械位置、最后已发送的物理目标及 BufferMode。801 表示参与运动系统的轴未就绪，具体原因仍需结合这条快照和 TIA 诊断；不会自动复位或重新授权。人工 E 重新授权会清除本地已发送目标的死区缓存，避免把报警中断的目标当作已完成；报警清除本身不重发目标。Windows 现场可用 `python -u main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30 2>&1 | Tee-Object -FilePath play_console.log` 保留控制台；故障时提供这条快照而不是仅截取“禁止运动”。
 
 PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在 Windows 或实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
 
@@ -280,7 +279,6 @@ Graduation/
 │   ├── vision/                 # 检测 + 追踪 + 坐标几何 + 预处理
 │   ├── estimation/             # KalmanFilter 状态估计层
 │   ├── prediction/             # PredictionState + TrajectoryPredictor（统一物理核心）
-│   ├── planning/               # ControlCommand + TrajectoryPlanner
 │   ├── control/                # PLC 闭环：protocol(DB 布局) / limits(行程·包络·MotionLimits) /
 │   │                           #   feedback / interface(S7 传输+运动规划) / link(PLCLink 线程) / adapter
 │   ├── recording/              # 统一运行日志（JSON schema + RuntimeRecorder）
@@ -309,7 +307,7 @@ Graduation/
 * [x] **卡尔曼滤波状态估计层**（常量速度模型 + 机动检测，抑制视觉抖动且快速跟上击球/弹墙）
 * [x] 单目内参标定与点级去畸变；**球台四点 Homography 透视校正**
 * [x] 视觉、仿真、AI 三端统一的微步物理轨迹预测核心（`PredictionState`）
-* [x] 独立 `ControlCommand` 轨迹规划与 DB1/DB18 目标/实际位置闭环软件链（当前项目的视觉→实机路径仍须现场验证）
+* [x] DB1/DB18 目标/实际位置闭环软件链（当前项目的视觉→实机路径仍须现场验证）
 * [x] 仿真测试环境、多组实验评估与统一格式运行日志
 * [x] 西门子 S7 PLC 通信底层封装
 * [x] 自动化功能回归测试套件

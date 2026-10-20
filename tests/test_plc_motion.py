@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from air_hockey import core_config as core
 from air_hockey.control import protocol
-from air_hockey.control.interface import TRANSITION_RATIO, PLCInterface
+from air_hockey.control.interface import MAX_BACKLOG_STEPS, TRANSITION_RATIO, PLCInterface
 from air_hockey.control.limits import (
     COORD_EPSILON, DEFAULT_LIMITS, DEFAULT_ZONE, TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN,
     MotionLimits,
@@ -44,6 +44,7 @@ class MemoryS7:
         self.fail_bit = None
         self.fail_payload = False
         self.fail_transition = False
+        self.fail_sequence = False
         self.echo = True
 
     def Cli_WriteArea(self, pointer, area, db, start, amount, wordlen, buffer):
@@ -68,10 +69,6 @@ class MemoryS7:
                                else (self.db[db][offset] & ~mask))
         if (db, offset, bit) == (18, 0, 0) and self.echo:
             self.db[18][0] = (self.db[18][0] & ~2) | (int(value) << 1)
-        if (db, offset, bit, value) == (1, 56, 0, True):
-            assert self.pending_payload is not None
-            self.moves.append(self.pending_payload)
-            self.pending_payload = None
         return 0
 
     def error_text(self, result):
@@ -89,10 +86,10 @@ class MemoryS7:
     def db_write(self, db, start, data):
         data = bytes(data)
         if (db, start, len(data)) == (1, protocol.COMM_SEQ_OFFSET, 4):
-            # ★ 序号握手：序号写下来就代表"一条新指令"，等价于脉冲模式里抬触发位。
+            # ★ 序号握手：序号写下来就代表"一条新指令"。
             #   真实 PLC 也是这个语义：先拿到已稳定的目标块，看到新序号就执行。
             self.operations.append(("sequence", db, start, data))
-            if self.fail_payload:
+            if self.fail_sequence:
                 raise RuntimeError("sequence write failed")
             self.db[db][start:start + len(data)] = data
             # 模拟 PLC 把已处理的序号回写到 DB1.64（诊断用"落后几条"）
@@ -207,8 +204,8 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
             DEFAULT_LIMITS.command_x_max, 0.0, DEFAULT_LIMITS.command_y_max, 0.0, 5)
         assert len(move) == 36
         assert plc.transport.operations[-2:] == [
-            ("payload", 1, 20, move), ("bit", 1, 56, 0, True)]
-        assert plc.transport.db[1][56] == 0x03
+            ("payload", 1, 20, move), ("sequence", 1, protocol.COMM_SEQ_OFFSET, struct.pack(">i", plc.sequence))]
+        assert plc.transport.db[1][56] == 0x02  # 圆弧启动位不被碰
         assert plc.transport.db[1][0] == 0  # 不能覆盖使能与复位控制位
     finally:
         plc.disconnect()
@@ -267,7 +264,6 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
         assert not any(operation[0] == "payload"
                        for operation in client.transport.operations[before_operations:])
         assert (client._last_phys_x, client._last_phys_y) == previous_target
-        assert not client.transport.db[1][56] & 1
         for invalid in (float("nan"), float("inf"), -float("inf")):
             assert not client.send_linear_move(invalid, 0)
             assert client.last_send_state == "invalid"
@@ -278,28 +274,20 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
 
 @memory_binding()
 def test_slew_roundoff_does_not_switch_blending_to_stop_and_append():
-    for sequence_mode in (False, True):
-        client = MemoryPLC()
-        client.blend_threshold_mm = 12.0
-        client.target_slew_mm = 12.0
-        client.actual_game = (300, 140)
-        try:
-            assert client.connect()
-            if sequence_mode:
-                assert client.send_linear_move_sequence(105.83333333333334, 77, 1)
-            else:
-                assert client.send_linear_move(105.83333333333334, 77)
-            assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 5
+    client = MemoryPLC()
+    client.blend_threshold_mm = 12.0
+    client.target_slew_mm = 12.0
+    client.actual_game = (300, 140)
+    try:
+        assert client.connect()
+        assert client.send_linear_move(105.83333333333334, 77)
+        assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 5
 
-            client.target_slew_mm = 0.0
-            if sequence_mode:
-                assert client.send_linear_move_sequence(500, 300, 2)
-            else:
-                client.clear_trigger()
-                assert client.send_linear_move(500, 300)
-            assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 1
-        finally:
-            client.disconnect()
+        client.target_slew_mm = 0.0
+        assert client.send_linear_move(500, 300)
+        assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 1
+    finally:
+        client.disconnect()
 
 
 @memory_binding()
@@ -334,7 +322,6 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
         assert not client.send_linear_move(left - COORD_EPSILON * 2, top)
         assert client.last_send_state == "invalid"
         assert len(client.transport.moves) == before
-        assert not client.transport.db[1][56] & 1
     finally:
         client.disconnect()
 
@@ -349,7 +336,6 @@ def test_plc_link_rejects_out_of_zone_targets_without_replacing_target():
     assert link._target == previous_target
     assert not link.set_target(float("nan"), 0)
     assert not client.transport.moves
-    assert not client.transport.db[1][56] & 1
 
 
 @memory_binding()
@@ -594,32 +580,28 @@ def test_stale_target_does_not_emit_motion_or_revoke_arm():
 
 
 @memory_binding()
-def test_payload_or_native_trigger_failure_does_not_publish_or_cache_success():
-    for failure in ("payload", "trigger"):
+def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
+    for failure in ("payload", "sequence"):
         client = MemoryPLC()
         try:
             assert client.connect()
             assert client.send_linear_move(300, 180)
-            previous = (client._last_phys_x, client._last_phys_y, client.last_buffer_mode)
-            client.clear_trigger()
+            previous = (client._last_phys_x, client._last_phys_y, client.last_buffer_mode, client.sequence)
             before = len(client.transport.moves)
             start = len(client.transport.operations)
             client.transport.fail_payload = failure == "payload"
-            if failure == "trigger":
-                client.transport.fail_bit = (1, 56, 0, True)
+            client.transport.fail_sequence = failure == "sequence"
             assert not client.send_linear_move(450, 180)
             assert not client.connected and client.last_send_state == "disconnected"
             assert len(client.transport.moves) == before
+            # 序号没写成功就不能推进，否则下一条会跳号
             assert (client._last_phys_x, client._last_phys_y,
-                    client.last_buffer_mode) == previous
+                    client.last_buffer_mode, client.sequence) == previous
             operations = client.transport.operations[start:]
-            # 每次下发会按顺序写三个东西：目标块 → 精磨距离 → 触发位。
+            # 每次下发按顺序写：目标块 → 精磨距离 → 序号。
             #   · payload 失败在第 1 步 → 只有 1 次操作
-            #   · trigger 失败在第 3 步 → 前 2 次都已经写出去
-            # 关键是**没有多出一次运动**（上面断言 moves 不变），精磨距离只是
-            # 一个"混合起点"的数值、幂等，写出去不影响安全。
+            #   · 序号失败在第 3 步 → 前 2 次都已经写出去，但没有多出一次运动
             assert len(operations) == (1 if failure == "payload" else 3)
-            assert client.transport.db[1][56] & 1 == 0
         finally:
             client.disconnect()
 
@@ -687,8 +669,6 @@ def test_connection_and_motion_preserve_other_bits_with_modern_clients():
                 assert client.enable_axes()
                 assert transport.db[1][0] == 0xCD
                 assert client.send_linear_move(300, 180)
-                assert transport.db[1][56] == 0x03
-                client.clear_trigger()
                 assert transport.db[1][56] == 0x02
                 assert client.disable_axes()
                 assert transport.db[1][0] == 0x0D
@@ -710,7 +690,7 @@ def test_connection_and_motion_preserve_other_bits_with_modern_clients():
 
 @memory_binding()
 def test_native_motion_error_invalidates_worker_feedback_and_arm():
-    for failure in ("payload", "trigger", "clear", "heartbeat"):
+    for failure in ("payload", "sequence", "heartbeat"):
         client = MemoryPLC()
         link = PLCLink("memory", client_factory=lambda *args: client)
         try:
@@ -722,12 +702,10 @@ def test_native_motion_error_invalidates_worker_feedback_and_arm():
             link.set_target(450, 180)
             if failure == "payload":
                 client.transport.fail_payload = True
+            elif failure == "sequence":
+                client.transport.fail_sequence = True
             else:
-                client.transport.fail_bit = {
-                    "trigger": (1, 56, 0, True),
-                    "clear": (1, 56, 0, False),
-                    "heartbeat": (18, 0, 0, True),
-                }[failure]
+                client.transport.fail_bit = (18, 0, 0, True)
             link._cycle()
             assert not client.connected and not link.armed
             assert not link.feedback.valid and link._target is None
@@ -737,133 +715,11 @@ def test_native_motion_error_invalidates_worker_feedback_and_arm():
             client.disconnect()
 
 
-@contextmanager
-def _clocked_plc(period=0.01, pulse=0.01):
-    clock = [2.0]
-    edges = []
-
-    class ClockEvent:
-        callback = None
-        stopped = False
-
-        def is_set(self):
-            return self.stopped
-
-        def set(self):
-            self.stopped = True
-
-        def wait(self, seconds):
-            clock[0] += max(0.0, seconds)
-            callback, self.callback = self.callback, None
-            if callback is not None:
-                callback()
-            return self.stopped
-
-    class TimedS7(MemoryS7):
-        def write_area(self, *args):
-            clock[0] += 0.002
-            result = super().write_area(*args)
-            _area, db, bit_offset, data, _word = args
-            if (db, bit_offset) == (1, 56 * 8):
-                edges.append((clock[0], bool(data[0]), bytes(self.db[1][20:56])))
-            return result
-
-        def read_multi_vars(self, items):
-            clock[0] += 0.002
-            return super().read_multi_vars(items)
-
-        def db_write(self, *args):
-            clock[0] += 0.002
-            return super().db_write(*args)
-
-    with memory_binding(), patch.object(time, "perf_counter", side_effect=lambda: clock[0]):
-        client = MemoryPLC()
-        client.transport = TimedS7()
-        assert client.connect()
-        link = PLCLink("memory", period=period, trigger_low_time=pulse,
-                       client_factory=lambda *args: client)
-        link._stop_event = ClockEvent()
-        link._echo_seen = True
-        link._echo_change_at = clock[0]
-        link._last_plc_heartbeat = False
-        link._armed = True
-        try:
-            yield link, client, clock, edges
-        finally:
-            client.disconnect()
-
-
-def test_native_trigger_pulses_survive_asynchronous_plc_scans():
-    with _clocked_plc() as (link, client, clock, edges):
-        points = [(200 + step * 10, 250) for step in range(20)]
-        expected = [client.game_to_physical(*point) for point in points]
-        for point in points:
-            assert link.set_target(*point)
-            start = clock[0]
-            link._cycle()
-            clock[0] += max(0.0, link.period - (clock[0] - start))
-        link.clear_target()
-        link._cycle()
-
-        for phase in (0.0, 0.001, 0.003, 0.009):
-            captured = []
-            index = 0
-            current = previous = False
-            payload = None
-            tick = 2.0 + phase
-            while tick <= edges[-1][0] + 0.010:
-                while index < len(edges) and edges[index][0] <= tick:
-                    _stamp, current, payload = edges[index]
-                    index += 1
-                if current and not previous:
-                    x, _unused1, y, _unused2 = struct.unpack_from(">dddd", payload)
-                    captured.append((x, y))
-                previous = current
-                tick += 0.010
-            assert captured == expected, (phase, len(captured), len(expected))
-
-
-def test_target_changed_during_trigger_wait_sends_latest_position():
-    with _clocked_plc() as (link, client, _clock, _edges):
-        assert link.set_target(200, 250)
-        link._stop_event.callback = lambda: link.set_target(400, 200)
-        link._cycle()
-        expected_x, expected_y = client.game_to_physical(400, 200)
-        assert struct.unpack_from(">dddd", client.transport.moves[0]) == (expected_x, 0.0, expected_y, 0.0)
-
-
-def test_target_cleared_during_trigger_wait_never_generates_motion():
-    with _clocked_plc() as (link, client, _clock, _edges):
-        assert link.set_target(200, 250)
-        link._stop_event.callback = link.clear_target
-        link._cycle()
-        assert client.transport.moves == []
-        assert client.transport.pending_payload is None
-        assert client.transport.db[1][56] & 1 == 0
-
-
-def test_stop_during_high_pulse_hold_prevents_the_next_command():
-    with _clocked_plc() as (link, client, _clock, _edges):
-        assert link.set_target(200, 250)
-        link._cycle()
-        before = list(client.transport.moves)
-        assert link.set_target(400, 200)
-        link._stop_event.callback = link.stop
-        link._cycle()
-        assert not link.armed and link._target is None
-        assert client.transport.moves == before
-
-
 @memory_binding()
-def test_sequence_trigger_advances_sequence_instead_of_pulsing():
-    """序号握手模式：写目标块 + 递增序号，不写触发位。
-
-    这是替代脉冲触发的方案 —— 脉冲要求高低电平各跨过一个 PLC 扫描周期
-    （实测 2~3ms、偶发 5ms），把周期锁在约 28ms（35Hz）；序号握手没有这个限制。
-    """
+def test_each_send_advances_sequence_once():
+    """序号握手：写目标块 + 递增序号，PLC 看到序号变了才执行。"""
     client = MemoryPLC()
-    link = PLCLink("memory", period=0.03, sequence_trigger=True,
-                   client_factory=lambda *args: client)
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
     link.start()
     try:
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
@@ -871,15 +727,12 @@ def test_sequence_trigger_advances_sequence_instead_of_pulsing():
         assert link.set_target(300, 180)
         assert until(lambda: len(client.transport.moves) == 1)
         first = struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0]
-        assert first == link._sequence > 0
-        # ★ 序号模式绝不能再抬触发位 —— 否则 PLC 会被脉冲和序号双重触发
-        assert client.transport.db[1][protocol.TRIGGER_BYTE] & 1 == 0
+        assert first == client.sequence > 0
 
         assert link.set_target(340, 200)
         assert until(lambda: len(client.transport.moves) == 2)
         assert struct.unpack_from(
             ">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0] == first + 1
-        assert client.transport.db[1][protocol.TRIGGER_BYTE] & 1 == 0
     finally:
         assert link.stop(timeout=2.0)
 
@@ -888,8 +741,7 @@ def test_sequence_trigger_advances_sequence_instead_of_pulsing():
 def test_sequence_does_not_advance_on_deadzone_skip():
     """目标没变 **且轴已到位** 时才跳过 —— 死区是压抖动的，不是压重发的。"""
     client = MemoryPLC()
-    link = PLCLink("memory", period=0.03, sequence_trigger=True,
-                   client_factory=lambda *args: client)
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
     link.start()
     try:
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
@@ -929,8 +781,7 @@ def test_sequence_does_not_advance_on_deadzone_skip():
 def test_target_is_resent_when_axis_never_arrived():
     """PLC 空闲但实际位置未到目标时仍要重发，不能只凭上次目标跳过。"""
     client = MemoryPLC()
-    link = PLCLink("memory", period=0.03, sequence_trigger=True,
-                   client_factory=lambda *args: client)
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
     link.start()
     try:
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
@@ -952,39 +803,37 @@ def test_target_is_resent_when_axis_never_arrived():
 
 @memory_binding()
 def test_busy_target_is_not_requeued_but_changed_and_idle_targets_are_sent():
-    for sequence_mode in (False, True):
-        client = MemoryPLC()
-        client.transport.db[1][protocol.MOTION_BUSY_BYTE] |= 1
-        link = PLCLink("memory", period=0.02, sequence_trigger=sequence_mode,
-                       client_factory=lambda *args: client)
-        link.start()
-        try:
-            assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
-            assert link.enable_axes() and until(lambda: link.armed)
-            assert link.set_target(350, 250)
-            assert until(lambda: bool(client.transport.moves))
-            cycles = link.cycle_count
-            assert until(lambda: link.cycle_count >= cycles + 4)
-            assert len(client.transport.moves) == 1
+    client = MemoryPLC()
+    client.transport.db[1][protocol.MOTION_BUSY_BYTE] |= 1
+    link = PLCLink("memory", period=0.02, client_factory=lambda *args: client)
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.set_target(350, 250)
+        assert until(lambda: bool(client.transport.moves))
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 4)
+        assert len(client.transport.moves) == 1
 
-            assert link.set_target(350.1, 250.1)
-            cycles = link.cycle_count
-            assert until(lambda: link.cycle_count >= cycles + 3)
-            assert len(client.transport.moves) == 1
+        assert link.set_target(350.1, 250.1)
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 3)
+        assert len(client.transport.moves) == 1
 
-            assert link.set_target(450, 220)
-            assert until(lambda: len(client.transport.moves) >= 2)
-            cycles = link.cycle_count
-            assert until(lambda: link.cycle_count >= cycles + 3)
-            assert len(client.transport.moves) == 2
-            assert link.armed and link.feedback.busy
+        assert link.set_target(450, 220)
+        assert until(lambda: len(client.transport.moves) >= 2)
+        cycles = link.cycle_count
+        assert until(lambda: link.cycle_count >= cycles + 3)
+        assert len(client.transport.moves) == 2
+        assert link.armed and link.feedback.busy
 
-            client.transport.db[1][protocol.MOTION_BUSY_BYTE] &= ~1
-            assert link.set_target(450, 220)
-            assert until(lambda: len(client.transport.moves) > 2)
-            assert not link.feedback.busy and link.armed
-        finally:
-            assert link.stop(timeout=2.0)
+        client.transport.db[1][protocol.MOTION_BUSY_BYTE] &= ~1
+        assert link.set_target(450, 220)
+        assert until(lambda: len(client.transport.moves) > 2)
+        assert not link.feedback.busy and link.armed
+    finally:
+        assert link.stop(timeout=2.0)
 
 
 @memory_binding()
@@ -993,8 +842,7 @@ def test_busy_motion_still_receives_distinct_slew_waypoints():
     client.target_slew_mm = 12.0
     client.blend_threshold_mm = 12.0
     client.transport.db[1][protocol.MOTION_BUSY_BYTE] |= 1
-    link = PLCLink("memory", period=0.02, sequence_trigger=True,
-                   client_factory=lambda *args: client)
+    link = PLCLink("memory", period=0.02, client_factory=lambda *args: client)
     link.start()
     try:
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
@@ -1009,6 +857,29 @@ def test_busy_motion_still_receives_distinct_slew_waypoints():
         assert link.armed and link.feedback.busy
     finally:
         assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_busy_axis_far_behind_last_command_stops_queueing_new_jobs():
+    """轴忙且落后上次下发点超过 MAX_BACKLOG_STEPS 步时不再追加作业，轴追上后继续。"""
+    client = MemoryPLC()
+    client.target_slew_mm = 12.0
+    client.blend_threshold_mm = 12.0
+    try:
+        assert client.connect()
+        client.actual_game = client.physical_to_game(0.0, 0.0)
+        client.actual_busy = True
+        far = client.physical_to_game(150.0, 0.0)
+        for _ in range(int(MAX_BACKLOG_STEPS) + 1):
+            assert client.send_linear_move(*far) and client.last_send_state == "sent"
+        sent = len(client.transport.moves)
+        assert client.send_linear_move(*far) and client.last_send_state == "backlog"
+        assert len(client.transport.moves) == sent
+        # 轴追上来以后恢复追加
+        client.actual_game = client.physical_to_game(client._last_phys_x, 0.0)
+        assert client.send_linear_move(*far) and client.last_send_state == "sent"
+    finally:
+        client.disconnect()
 
 
 @memory_binding()
@@ -1098,29 +969,23 @@ def test_diagnostics_runs_without_client_local_and_reports_transition():
 
 
 @memory_binding()
-def test_transition_write_failure_keeps_pulse_and_sequence_motion_connected():
-    for sequence_mode in (False, True):
-        client = MemoryPLC()
-        try:
-            assert client.connect()
-            client.actual_game = (300, 140)
-            client.transport.fail_transition = True
-            if sequence_mode:
-                assert client.send_linear_move_sequence(350, 220, 1)
-                assert client.send_linear_move_sequence(400, 250, 2)
-                assert struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_ACK_OFFSET)[0] == 2
-            else:
-                assert client.send_linear_move(350, 220)
-                client.clear_trigger()
-                assert client.send_linear_move(400, 250)
-            assert client.connected and client.transport.connected
-            assert not client.transition_enabled
-            assert client.last_error
-            assert client.last_send_state == "sent"
-            assert len(client.transport.moves) == 2
-            assert sum(operation[0] == "transition" for operation in client.transport.operations) == 1
-        finally:
-            client.disconnect()
+def test_transition_write_failure_keeps_motion_connected():
+    client = MemoryPLC()
+    try:
+        assert client.connect()
+        client.actual_game = (300, 140)
+        client.transport.fail_transition = True
+        assert client.send_linear_move(350, 220)
+        assert client.send_linear_move(400, 250)
+        assert struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_ACK_OFFSET)[0] == client.sequence
+        assert client.connected and client.transport.connected
+        assert not client.transition_enabled
+        assert client.last_error
+        assert client.last_send_state == "sent"
+        assert len(client.transport.moves) == 2
+        assert sum(operation[0] == "transition" for operation in client.transport.operations) == 1
+    finally:
+        client.disconnect()
 
 
 @memory_binding()
@@ -1130,7 +995,7 @@ def test_position_inside_physical_limits_can_arm_outside_command_margin():
     try:
         client = MemoryPLC()
         struct.pack_into(">dd", client.transport.db[1], 2, 0, -100)
-        link = PLCLink("memory", period=0.03, sequence_trigger=True,
+        link = PLCLink("memory", period=0.03,
                        client_factory=lambda *args: client, limits=limits)
         link.start()
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
@@ -1155,7 +1020,7 @@ def test_position_past_travel_does_not_trip_software_limit():
                  (0, TRAVEL_Y_MIN - 0.1),
                  (0, TRAVEL_Y_MAX + 0.1)):
         client = MemoryPLC()
-        link = PLCLink("memory", period=0.03, sequence_trigger=True,
+        link = PLCLink("memory", period=0.03,
                        client_factory=lambda *args: client)
         link.start()
         try:
@@ -1264,7 +1129,7 @@ def test_prepare_move_reports_step_actually_sent_after_accel_limit():
 def test_worker_cycle_feeds_latency_report_and_motion_snapshot():
     """真实工作线程每个周期都要喂延迟统计；记录用的快照要带实际位置和最近下发点。"""
     client = MemoryPLC()
-    link = PLCLink("memory", period=0.03, sequence_trigger=True,
+    link = PLCLink("memory", period=0.03,
                    client_factory=lambda *args: client)
     link.start()
     try:

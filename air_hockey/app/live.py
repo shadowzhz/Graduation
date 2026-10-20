@@ -75,11 +75,9 @@ def start_plc(args, runtime, rally):
           f"（机械行程 {TRAVEL_X_MIN:.0f}..{TRAVEL_X_MAX:.0f} / "
           f"{TRAVEL_Y_MIN:.0f}..{TRAVEL_Y_MAX:.0f}，两端为限位开关）")
     plc = PLCLink(args.plc, period=1.0 / args.plc_rate,
-                  trigger_low_time=args.trigger_low_ms / 1000.0,
                   blend_threshold_mm=args.blend_threshold_mm,
                   target_slew_mm=args.target_slew_mm,
                   target_accel_mm_s2=args.target_accel_mm_s2,
-                  sequence_trigger=(args.trigger_mode == "sequence"),
                   limits=limits)
     # ★ 把轴的**实际可达范围**交给 AI：它据此限制"可覆盖范围"
     #   （recovery_bounds），免得老是瞄到轴到不了的边角。

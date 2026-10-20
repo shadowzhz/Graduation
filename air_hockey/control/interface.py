@@ -47,6 +47,13 @@ BUFFER_MODE_IMMEDIATE_MM = 10.0
 # 到不了目标点。0.75 是"最后四分之一才混合"的意思，实测既连续又走得准。
 TRANSITION_RATIO = 0.75
 
+# 运动积压上限（单位：步，即 target_slew_mm 的倍数）。
+# 每触发一次 MC_MoveLinearAbsolute（BufferMode=5），作业就排进 TO_Kinematics 的作业队列；
+# 轴跟不上指令时队列越堆越长，轴会把一串过时的中间点依次走完（现场实测固定落后 300~420ms）。
+# 轴忙且"上次下发点"领先实际位置超过这么多步时，本周期不再追加作业，等轴追上来。
+# ponytail: 4 步 ≈ 30Hz 下 130ms 的余量（含反馈与序号确认各约一个周期）；实机若出现走走停停就调大。
+MAX_BACKLOG_STEPS = 4.0
+
 
 def _braking_step(dist: float, max_delta: float) -> float:
     """按剩余距离算出不超调的最大离散步长。"""
@@ -97,6 +104,9 @@ class PLCInterface:
         self.heartbeat_state = False
         self._last_phys_x = None
         self._last_phys_y = None
+        # 序号握手：每成功下发一条 +1。种子取当前时间，避免重启后恰好与 PLC 里记的"上次序号"相同、
+        # 第一条指令被当成旧指令丢掉。
+        self.sequence = int(time.time()) % 1000000 + 1
         self.last_send_state = "unknown"
         self.last_buffer_mode = None
         # 必须初始化：它原本只在 send_linear_move 里、且从**第二次**下发才开始赋值
@@ -333,6 +343,18 @@ class PLCInterface:
                         abs(phys_y - self._last_phys_y)) < DEAD_ZONE_MM):
             self.last_send_state = "pending"
             return None
+        # 运动积压：轴忙且上次下发点已远远领先实际位置 → 队列里已有好几条作业在排，先不追加。
+        actual = self.actual_game
+        if (self.actual_busy and self.target_slew_mm > 0.0
+                and self._last_phys_x is not None and actual is not None):
+            try:
+                ax, ay = self.game_to_physical_raw(actual[0], actual[1])
+            except (ValueError, OverflowError):
+                ax = None
+            if ax is not None and max(abs(self._last_phys_x - ax), abs(self._last_phys_y - ay)) \
+                    > MAX_BACKLOG_STEPS * self.target_slew_mm:
+                self.last_send_state = "backlog"
+                return None
         # ★★★ 起点：优先用"上次真正发出去的位置"；还没有就用轴的**实际位置**打底 ——
         # 这样 arming 后的**第一条**指令也走限速斜坡。
         #
@@ -501,30 +523,10 @@ class PLCInterface:
         self.last_transition_mm = value
 
     def send_linear_move(self, game_x, game_y):
-        """脉冲模式：写 36 字节 [X,0,Y,0,mode]，然后抬 DB1.56.0（P 沿触发）。"""
-        if not self.connected:
-            self.last_send_state = "disconnected"
-            return False
-        prepared = self._prepare_move(game_x, game_y)
-        if prepared is None:
-            return self.last_send_state != "invalid"
-        phys_x, phys_y, buffer_mode, distance = prepared
-        try:
-            self._write_payload(phys_x, phys_y, buffer_mode)
-            self._write_transition(distance)
-            self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, True)
-            self._commit_move(phys_x, phys_y, buffer_mode, distance)
-            return True
-        except Exception:
-            self._connected = False
-            self.last_send_state = "disconnected"
-            return False
-
-    def send_linear_move_sequence(self, game_x, game_y, sequence):
-        """序号握手模式：写目标块，再写序号 —— PLC 比较序号后执行，**不需要脉宽**。
+        """序号握手：写目标块，再写递增的序号 —— PLC 比较序号后执行。
 
         [!] 顺序不能反：**先写目标块，再写序号**。这样 PLC 看到新序号时
-        目标已经稳定，和"先写目标再抬触发"是同一个思路。
+        目标已经稳定。序号只在整条写成功后才推进。
         """
         if not self.connected:
             self.last_send_state = "disconnected"
@@ -537,9 +539,10 @@ class PLCInterface:
             self._write_payload(phys_x, phys_y, buffer_mode)
             # ★ 精磨距离必须在触发/序号之前写好 —— PLC 看到新序号时两个值都要是新的。
             self._write_transition(distance)
+            candidate = (self.sequence + 1) & 0x7FFFFFFF
             self.round_trips += 1
-            self._client.db_write(DB_MOTION, COMM_SEQ_OFFSET,
-                                  struct.pack(">i", sequence & 0x7FFFFFFF))
+            self._client.db_write(DB_MOTION, COMM_SEQ_OFFSET, struct.pack(">i", candidate))
+            self.sequence = candidate
             self._commit_move(phys_x, phys_y, buffer_mode, distance)
             return True
         except Exception:

@@ -12,7 +12,7 @@
 - `air_hockey/app/rally.py`：连续物理导引与状态平滑防抖。
 
 ## 3. 测试与验证状态
-- 全量自动化测试套件 `python3 tests/run_tests.py`：**362 项全部通过，0 失败**。
+- 全量自动化测试套件 `python3 tests/run_tests.py`：**351 项全部通过，0 失败**。
 - 纯计算模拟已验证：105mm 跨度在 5 个周期（140ms）内以 35Hz 全速下发 5 拍连续步进，中间 0 次死区跳过。
 
 ## 4. 本轮修正（代码审查后）
@@ -22,6 +22,9 @@
 - 预测：步数预算按摩擦与最高速推算；实时线程捕获预测异常，不再整机退出。
 - 记录：每帧 flush，fsync 限频 0.5s。
 - 删除软限位（现场已装硬件限位开关）：命令夹到机械行程 X -192..224 / Y -129..187 内缩 5mm（`--motion-margin-mm`），不再有软件越界撤销。
+- 卡尔曼：远处假目标待确认那一帧不再拿旧观测更新（原来会让滤波时间倒退、位置往回跳），`vision_runtime.py` 第 339 行。
+- 删除脉冲触发（`--trigger-mode`、`--trigger-low-ms`），只用序号握手；序号由 `PLCInterface.sequence` 管理。
+- 运动积压保护：轴忙且上次下发点领先实际位置 > 4 步（48mm）时暂停追加作业（`interface.MAX_BACKLOG_STEPS`），诊断行显示"轴积压暂停追加 N"。
 
 ## 5. 反应慢排查（2026-10-20）
 - 旧现场日志 runs/play.log（10-14，Windows，未纳入 git）：视觉 160~185 FPS、单帧 0.4~5 ms，PLC 周期约 29 Hz、序号落后 0~1；
@@ -40,5 +43,7 @@
   需要看 PLC 侧触发 MC_MoveLinearAbsolute 的程序（Execute 上升沿处理、Velocity/Acceleration/Jerk 输入、BufferMode）。
 
 ## 7. 下一步待办事项
+- [ ] TIA 核对 DB1 第 150 字节：注释一处说是 TransitionParameter，一处说是"气缸启动@150.0"（`protocol.py:56,108,146`）。
 - [ ] 确保球台现场视野内无红色杂物（如人类球槌、备用球），确保单目标检测器 100% 锁在真球上。
-- [ ] 实机对打测试 35Hz 连续指令下发与快球门线堵截拦截率。
+- [ ] 实机对打：看"轴积压暂停追加"次数与轴落后时间是否从 300~420ms 降下来；出现走走停停就调大 `MAX_BACKLOG_STEPS`。
+- [ ] TIA 核对 MC_MoveLinearAbsolute 的 Velocity 输入：轴本身跑不到指令速度（12mm×30Hz≈360mm/s）才是积压的根源。
