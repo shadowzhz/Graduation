@@ -335,7 +335,8 @@ class VisionRuntime:
 
             # 状态估计层：KalmanFilter 平滑位置/速度，输出统一的 CurlingState
             # 有检测则用观测校正，检测间隔帧则按模型外推
-            if detection is not None:
+            # 检测被跟踪器当成"待确认的新目标"时，track 还是旧轨迹，不能拿旧观测再更新一次
+            if detection is not None and track.missed_frames == 0:
                 estimated = self.kalman.update(
                     table_x,
                     table_y,

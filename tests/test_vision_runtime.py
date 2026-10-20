@@ -951,3 +951,23 @@ def test_prediction_failure_does_not_kill_runtime_and_ai_still_defends():
     assert result.ai_decision is not None
     assert math.isfinite(result.ai_decision.target_x) and math.isfinite(result.ai_decision.target_y)
     assert runtime.prediction_errors == 1
+
+
+def test_pending_far_detection_does_not_rewind_kalman():
+    # 远处假目标待确认那一帧，旧轨迹不能拿旧观测再更新卡尔曼（会让时间倒退、位置往回跳）
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+
+    def process(t, *points):
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        for point in points:
+            cv2.circle(image, point, 30, (0, 0, 255), -1)
+        return runtime.process_frame(Frame(image, timestamp=t))
+
+    for i in range(8):
+        process(1.0 + i * 0.01, (300 + 20 * i, 200 + 20 * i))
+    missed = process(1.08)
+    pending = process(1.09, (1100, 650))
+    assert pending.detection is not None and pending.track.track_id == missed.track.track_id
+    assert pending.curling_state.timestamp == 1.09
+    moved = (pending.curling_state.x - missed.curling_state.x, pending.curling_state.y - missed.curling_state.y)
+    assert moved[0] * missed.curling_state.vx + moved[1] * missed.curling_state.vy > 0.0
