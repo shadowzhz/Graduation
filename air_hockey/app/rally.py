@@ -5,6 +5,8 @@ RallyState（WAITING / DEFENDING / ATTACKING / RECOVERING）纯粹作为显示�
 彻底杜绝模式切换对运动目标的离散截断与机械顿挫。
 """
 
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
 from enum import Enum
