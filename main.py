@@ -348,8 +348,8 @@ def run_vision(args):
         print(f"[PLC] 命令余量 {plc_module.MOTION_MARGIN_MM:.0f}mm → "
               f"X {plc_module.COMMAND_X_MIN:.0f}..{plc_module.COMMAND_X_MAX:.0f} "
               f"Y {plc_module.COMMAND_Y_MIN:.0f}..{plc_module.COMMAND_Y_MAX:.0f}"
-              f"（软限位 {plc_module.PHYSICAL_X_MIN:.0f}..{plc_module.PHYSICAL_X_MAX:.0f} / "
-              f"{plc_module.PHYSICAL_Y_MIN:.0f}..{plc_module.PHYSICAL_Y_MAX:.0f}）")
+              f"（机械行程 {plc_module.TRAVEL_X_MIN:.0f}..{plc_module.TRAVEL_X_MAX:.0f} / "
+              f"{plc_module.TRAVEL_Y_MIN:.0f}..{plc_module.TRAVEL_Y_MAX:.0f}，两端为限位开关）")
         plc = PLCLink(args.plc, period=1.0 / args.plc_rate,
                       trigger_low_time=args.trigger_low_ms / 1000.0,
                       blend_threshold_mm=args.blend_threshold_mm,
@@ -361,22 +361,17 @@ def run_vision(args):
         runtime.ai.recovery_bounds = plc.reachable_bounds
         # 回收按相同命令范围判断能否接触；不可达时清目标，不能直穿冰壶回位。
         rally.reachable_bounds = plc.reachable_bounds
-        # ★★ 启动就自检"余量够不够刹得住"。现场撞死挡的根源就是没人会在跑之前
-        #    先算这一步：slew 40 @70Hz = 2800mm/s，而 a=15000 时需要 261mm 才
-        #    刹得住，包络到软限位只有 15mm → 几何上注定撞。
+        # ★★ 启动就自检"余量够不够刹得住"：目标斜坡自己会提前减速停在包络内，
+        #    冲出包络的只可能是轴按 TIA 减速度刹车的那一段，必须小于包络到限位开关的余量。
         #    按 **--plc-rate** 估算；名义值和实测可能差很多，所以只作提示。
         if args.target_slew_mm and args.target_slew_mm > 0.0:
-            accel_ref = args.target_accel_mm_s2 if args.target_accel_mm_s2 > 0 else None
-            brake, speed = plc_module.braking_distance_mm(
-                args.target_slew_mm, args.plc_rate, accel_ref)
-            accel_name = (f"目标加速度限幅 {args.target_accel_mm_s2:.0f}mm/s^2"
-                          if accel_ref is not None else
-                          f"TIA 预设加速度 {plc_module.AXIS_ACCEL_LIMIT_MM_S2:.0f}mm/s^2")
+            brake, speed = plc_module.braking_distance_mm(args.target_slew_mm, args.plc_rate)
             print(f"[PLC] 目标限速 {args.target_slew_mm:g}mm/周期 × {args.plc_rate:g}Hz "
-                  f"→ 指令速度约 {speed:.0f}mm/s，按 {accel_name} 估算制动距离 {brake:.0f}mm")
-            for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate, accel_ref):
+                  f"→ 指令速度约 {speed:.0f}mm/s，按 TIA 减速度 "
+                  f"{plc_module.AXIS_DECEL_LIMIT_MM_S2:.0f}mm/s^2 估算超调 {brake:.1f}mm")
+            for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate):
                 print(f"[PLC] [!] 安全自检：{warning}")
-        print("[PLC] 位置越界检测已启用：实际轴位置越过软限位即撤销运动授权并报警")
+        print("[PLC] 行程保护：命令夹在机械行程内缩余量之内；越界由硬件限位开关负责")
         plc.start()
         if window is not None and not args.dry_run:
             window.attach_plc(plc)
@@ -696,19 +691,15 @@ def main():
                              "（现场实测 p95 步距 192.8mm），大步会使用 "
                              "BufferMode=1，完成当前运动并停稳后再执行下一条。"
                              "★★★ 但它决定**指令速度**（= slew × 实测周期），"
-                             "所以直接决定刹不刹得住："
-                             "slew 40 @70Hz = 2800mm/s，a=15000 时需要 261mm 才刹停，"
-                             "而包络到软限位只有余量那么多 → 必撞硬限位。默认 12 "
-                             "（840mm/s、制动 24mm）配默认余量 40mm 是安全的。"
-                             "★ 想更快：先在 TIA 里把加速度 15000 提到 35000，再往上加")
-    parser.add_argument("--motion-margin-mm", type=float, default=40.0, metavar="MM",
-                        help="命令余量：下发目标时离 PHYSICAL_*（TIA 软限位）再内缩多少毫米，"
-                             "默认 40。包络 = PHYSICAL_* 内缩它。"
-                             "★★★ 它必须**大于制动距离**（见上面的 slew 说明），"
-                             "否则轴全速冲向限位时刹不住 → 撞硬限位。"
-                             "★ 程序启动时和运行中都会自检并报警，不用你自己算。"
-                             "★★ 改这个之前先确认 TIA「扩展参数 → 区域」里的软限位"
-                             "**真的生效**（不是「3D 显示中的表示」那一页）")
+                             "所以直接决定刹不刹得住：超调 = v^2/(2×TIA 减速度) 必须小于 "
+                             "--motion-margin-mm，否则全速冲向边缘时可能碰到限位开关。"
+                             "默认 12 @30Hz = 360mm/s，超调约 2mm，配默认余量 5mm 是安全的；"
+                             "调大 slew 时看启动自检，必要时同步加大余量")
+    parser.add_argument("--motion-margin-mm", type=float, default=5.0, metavar="MM",
+                        help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
+                             "默认 5。机械行程 X -192..224 / Y -129..187，"
+                             "包络 = 行程内缩它。程序不另设软件行程保护；"
+                             "★ 它应大于启动自检打印的超调距离，否则全速冲向边缘时可能碰到限位开关")
     parser.add_argument("--target-accel-mm-s2", type=float, default=12000.0, metavar="MM_S2",
                         help="目标加速度限幅（mm/s^2），默认 12000；0 = 关闭。"
                              "★★★ 治的是**跟随误差 801**：只限步长（--target-slew-mm）"

@@ -10,7 +10,7 @@ from air_hockey import core_config as core
 from air_hockey.app.rally import ARRIVAL_TOLERANCE, READY_POSITION
 from air_hockey.control import PLCFeedback, PLCLink
 from air_hockey.control.plc import (
-    PHYSICAL_X_MIN, PHYSICAL_X_MAX, PHYSICAL_Y_MIN, PHYSICAL_Y_MAX,
+    TRAVEL_X_MIN, TRAVEL_X_MAX, TRAVEL_Y_MIN, TRAVEL_Y_MAX,
     TABLE_X_MIN, TABLE_X_MAX, TABLE_Y_MIN, TABLE_Y_MAX,
     PLCInterface, TARGET_MAX_AGE,
 )
@@ -199,9 +199,9 @@ def test_point_sequence_uses_shared_ready_and_reachable_physical_mapping():
         assert core.RINK_LEFT + core.MALLET_RADIUS <= target.target_x <= core.RINK_RIGHT - core.MALLET_RADIUS
         assert core.RINK_TOP + core.MALLET_RADIUS <= target.target_y <= core.RINK_CENTER_Y - core.MALLET_RADIUS
         px, py = link.game_to_physical(target.target_x, target.target_y)
-        assert PHYSICAL_X_MIN <= px <= PHYSICAL_X_MAX
-        assert PHYSICAL_Y_MIN <= py <= PHYSICAL_Y_MAX
-        # 映射用的是"球台真实边缘" TABLE_*，不是轴的行程限位 PHYSICAL_*。
+        assert TRAVEL_X_MIN <= px <= TRAVEL_X_MAX
+        assert TRAVEL_Y_MIN <= py <= TRAVEL_Y_MAX
+        # 映射用的是"球台真实边缘" TABLE_*，不是轴的机械行程 TRAVEL_*。
         # 这两者必须分开：球台比轴的行程大（现场实测 480x880mm 的台面，
         # 而轴只有 407x310mm），所以映射到球台边缘时会被安全限位截住 ——
         # 那正是"球从边角过去、轴到不了"的物理事实。

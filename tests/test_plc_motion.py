@@ -197,7 +197,7 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
         # 用符号常量而不是写死数值：这个断言的本意是验证**分量顺序**
         # （X, 0, Y, 0 —— 实机 TO_Kinematics 用的是分量 1 和 3），
         # 而不是验证行程的具体毫米数。写死数值会在改行程时误报。
-        # 上限是 COMMAND_*（命令限位），比 TIA 软限位内缩 MOTION_MARGIN_MM。
+        # 上限是 COMMAND_*（命令限位），比机械行程内缩 MOTION_MARGIN_MM。
         assert struct.unpack_from(">ddddi", move) == (
             protocol.COMMAND_X_MAX, 0.0, protocol.COMMAND_Y_MAX, 0.0, 5)
         assert len(move) == 36
@@ -303,9 +303,8 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
     try:
         assert client.connect()
         left, right, top, bottom = protocol.DEFAULT_ZONE
-        # 场地边缘映射到 **COMMAND_*（命令限位）**，不是 PHYSICAL_*（TIA 软限位）。
-        # 两者的差值就是 MOTION_MARGIN_MM —— 代码的目标必须比软限位保守，
-        # 否则命令正好落在软限位上，稍有超调就触发轴故障。
+        # 场地边缘映射到 **COMMAND_*（命令限位）**，不是 TRAVEL_*（机械行程/限位开关）。
+        # 两者的差值就是 MOTION_MARGIN_MM —— 命令不主动去碰限位开关。
         for game_point, physical_point in (
             ((left, top), (protocol.COMMAND_X_MIN, protocol.COMMAND_Y_MIN)),
             ((right, bottom), (protocol.COMMAND_X_MAX, protocol.COMMAND_Y_MAX)),
@@ -1146,11 +1145,12 @@ def test_position_inside_physical_limits_can_arm_outside_command_margin():
 
 
 @memory_binding()
-def test_small_escape_past_each_physical_limit_revokes_without_auto_rearm():
-    for x, y in ((protocol.PHYSICAL_X_MIN - 0.1, 0),
-                 (protocol.PHYSICAL_X_MAX + 0.1, 0),
-                 (0, protocol.PHYSICAL_Y_MIN - 0.1),
-                 (0, protocol.PHYSICAL_Y_MAX + 0.1)):
+def test_position_past_travel_does_not_trip_software_limit():
+    """软件不再设软限位：行程越界交给硬件限位开关（触发后 TIA 报轴故障再撤销）。"""
+    for x, y in ((protocol.TRAVEL_X_MIN - 0.1, 0),
+                 (protocol.TRAVEL_X_MAX + 0.1, 0),
+                 (0, protocol.TRAVEL_Y_MIN - 0.1),
+                 (0, protocol.TRAVEL_Y_MAX + 0.1)):
         client = MemoryPLC()
         link = PLCLink("memory", period=0.03, sequence_trigger=True,
                        client_factory=lambda *args: client)
@@ -1158,18 +1158,16 @@ def test_small_escape_past_each_physical_limit_revokes_without_auto_rearm():
         try:
             assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
             assert link.enable_axes() and until(lambda: link.armed)
-            assert link.set_target(300, 180)
-            assert until(lambda: client.last_send_state == "sent")
             struct.pack_into(">dd", client.transport.db[1], 2, x, y)
-            assert until(lambda: not link.armed and link._target is None)
-            sent = len(client.transport.moves)
-            struct.pack_into(">dd", client.transport.db[1], 2, 0, 0)
-            assert until(lambda: abs(link.feedback.x - link.physical_to_game(0, 0)[0]) < 1e-6)
-            assert link.set_target(350, 220)
             cycles = link.cycle_count
             assert until(lambda: link.cycle_count >= cycles + 3)
-            assert not link.armed
-            assert len(client.transport.moves) == sent
+            assert link.armed
+            # 从越界位置往回走：指令不比当前位置更往外
+            assert link.set_target(300, 180)
+            assert until(lambda: client.last_send_state == "sent")
+            px, _, py, _, _ = struct.unpack(">ddddi", client.transport.moves[-1])
+            assert min(protocol.COMMAND_X_MIN, x) <= px <= max(protocol.COMMAND_X_MAX, x)
+            assert min(protocol.COMMAND_Y_MIN, y) <= py <= max(protocol.COMMAND_Y_MAX, y)
         finally:
             assert link.stop(timeout=2.0)
 
@@ -1181,7 +1179,7 @@ def test_advance_braking_prevents_accel_overshoot_and_warns():
         protocol.set_motion_margin(40.0)
         warns = protocol.safety_warnings(12.0, 100.0, 12000.0)
         assert len(warns) == 1
-        assert "制动距离 60mm > 包络到软限位的余量 40mm" in warns[0]
+        assert "制动距离 60mm > 包络到限位开关的余量 40mm" in warns[0]
 
         for busy in (True, False):
             client = MemoryPLC()
@@ -1209,7 +1207,7 @@ def test_advance_braking_prevents_accel_overshoot_and_warns():
 
             assert commands, "Must produce commands"
             assert max(commands) <= 175.0 + 1e-6
-            assert max(commands) <= protocol.PHYSICAL_X_MAX
+            assert max(commands) <= protocol.TRAVEL_X_MAX
             for prev, curr in zip(commands, commands[1:]):
                 assert curr - prev <= 12.0 + 1e-6
     finally:
@@ -1234,8 +1232,8 @@ def test_envelope_recovery_from_actual_game_steps_smoothly_without_jump():
         step = max(abs(px - (-170.0)), abs(py - (-120.0)))
         assert step <= 12.0 + 1e-6
         assert px < protocol.COMMAND_X_MIN
-        assert px >= protocol.PHYSICAL_X_MIN
-        assert py >= protocol.PHYSICAL_Y_MIN
+        assert px >= protocol.TRAVEL_X_MIN
+        assert py >= protocol.TRAVEL_Y_MIN
 
         client._commit_move(px, py, bm, dist)
         prep2 = client._prepare_move(gx, gy)
@@ -1243,8 +1241,8 @@ def test_envelope_recovery_from_actual_game_steps_smoothly_without_jump():
         px2, py2, bm2, dist2 = prep2
         step2 = max(abs(px2 - px), abs(py2 - py))
         assert step2 <= 12.0 + 1e-6
-        assert px2 >= protocol.PHYSICAL_X_MIN
-        assert py2 >= protocol.PHYSICAL_Y_MIN
+        assert px2 >= protocol.TRAVEL_X_MIN
+        assert py2 >= protocol.TRAVEL_Y_MIN
     finally:
         protocol.set_motion_margin(original_margin)
 

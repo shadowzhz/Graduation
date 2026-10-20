@@ -154,8 +154,8 @@ COMM_Y_ERR_OFFSET = 4
 COMM_Y_ERR_BIT = 0
 ECHO_TIMEOUT = 1.0
 # [!] 两套常量，用途不同，不要混：
-#   PHYSICAL_* = 轴的行程安全限位（绝不能命令越过）
-#   TABLE_*    = 球台真实边缘在【轴坐标】里的位置（只用于游戏<->机器坐标映射）
+#   TRAVEL_* = 轴的机械行程（行程两端是硬件限位开关），命令绝不越过
+#   TABLE_*  = 球台真实边缘在【轴坐标】里的位置（只用于游戏<->机器坐标映射）
 #
 # 2026-10-13 现场实测（PLC 绝对位置读数 + 卷尺）：
 #   球台（墙内）480mm x 880mm，球槌半径实测约 26.5mm
@@ -164,61 +164,45 @@ ECHO_TIMEOUT = 1.0
 # 由此反推球台边缘（轴坐标）：
 #   左墙 -188 - 26.5 - 10 = -224.5    右墙 219 + 26.5 + 10 = 255.5   （差 480 OK）
 #   中线  185 + 26.5 + 30 =  241.5    后墙 241.5 - 880/2   = -198.5   （差 440 OK）
-# TABLE_* 只由这些**几何测量**决定，与轴限位无关，所以改限位时不要动它们。
+# TABLE_* 只由这些**几何测量**决定，与轴行程无关，所以改行程时不要动它们。
 #
-# 2026-10-13 稍后：X 轴冲得太猛撞到左右限位，现场把 X 的限位收到 -180 / 215
-# （左右各留 8mm / 4mm 余量）。TABLE_X_* 保持不变 —— 球台边缘没变，
-# 只是球槌现在停在离墙 18mm 而不是 10mm 处。
+# 机械行程（TIA 工艺对象 XY轴 → 几何结构 →「3D 显示中的表示」，现场实测）：
+#   X -192 .. 224        Y -129 .. 187
+# 球台比轴的行程大：游戏坐标的边角（例如靠近中线）换算后会超出行程，
+# 必须夹回行程内，否则会把轴直接开进限位开关、触发轴故障。
 #
-# 也就是说：球台比轴的行程大 —— 球槌边缘在 X 上离墙十几毫米，
-# 在 Y 上离后墙差 47mm、离中线差 30mm。这是机械事实，软件只能如实反映。
-PHYSICAL_X_MIN, PHYSICAL_X_MAX = -180.0, 215.0
-PHYSICAL_Y_MIN, PHYSICAL_Y_MAX = -125.0, 185.0
+# 2026-10-20 现场已装硬件限位开关，代码不再维护一层"软限位"（原 PHYSICAL_* =
+# X -180..215 / Y -125..185、再内缩 40mm 的命令包络，以及越过软限位就撤销授权的检测）。
+# 现在只把命令夹到机械行程内缩 MOTION_MARGIN_MM，避免主动去碰限位开关。
+TRAVEL_X_MIN, TRAVEL_X_MAX = -192.0, 224.0
+TRAVEL_Y_MIN, TRAVEL_Y_MAX = -129.0, 187.0
 TABLE_X_MIN, TABLE_X_MAX = -224.5, 255.5
 TABLE_Y_MIN, TABLE_Y_MAX = -198.5, 241.5
 
-# ★ 命令余量：代码下发目标时再往内收这么多，绝不贴到 TIA 的软限位。
-#
-# 关键：**TIA 的软限位是故障保护，代码的目标限位必须比它更保守**。
-# 如果两者设成同一个值（比如都是 -180/215），那么命令正好落在软限位上 ——
-# 只要有一点超调或跟随误差就立刻触发轴故障，现场表现为报警后禁止运动。
-#
-# 正确关系：
-#     TIA 软限位（永不该碰到）    -180 / 215
-#     代码命令限位（日常夹取）    -180+8 / 215-8 = -172 / 207
-#
-# 这样超调要先吃掉这些毫米的缓冲才会碰到软限位。
-# [!] 调大它会更安全但行程更小；调小到 0 就等于把命令限位和软限位重合（不建议）。
-#
-# 2026-10 现场：8mm 不够。日志里 AI 的目标长期卡在夹取角点（game (67,349)），
-# 换算成物理正好是 COMMAND_X_MIN/COMMAND_Y_MAX —— 也就是每天贴着极限走。
-# 结果 X 轴先报 801，把余量问题暴露出来；之后 Y 轴也报了 801：
-#     [PLC] kin=801  Y=16#8001  last_sent=(-172.0,177.0)  busy=True  intent=(67,349)
-# 也就是"指令落在命令包络的绝对角点 + 轴一冲过头"= 撞软限位。
-# 改成 15mm：给超调留一倍缓冲，同时按球台尺度损失还能接受。
-# 运行期可用 --motion-margin-mm 覆盖；真正的根治是在 TIA 里把轴加速度调柔。
-MOTION_MARGIN_MM = 15.0
+# 命令余量：下发目标离机械行程端点（限位开关）再往内收这么多毫米，
+# 正常运动和超调都不主动碰限位开关。运行期可用 --motion-margin-mm 覆盖。
+MOTION_MARGIN_MM = 5.0
 
-# 命令夹取的上/下限（= PHYSICAL_* 再内缩 MOTION_MARGIN_MM）
-COMMAND_X_MIN, COMMAND_X_MAX = PHYSICAL_X_MIN + MOTION_MARGIN_MM, PHYSICAL_X_MAX - MOTION_MARGIN_MM
-COMMAND_Y_MIN, COMMAND_Y_MAX = PHYSICAL_Y_MIN + MOTION_MARGIN_MM, PHYSICAL_Y_MAX - MOTION_MARGIN_MM
+# 命令夹取的上/下限（= TRAVEL_* 再内缩 MOTION_MARGIN_MM）
+COMMAND_X_MIN, COMMAND_X_MAX = TRAVEL_X_MIN + MOTION_MARGIN_MM, TRAVEL_X_MAX - MOTION_MARGIN_MM
+COMMAND_Y_MIN, COMMAND_Y_MAX = TRAVEL_Y_MIN + MOTION_MARGIN_MM, TRAVEL_Y_MAX - MOTION_MARGIN_MM
 
 
 def set_motion_margin(margin_mm: float) -> None:
     """运行期改命令余量（--motion-margin-mm）。
 
-    轴撞软限位报 801 时把它调大即可，不用改代码重跑。
-    这是"少走一点"和"不撞限位"之间的取舍：调大更安全、可覆盖范围更小。
+    轴碰到限位开关时把它调大即可，不用改代码重跑。
+    这是"少走一点"和"不碰限位开关"之间的取舍：调大更安全、可覆盖范围更小。
     """
     global MOTION_MARGIN_MM, COMMAND_X_MIN, COMMAND_X_MAX, COMMAND_Y_MIN, COMMAND_Y_MAX
     margin_mm = float(margin_mm)
     if margin_mm < 0.0:
         raise ValueError("motion margin must be >= 0")
     MOTION_MARGIN_MM = margin_mm
-    COMMAND_X_MIN = PHYSICAL_X_MIN + margin_mm
-    COMMAND_X_MAX = PHYSICAL_X_MAX - margin_mm
-    COMMAND_Y_MIN = PHYSICAL_Y_MIN + margin_mm
-    COMMAND_Y_MAX = PHYSICAL_Y_MAX - margin_mm
+    COMMAND_X_MIN = TRAVEL_X_MIN + margin_mm
+    COMMAND_X_MAX = TRAVEL_X_MAX - margin_mm
+    COMMAND_Y_MIN = TRAVEL_Y_MIN + margin_mm
+    COMMAND_Y_MAX = TRAVEL_Y_MAX - margin_mm
 
 
 # ============================================================================
@@ -229,18 +213,14 @@ def set_motion_margin(margin_mm: float) -> None:
 #   ① 轴的真实机械行程（现场量的；TIA 工艺对象 XY轴 → 几何结构 →「3D 显示
 #      中的表示」。注意运动学里 x=X 轴、z=Y 轴，见 _write_payload 注释）
 #          X -192 .. 224        Y -129 .. 187
-#   ② TIA 软限位 —— 「扩展参数 → 区域」里配，必须是**故障保护**那一层。
-#      [!] 它必须比 ① 更靠内。现场踩过的坑：
-#         · X 软限位设成 -192，而 -191 就已碰到硬限位 → 软限位比硬限位还远，
-#           永远没机会报警
-#         · 软限位值改在了「3D 显示中的表示」那一页 —— 那页**不限制运动**
-#   ③ 代码命令包络 = PHYSICAL_* 再内缩 MOTION_MARGIN_MM
-#          X -165 .. 200        Y -110 .. 170
-#   ④ 制动距离 = v² / (2a)，v = target_slew_mm × 实际周期（不是 --plc-rate）
+#      行程两端是硬件限位开关（2026-10-20 起代码不再另设软限位）。
+#   ② 代码命令包络 = TRAVEL_* 再内缩 MOTION_MARGIN_MM（默认 5mm）
+#          X -187 .. 219        Y -124 .. 182
+#   ③ 超调距离 = v² / (2a)，v = target_slew_mm × 实际周期（不是 --plc-rate），
+#      a = TIA 减速度。目标斜坡本身会提前减速、停在包络内（_braking_step）；
+#      冲过包络的只可能是轴跟不上、按自身减速度刹车的那一段，所以用 TIA 减速度估算。
 #
-# ★★ 铁律：③ 到 ② 之间的余量必须 > ④ 的制动距离。
-#    实测 a=15000、70Hz、slew 40 → v=2800mm/s → 需要 261mm 才刹得住，
-#    而 ③→② 只有 15mm → 必然撞死挡。这不是偶发，是几何上注定的。
+# ★★ 铁律：② 到 ① 之间的余量必须 > ③，否则全速冲向边缘时会碰到限位开关。
 #
 # TIA「工艺对象 XY轴 → 动力学 → 预设值和限值」里的**预设值**（不是右边的最大值）。
 # 现场实测（2026-10，运动机构运动）：
@@ -314,12 +294,12 @@ def safety_warnings(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
     """
     warnings = []
     brake, speed = braking_distance_mm(slew_mm_per_cycle, rate_hz, accel_mm_s2)
-    margin = min(COMMAND_X_MIN - PHYSICAL_X_MIN, PHYSICAL_X_MAX - COMMAND_X_MAX,
-                 COMMAND_Y_MIN - PHYSICAL_Y_MIN, PHYSICAL_Y_MAX - COMMAND_Y_MAX)
+    margin = min(COMMAND_X_MIN - TRAVEL_X_MIN, TRAVEL_X_MAX - COMMAND_X_MAX,
+                 COMMAND_Y_MIN - TRAVEL_Y_MIN, TRAVEL_Y_MAX - COMMAND_Y_MAX)
     if margin <= 0.0:
         warnings.append(
             f"命令包络没有余量（MOTION_MARGIN_MM={MOTION_MARGIN_MM:.0f}）—— "
-            f"指令会直接落在软限位上，沿用会必撞限位")
+            f"指令会直接落在机械行程端点（限位开关）上")
     if speed > AXIS_SPEED_LIMIT_MM_S:
         warnings.append(
             f"指令速度 {speed:.0f}mm/s 超过 TIA 预设最大速度 "
@@ -329,8 +309,8 @@ def safety_warnings(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
         accel = AXIS_DECEL_LIMIT_MM_S2 if accel_mm_s2 is None else float(accel_mm_s2)
         safe_slew = (2.0 * accel * margin) ** 0.5 / max(rate_hz, 1e-6)
         warnings.append(
-            f"制动距离 {brake:.0f}mm > 包络到软限位的余量 {margin:.0f}mm"
-            f"（缺 {brake - margin:.0f}mm）—— 全速冲向限位时刹不住，会撞硬限位。"
+            f"制动距离 {brake:.0f}mm > 包络到限位开关的余量 {margin:.0f}mm"
+            f"（缺 {brake - margin:.0f}mm）—— 全速冲向边缘时可能碰到限位开关。"
             f"三选一：① --target-slew-mm 降到 {safe_slew:.0f} 以下；"
             f"② --motion-margin-mm 加到 {brake + 5:.0f}（会明显缩小可覆盖范围）；"
             f"③ 在 TIA 里把加速度从 {accel:.0f} 提高（现按此值估算）")
@@ -338,7 +318,7 @@ def safety_warnings(slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
 
 # 现场诊断：有多少次目标被夹取（= 想去的点在轴能到的范围之外）。
 # 这个比例高说明"游戏场地比机器能覆盖的大"这件事在频繁发生，
-# 也说明机械臂经常跑到极限位置 —— 那是撞软限位的高风险时刻。
+# 也说明机械臂经常跑到极限位置。
 _CLAMP_COUNTS = {"x": 0, "y": 0, "both": 0, "total": 0}
 
 
@@ -405,10 +385,9 @@ def _game_to_physical(zone, x, y):
     """游戏场地坐标 -> 机器坐标。
 
     映射用 TABLE_*（球台真实边缘在轴坐标里的位置），
-    夹取用 COMMAND_*（= PHYSICAL_* 再内缩 MOTION_MARGIN_MM）。
+    夹取用 COMMAND_*（= TRAVEL_* 机械行程再内缩 MOTION_MARGIN_MM）。
 
-    为什么要内缩：TIA 的软限位是**故障保护**，代码的目标限位必须比它保守，
-    否则命令正好落在软限位上，稍有超调就触发轴故障。见 MOTION_MARGIN_MM 的说明。
+    球台比轴的行程大，不夹的话靠近中线/侧墙的目标会把轴开进限位开关。
     """
     x, y = _validate_game_point(zone, x, y)
     left, right, top, bottom = zone
@@ -842,9 +821,11 @@ class PLCInterface:
                     phys_x = origin_x + self._last_step[0] + ddx * ratio
                     phys_y = origin_y + self._last_step[1] + ddy * ratio
 
-            # 软限位兜底：无论斜坡还是包络外回归，中间指令均不得超越软限位
-            phys_x = max(PHYSICAL_X_MIN, min(PHYSICAL_X_MAX, phys_x))
-            phys_y = max(PHYSICAL_Y_MIN, min(PHYSICAL_Y_MAX, phys_y))
+            # 包络兜底：加速度限幅可能让中间指令冲过目标，中间指令同样不得越出命令包络。
+            # 轴本来就在包络外（行程内）时，允许从起点按斜坡逐步回来、不跳到包络边界，
+            # 但绝不比起点更往外 —— 不会被命令往限位开关方向走。
+            phys_x = max(min(COMMAND_X_MIN, origin_x), min(max(COMMAND_X_MAX, origin_x), phys_x))
+            phys_y = max(min(COMMAND_Y_MIN, origin_y), min(max(COMMAND_Y_MAX, origin_y), phys_y))
 
             # ★ 注意：distance 已经在上面（加速度限幅之前）算好了，这里不要
             #   用限幅后的步长重算 —— 那正是把它锁死的写法。见上面的注释。
@@ -881,7 +862,7 @@ class PLCInterface:
             # 限速开启时，所有斜坡步均由软件规划保证连续平滑，统一保持 BufferMode=5（混合滤波），
             # 彻底杜绝中途停稳造成的卡顿；只有未开启限速（slew<=0）且步距超阈值时才发模式 1。
             buffer_mode = 1 if (self.target_slew_mm <= 0.0 and distance > self.blend_threshold_mm + COORD_EPSILON) else 5
-            # 精磨距离和诊断步距必须用**实际发出去的步长**（加速度限幅、软限位兜底之后）。
+            # 精磨距离和诊断步距必须用**实际发出去的步长**（加速度限幅、包络兜底之后）。
             # 限幅前的 distance 可能比实际步长大好几倍（目标反向时实测 20mm vs 6.5mm），
             # 精磨距离按它算就会超过整段运动，TO 把整段圆掉、到不了目标点。
             distance = max(abs(phys_x - origin_x), abs(phys_y - origin_y))
@@ -1254,7 +1235,7 @@ class PLCLink:
             text += f" | 其它状态 {counters['other']}"
         if mode_total and 100.0 * counters["mode1"] / mode_total > 20.0:
             text += "  ← 附加停稳占比偏高（大步目标）；核对 --target-slew-mm 和 --blend-threshold-mm"
-        # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到极限位置 = 撞软限位的风险高。
+        # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到行程边缘。
         counts = clamp_counts()
         if counts["total"]:
             pct_x = 100.0 * counts["x"] / counts["total"]
@@ -1293,15 +1274,15 @@ class PLCLink:
         slew = self.target_slew_mm
         if not slew or slew <= 0.0 or rate_hz <= 0.0:
             return ""
-        accel = self.target_accel_mm_s2 if self.target_accel_mm_s2 > 0.0 else None
+        # 超调按 TIA 减速度估算（见安全自检说明），不用软件加速度限幅
         try:
-            warnings = safety_warnings(slew, rate_hz, accel)
+            warnings = safety_warnings(slew, rate_hz)
         except Exception:
             return ""
         if not warnings:
             return ""
-        brake, speed = braking_distance_mm(slew, rate_hz, accel)
-        # 包络到软限位之间的余量就是 MOTION_MARGIN_MM（包络 = PHYSICAL_* 内缩它）
+        brake, speed = braking_distance_mm(slew, rate_hz)
+        # 包络到限位开关之间的余量就是 MOTION_MARGIN_MM（包络 = TRAVEL_* 内缩它）
         margin = MOTION_MARGIN_MM
         return (f" | [!]安全自检 {speed:.0f}mm/s 制动{brake:.0f}mm > 余量{margin:.0f}mm"
                 f" —— 冲向限位会刹不住，降 --target-slew-mm 或加 --motion-margin-mm")
@@ -1336,12 +1317,11 @@ class PLCLink:
 
     @property
     def reachable_bounds(self):
-        """AI 可请求的命令范围（游戏坐标），由 COMMAND_* 而非 PHYSICAL_* 决定。
+        """AI 可请求的命令范围（游戏坐标），由 COMMAND_* 而非 TRAVEL_* 决定。
 
         这个属性是给 AI 的 recovery_bounds 用的：告诉它"哪些位置是真能到的"。
 
-        [!] 曾经用 PHYSICAL_*（TIA 软限位），那比实际能下发的包络宽
-        MOTION_MARGIN_MM。后果：AI 以为够得到、一直瞄外面，而 PLC 在下发时
+        [!] 若用比命令包络更宽的范围（例如机械行程本身），AI 以为够得到、一直瞄外面，而 PLC 在下发时
         默默把目标夹回包络 —— 表现就是"机械臂长期顶在包络角点上"，
         而且 AI 的 target 和 PLC 实际下发的 target 对不上（有测试守着这个往返一致）。
 
@@ -1588,26 +1568,6 @@ class PLCLink:
                 and not feedback.comm_lost_latch and not feedback.group_stop
                 and feedback.kinematics_error == 0)
 
-    def _envelope_escape(self, feedback):
-        """实际位置越过软限位才撤销授权；命令余量不能阻止轴从旧位置回到命令范围。"""
-        if not feedback.valid:
-            return None
-        try:
-            px, py = _game_to_physical_raw(self.zone, feedback.x, feedback.y)
-        except (ValueError, OverflowError, ZeroDivisionError):
-            return None
-        if not (math.isfinite(px) and math.isfinite(py)):
-            return None
-        over_x = max(PHYSICAL_X_MIN - px, px - PHYSICAL_X_MAX)
-        over_y = max(PHYSICAL_Y_MIN - py, py - PHYSICAL_Y_MAX)
-        if over_x <= COORD_EPSILON and over_y <= COORD_EPSILON:
-            return None
-        axis = "X" if over_x >= over_y else "Y"
-        return (f"{axis} 轴越过软限位：实际物理 ({px:.1f},{py:.1f})，"
-                f"限位 X {PHYSICAL_X_MIN:.0f}..{PHYSICAL_X_MAX:.0f} "
-                f"Y {PHYSICAL_Y_MIN:.0f}..{PHYSICAL_Y_MAX:.0f}"
-                f"（超出 {max(over_x, over_y):.1f}mm）—— 已撤销运动授权")
-
     def _cycle(self):
         client = self._client
         if not self.sequence_trigger:
@@ -1652,13 +1612,9 @@ class PLCLink:
         with self._lock:
             # Serious faults revoke even a pending arm request. During the initial
             # heartbeat/enable ramp, hold pending without allowing any movement.
-            # 实际位置越过软限位与严重故障同级；不能因收窄命令范围撤销合法旧位置的授权。
-            escape = self._envelope_escape(feedback)
-            if escape:
-                self._messages.put(f"[!] {escape}")
+            # 行程越界由硬件限位开关负责（触发后 TIA 报轴故障，走 axis_fault 撤销）。
             fault = (feedback.axis_fault or feedback.comm_lost or feedback.comm_lost_latch
                      or feedback.group_stop or feedback.kinematics_error != 0
-                     or escape is not None
                      or (not feedback.plc_echo_ok
                          and time.monotonic() - self._echo_change_at >= ECHO_TIMEOUT)
                      or (self._armed and not safe))
@@ -1677,15 +1633,15 @@ class PLCLink:
                       and time.monotonic() - self._target_at <= TARGET_MAX_AGE else None)
         if revoked:
             def _limit_note(px, py):
-                """把原始位置和限位比一下 —— 801 出现时一眼看出是不是贴/超软限位。"""
+                """把原始位置和行程比一下 —— 故障出现时一眼看出是不是碰到了限位开关。"""
                 notes = []
                 for axis, value, low, high, margin_low, margin_high in (
-                        ("X", px, PHYSICAL_X_MIN, PHYSICAL_X_MAX, COMMAND_X_MIN, COMMAND_X_MAX),
-                        ("Y", py, PHYSICAL_Y_MIN, PHYSICAL_Y_MAX, COMMAND_Y_MIN, COMMAND_Y_MAX)):
+                        ("X", px, TRAVEL_X_MIN, TRAVEL_X_MAX, COMMAND_X_MIN, COMMAND_X_MAX),
+                        ("Y", py, TRAVEL_Y_MIN, TRAVEL_Y_MAX, COMMAND_Y_MIN, COMMAND_Y_MAX)):
                     if value < low or value > high:
-                        notes.append(f"{axis}={value:.2f} 已超出软限位[{low},{high}] ← 就是它")
+                        notes.append(f"{axis}={value:.2f} 已超出机械行程[{low},{high}] ← 限位开关")
                     elif value < margin_low or value > margin_high:
-                        notes.append(f"{axis}={value:.2f} 在命令限位外（软限位内），离软限位 "
+                        notes.append(f"{axis}={value:.2f} 在命令范围外（行程内），离限位开关 "
                                      f"{min(abs(value - low), abs(value - high)):.2f}mm")
                     else:
                         notes.append(f"{axis}={value:.2f} 在命令范围内")
