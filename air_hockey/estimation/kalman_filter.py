@@ -14,7 +14,7 @@ import numpy as np
 
 from .. import core_config as core
 from ..physics import apply_friction_velocity, resolve_wall_axis, stone_inside_goal_mouth
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 _STATE_DIM = 4
 _MEASUREMENT_DIM = 2

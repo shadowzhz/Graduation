@@ -1,7 +1,7 @@
 """离线闭环：仿真冰壶 -> Detection -> StoneTracker -> GameState -> AirHockeyAI。
 
 不启动摄像头，直接用仿真位置构造 Detection，验证视觉坐标到 AI 决策的链路。
-用法: python3 air_hockey/tools/test_ai_pipeline.py --visualize
+用法: python3 air_hockey/tools/probe_ai_pipeline.py --visualize
 """
 
 
@@ -16,7 +16,7 @@ import time
 import tkinter as tk
 
 
-# 项目根目录（air_hockey 包与共享的 game_state 都在这里）
+# 项目根目录（air_hockey 包在这里）
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from air_hockey import core_config as layout
 from air_hockey.ai import AIDecision, AirHockeyAI
 from air_hockey.physics import StoneMotion, goal_scorer
-from game_state import GameState, StoneState
+from air_hockey.game_state import GameState, StoneState
 from air_hockey.vision.tracker import StoneTracker
 from air_hockey.vision.types import Detection, Track
 

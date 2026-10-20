@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent  # 找到 main.py 所在文件夹
-SIM_ROOT = PROJECT_ROOT / "冰壶仿真"             # 仿真代码（仅 --sim 子进程使用）
+SIM_ROOT = PROJECT_ROOT / "sim_gui"              # 仿真代码（仅 --sim 子进程使用）
 
 # ★★★ Windows 控制台默认是 GBK(936)，打印一个它编不出的字符（² ³ [!] OK …）
 #     就会抛 UnicodeEncodeError 把整个程序打断 —— 现场踩过：
@@ -109,7 +109,7 @@ def print_latency_report(decision_ages, plc):
 
 def run_game(plc_ip=None, plc_rate=30.0):
     """启动仿真子进程，显式设置 cwd 避免相对路径资源加载报错。"""
-    command = [sys.executable, str(SIM_ROOT / "air_hockey.py")]
+    command = [sys.executable, str(SIM_ROOT / "game.py")]
     if plc_ip:
         command.extend(("--plc", plc_ip, "--plc-rate", str(plc_rate)))
     raise SystemExit(subprocess.run(command, cwd=str(SIM_ROOT)).returncode)

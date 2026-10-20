@@ -1,6 +1,6 @@
 """鼠标对战电脑的虚拟空气冰壶，只用 tkinter。
 
-运行：python air_hockey.py
+运行：python sim_gui/game.py（或 python main.py --sim）
 玩家按住左键控制下方蓝色球槌，电脑控制上方红色球槌。
 """
 
@@ -17,7 +17,7 @@ from tkinter import ttk
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import air_hockey_config as gui_config
+import gui_config
 from air_hockey import core_config as core
 from air_hockey.core_config import (
     COLLISION_EPSILON,
@@ -57,7 +57,7 @@ from air_hockey.physics import (
     goal_scorer,
     stone_inside_goal_mouth,
 )
-from game_state import GameState, StoneState, TrackingState
+from air_hockey.game_state import GameState, StoneState, TrackingState
 from air_hockey.control.plc import PLCLink
 from air_hockey.prediction import TrajectoryPredictor
 

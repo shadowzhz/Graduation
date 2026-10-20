@@ -12,9 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.append(str(ROOT / "冰壶仿真"))
 
 import cv2
 
@@ -94,9 +93,11 @@ if first_image is not None:
         cv2.circle(marked, (int(c["x"]), int(c["y"])), 26, color, 4)
         cv2.putText(marked, str(c["n"]), (int(c["x"]) + 28, int(c["y"]) + 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
-    cv2.imwrite(str(ROOT / "camera_recurring_positions.png"), marked)
+    output = ROOT / "runs" / "camera_recurring_positions.png"
+    output.parent.mkdir(exist_ok=True)
+    cv2.imwrite(str(output), marked)
     print()
-    print("  已保存：camera_recurring_positions.png")
+    print(f"  已保存：{output.relative_to(ROOT)}")
     print("    （前 3 个位置画红圈并标了复现次数，其余绿圈）")
 
 print()

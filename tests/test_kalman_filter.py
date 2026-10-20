@@ -19,7 +19,7 @@ from air_hockey.estimation import KalmanFilter
 from air_hockey.physics import apply_friction_velocity
 from air_hockey import core_config as core
 from air_hockey.vision.types import Detection
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 

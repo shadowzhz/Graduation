@@ -1,7 +1,7 @@
 """Camera-free Stage A: manually request READY, LEFT, CENTER, RIGHT, READY.
 
-Offline: python3 air_hockey/tools/test_rally_points.py --dry-run
-Live:    python3 air_hockey/tools/test_rally_points.py --plc 192.168.0.64
+Offline: python3 air_hockey/tools/probe_rally_points.py --dry-run
+Live:    python3 air_hockey/tools/probe_rally_points.py --plc 192.168.0.64
 """
 
 from __future__ import annotations

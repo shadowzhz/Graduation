@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 
 from . import core_config as core
 from .physics import StoneMotion, clamp
-from game_state import GameState
+from .game_state import GameState
 from .prediction import PredictionState, TrajectoryPredictor
 
 AI_SERVE_SETUP_GAP = 6.0

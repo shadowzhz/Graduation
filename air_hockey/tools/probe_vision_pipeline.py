@@ -1,7 +1,7 @@
 """实时验证 Camera -> Detection -> Tracker -> GameState 管线。
 
 Tracker 的像素坐标直接映射成 StoneState，先不接 AI 和 Homography。
-用法: python3 air_hockey/tools/test_vision_pipeline.py --device /dev/video0
+用法: python3 air_hockey/tools/probe_vision_pipeline.py --device /dev/video0
 """
 
 
@@ -14,13 +14,13 @@ import tkinter as tk
 import cv2
 
 
-# 项目根目录（air_hockey 包与共享的 game_state 都在这里）
+# 项目根目录（air_hockey 包在这里）
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from air_hockey.camera import CameraConfig, CameraManager
-from game_state import GameState, StoneState
+from air_hockey.game_state import GameState, StoneState
 from air_hockey.vision import StoneDetector
 from air_hockey.vision.tracker import StoneTracker
 from air_hockey.vision.types import Detection, Track

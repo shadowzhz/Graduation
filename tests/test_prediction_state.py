@@ -18,7 +18,7 @@ from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.prediction import PredictionState, TrajectoryPredictor, predict_trajectory
 from air_hockey.vision.types import Detection
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 

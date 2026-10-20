@@ -21,7 +21,7 @@ if os.name == "nt":
 else:
     import fcntl
 
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 from ..simulation import SimulationResult
 from .schema import RECORDING_FORMAT, RECORDING_VERSION, build_document, build_frame

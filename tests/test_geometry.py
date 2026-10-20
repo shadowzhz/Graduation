@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 from air_hockey import core_config as core
-from game_state import StoneState
+from air_hockey.game_state import StoneState
 from air_hockey.vision.detector import StoneDetector
 from air_hockey.vision.geometry import CameraGeometry
 from air_hockey.vision.pipeline import VisionPipeline

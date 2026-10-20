@@ -12,7 +12,7 @@ from typing import Iterable, Sequence
 
 from ..prediction import PredictionState
 from ..simulation import SimulationResult
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 
 @dataclass

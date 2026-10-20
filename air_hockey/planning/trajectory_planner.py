@@ -16,7 +16,7 @@ from typing import Optional, Sequence
 
 from .. import core_config as core
 from ..prediction import PredictionState
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 _EPSILON = 1e-9
 

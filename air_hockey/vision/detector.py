@@ -5,7 +5,7 @@ from math import hypot, inf, pi        # inf 代表无穷大
 
 import cv2
 
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 from .preprocess import crop_roi, external_contours, morphology, threshold
 from .types import Detection, ROI

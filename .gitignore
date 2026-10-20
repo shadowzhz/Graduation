@@ -7,3 +7,6 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+
+# 现场运行产物（日志、记录、截图）
+runs/

@@ -18,7 +18,7 @@ from air_hockey.physics import StoneMotion
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.vision.detector import StoneDetector
 from air_hockey.vision.types import Detection
-from game_state import CurlingState, StoneState, TrackingState
+from air_hockey.game_state import CurlingState, StoneState, TrackingState
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 

@@ -22,7 +22,7 @@ from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.control.plc import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.vision.types import Detection, Track, TrackState
-from game_state import CurlingState, GameState
+from air_hockey.game_state import CurlingState, GameState
 from main import submit_rally_target
 
 

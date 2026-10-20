@@ -21,8 +21,8 @@ from main import submit_rally_target
 
 
 def _contact_game(stone):
-    directory = Path(__file__).resolve().parents[1] / "冰壶仿真"
-    spec = importlib.util.spec_from_file_location("_live_contact_game", directory / "air_hockey.py")
+    directory = Path(__file__).resolve().parents[1] / "sim_gui"
+    spec = importlib.util.spec_from_file_location("_live_contact_game", directory / "game.py")
     module = importlib.util.module_from_spec(spec)
     previous_path = sys.path[:]
     try:

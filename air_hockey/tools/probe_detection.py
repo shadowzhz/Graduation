@@ -1,6 +1,6 @@
 """实时 StoneDetector 测试 GUI。
 
-用法: python3 tools/test_detection.py --roi 250 100 780 520 --lower 170 100 80 --upper 10 255 255
+用法: python3 air_hockey/tools/probe_detection.py --roi 250 100 780 520 --lower 170 100 80 --upper 10 255 255
 """
 
 
@@ -14,7 +14,7 @@ from tkinter import messagebox
 
 import cv2
 
-# Keep direct execution (``python3 tools/test_detection.py``) convenient.
+# Keep direct execution (``python3 air_hockey/tools/probe_detection.py``) convenient.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from air_hockey.camera import CameraConfig, CameraManager

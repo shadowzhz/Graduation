@@ -54,7 +54,7 @@ PLCLink(后台周期线程)      反馈/心跳/安全互锁/触发脉冲 → DB1
 
 ### 2. 模块依赖方向
 
-视觉运行链单向依赖，共享物理/AI/状态核心均归位于 `air_hockey/` 包内，**视觉核心不依赖 `冰壶仿真/` 目录**：
+视觉运行链单向依赖，共享物理/AI/状态核心均归位于 `air_hockey/` 包内，**视觉核心不依赖 `sim_gui/` 目录**：
 
 ```text
 Camera -> VisionRuntime
@@ -67,9 +67,9 @@ Camera -> VisionRuntime
             -> PlcControlAdapter (可选)
 ```
 
-> 仿真端（`冰壶仿真/`）复用同一 `physics` / `ai` / `prediction` / `game_state` 和 `air_hockey/control/plc.py`，仅保留 GUI 与 GUI 配置。
+> 仿真端（`sim_gui/`）复用同一 `physics` / `ai` / `prediction` / `game_state` 和 `air_hockey/control/plc.py`，仅保留 GUI 与 GUI 配置。
 
-### 3. 统一数据契约（`game_state.py`）
+### 3. 统一数据契约（`air_hockey/game_state.py`）
 
 | 类型 | 职责 |
 |---|---|
@@ -164,7 +164,7 @@ AI 提前量沿既有微步物理模型推进，计入弹墙和摩擦，不再�
 
 ```bash
 # 不开相机的人工五点测试；e/h/c/n/q 各自输入后回车，不自动使能。
-python3 air_hockey/tools/test_rally_points.py --plc 192.168.0.64
+python3 air_hockey/tools/probe_rally_points.py --plc 192.168.0.64
 # 只看识别/目标，不发运动，确认坐标与检测对象后再退出重启实机模式。
 python3 -u main.py --camera-device /dev/video2 --plc 192.168.0.64 --dry-run --record shadow.json
 # 实际对打：GUI E 人工使能，H 回零，C 复位；无需速度估计/可达性参数。
@@ -189,9 +189,9 @@ PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的
 
 Jetson 的 Python 3.8 运行时需使用已包含延迟类型注解修复的最新代码，并确保该解释器安装了 `numpy`、`cv2`、`gi` 等运行依赖；无标定开关只跳过标定，不会跳过摄像头和 GStreamer 依赖。
 
-Jetson 上若看到 `unknown type GstFraction`，需更新到通过 `Gst.Structure.get_fraction("framerate")` 读取协商帧率的版本。`/dev/video*` 中可能有非采集设备；用 `v4l2-ctl --device=/dev/video0 --list-formats-ext` 核对 MJPEG 分辨率/帧率，再用 `python3 air_hockey/tools/test_camera.py --device /dev/video0 --benchmark --duration 10` 单独诊断该采集节点。
+Jetson 上若看到 `unknown type GstFraction`，需更新到通过 `Gst.Structure.get_fraction("framerate")` 读取协商帧率的版本。`/dev/video*` 中可能有非采集设备；用 `v4l2-ctl --device=/dev/video0 --list-formats-ext` 核对 MJPEG 分辨率/帧率，再用 `python3 air_hockey/tools/probe_camera.py --device /dev/video0 --benchmark --duration 10` 单独诊断该采集节点。
 
-采集诊断：`python3 air_hockey/tools/test_camera.py --benchmark --duration 10` 显示实际图像尺寸、驱动报告 FPS、实测采集 FPS 和采集耗时；Linux GStreamer 另提供 appsink 转换计时，Windows DirectShow 的解码/颜色处理计入 `read()`。`python3 air_hockey/tools/test_gstreamer_transfer.py` 只用于 Linux GStreamer 管道；独立管道的 FPS 不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/驱动报告 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的后端读取完成时刻，Gst PTS（仅 GStreamer 提供）是未映射的管道时钟域原值，不能声称曝光到显示或 PLC 端到端延迟。本机无 Jetson；Windows 相机分支尚未接实机测量。
+采集诊断：`python3 air_hockey/tools/probe_camera.py --benchmark --duration 10` 显示实际图像尺寸、驱动报告 FPS、实测采集 FPS 和采集耗时；Linux GStreamer 另提供 appsink 转换计时，Windows DirectShow 的解码/颜色处理计入 `read()`。`python3 air_hockey/tools/probe_gstreamer_transfer.py` 只用于 Linux GStreamer 管道；独立管道的 FPS 不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/驱动报告 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的后端读取完成时刻，Gst PTS（仅 GStreamer 提供）是未映射的管道时钟域原值，不能声称曝光到显示或 PLC 端到端延迟。本机无 Jetson；Windows 相机分支尚未接实机测量。
 
 预览链路先将原始帧缩到 640 像素宽，再按相同比例绘制 ROI、观测、轨迹和 AI 目标；`render()` 全分辨率输出仍保持原有行为。预览按稀疏采样的全画面亮度做缓慢校正，以减轻整幅画面的明暗闪烁；只修改显示图像，不改检测、追踪或 PLC 输入，局部条纹仍需稳定照明。本机 1280×720 合成画面、各预热 3 次后各测 50 次的单次对比：预览编码耗时 p50 从约 1.97 ms 降为约 0.96 ms；这不是 Jetson 或真实相机的性能结论。GStreamer 后端仍保留 cv2 的 BGRx→BGR 转换，不在缺少 Jetson 实测时改动硬件协商管道。
 
@@ -269,10 +269,10 @@ python3 -c "from air_hockey.recording import RuntimeRecorder; RuntimeRecorder.re
 ```text
 Graduation/
 ├── main.py                     # 统一入口（视觉 / headless / 仿真 / 记录 / PLC 输出）
-├── game_state.py               # 共享数据契约（CurlingState / StoneState / GameState）
 ├── README.md                   # 本文档
-├── Jetson系统.md               # Jetson Xavier NX 硬件平台调研报告
+├── HANDOFF.md                  # 当前状态与现场调试交接（最新）
 ├── air_hockey/                 # 核心算法包
+│   ├── game_state.py           # 共享数据契约（CurlingState / StoneState / GameState）
 │   ├── core_config.py          # 场地几何、动力学参数、难度等级
 │   ├── physics.py              # StoneMotion 物理实体与碰撞规则
 │   ├── ai.py                   # AI 决策器（依赖注入 TrajectoryPredictor）
@@ -287,10 +287,11 @@ Graduation/
 │   ├── evaluation/             # 多组实验误差评估与报告
 │   ├── calibration/            # 相机内参标定与去畸变工具
 │   ├── app/                    # VisionRuntime 运行核心 + 渲染 + FPS GUI
-│   ├── tools/                  # 标定 / 检测 / 追踪 / 预测 等诊断脚本
-│   └── 交接文档.md             # 面向开发者的详细技术与工程交接文档
+│   └── tools/                  # 标定脚本 + probe_* 手动诊断脚本（需相机/PLC，非自动化测试）
 ├── calibration/                # 相机内参在库；table_homography.npz 须在实台标定后生成
-├── 冰壶仿真/                   # 桌面仿真 GUI 与 GUI 配置
+├── sim_gui/                    # 桌面仿真 GUI（game.py）与 GUI 配置（gui_config.py）
+├── docs/                       # Jetson 平台调研报告；archive/ 下为归档的旧交接文档
+├── runs/                       # 现场日志 / 记录 / 截图（不纳入 git）
 └── tests/                      # 自动化测试套件
 ```
 
@@ -320,5 +321,9 @@ Graduation/
 
 ## 📑 技术交接与开发文档
 
-关于更底层的模块接口、坐标系数学定义、Jetson 手动锁频脚本与技术债务分析，请参考：
-👉 [Air Hockey 项目交接文档 (air_hockey/交接文档.md)](air_hockey/交接文档.md)
+当前状态与现场调试结论见 [HANDOFF.md](HANDOFF.md)。
+
+更底层的模块接口、坐标系数学定义、Jetson 手动锁频脚本见 2026-10-10 的归档交接文档（部分路径已过时）：
+👉 [docs/archive/交接文档-2026-10-10.md](docs/archive/交接文档-2026-10-10.md)
+
+Jetson Xavier NX 硬件平台调研报告：[docs/Jetson系统.md](docs/Jetson系统.md)

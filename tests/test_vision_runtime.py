@@ -29,7 +29,7 @@ from air_hockey.camera.types import Frame
 from air_hockey.control import PlcControlAdapter
 from air_hockey.control.plc import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
-from game_state import CurlingState, GameState, StoneState
+from air_hockey.game_state import CurlingState, GameState, StoneState
 from air_hockey.vision.tracker import StoneTracker
 from air_hockey.vision.types import Detection, TrackState
 

@@ -25,7 +25,7 @@ from air_hockey.evaluation import (
 )
 from air_hockey.prediction import PredictionState
 from air_hockey.simulation import MotionSimulator, SimulationConfig, SimulationResult
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 
 def _make_result():

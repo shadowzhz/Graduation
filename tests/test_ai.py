@@ -5,7 +5,7 @@ from air_hockey import core_config as layout
 from air_hockey.ai import AirHockeyAI
 from air_hockey.control.plc import PLCLink
 from air_hockey.prediction import TrajectoryPredictor
-from game_state import GameState, StoneState
+from air_hockey.game_state import GameState, StoneState
 
 # 关掉瞄准误差，决策才可复现
 NO_ERROR = replace(layout.DIFFICULTIES["普通"], aim_error=0.0)

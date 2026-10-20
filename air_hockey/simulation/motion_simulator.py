@@ -20,7 +20,7 @@ from .. import core_config as core
 from ..estimation import KalmanFilter
 from ..physics import StoneMotion, goal_scorer, stone_inside_goal_mouth
 from ..prediction import PredictionState, TrajectoryPredictor
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 
 @dataclass

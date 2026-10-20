@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 from ..prediction import PredictionState
 

@@ -1,4 +1,4 @@
-from game_state import GameState, StoneState, TrackingState
+from air_hockey.game_state import GameState, StoneState, TrackingState
 from air_hockey.vision.types import Track, TrackState
 
 

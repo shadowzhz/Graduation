@@ -14,7 +14,7 @@ from typing import Any, Sequence
 
 from .. import core_config as core
 from ..physics import StoneMotion, goal_scorer
-from game_state import CurlingState
+from ..game_state import CurlingState
 from .state import PredictionState
 
 

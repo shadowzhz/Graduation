@@ -14,7 +14,7 @@ from air_hockey.control.plc import (
     TABLE_X_MIN, TABLE_X_MAX, TABLE_Y_MIN, TABLE_Y_MAX,
     PLCInterface, TARGET_MAX_AGE,
 )
-from air_hockey.tools import test_rally_points as points_tool
+from air_hockey.tools import probe_rally_points as points_tool
 
 
 class FakeLink:

@@ -1,6 +1,6 @@
 """离线跑一次 StoneDetector 并输出标注图。
 
-用法: python3 tools/test_image.py 图片路径 --output 结果图路径
+用法: python3 air_hockey/tools/probe_image.py 图片路径 --output 结果图路径
 """
 
 

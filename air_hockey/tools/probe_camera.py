@@ -1,6 +1,6 @@
 """纯摄像头采集 FPS 基准，不开 GUI 也不做检测。
 
-用法: python3 air_hockey/tools/test_camera.py --benchmark --duration 10
+用法: python3 air_hockey/tools/probe_camera.py --benchmark --duration 10
 """
 
 

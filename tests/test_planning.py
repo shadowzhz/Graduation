@@ -13,7 +13,7 @@ import math
 from air_hockey import core_config as core
 from air_hockey.planning import ControlCommand, TrajectoryPlanner
 from air_hockey.prediction import PredictionState, TrajectoryPredictor
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 
 def _prediction(duration, endpoint=(0.0, 0.0)):

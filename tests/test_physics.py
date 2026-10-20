@@ -7,7 +7,7 @@ from air_hockey.physics import (
     goal_scorer,
     stone_inside_goal_mouth,
 )
-from game_state import GameState, StoneState
+from air_hockey.game_state import GameState, StoneState
 from air_hockey.prediction import TrajectoryPredictor, predict_trajectory
 
 

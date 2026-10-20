@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional
 from .. import core_config as core
 from ..ai import AIDecision, AirHockeyAI
 from ..camera.types import Frame
-from game_state import CurlingState, GameState, TrackingState
+from ..game_state import CurlingState, GameState, TrackingState
 from ..estimation import KalmanFilter
 from ..prediction import PredictionState, TrajectoryPredictor
 from ..vision import StoneDetector, VisionPipeline
@@ -31,7 +31,7 @@ AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
 # 实时估计器的机动检测门限（2 自由度 NIS）。击球/弹墙后速度在约 50ms 内收敛，
 # 原常速模型需约 400ms；静止时噪声与原来相同。离线评估不受影响。
 REALTIME_MANEUVER_GATE = 20.0
-# 冰壶像素面积上限（按等效半径 50px 计）。现场记录（rally.json）里冰壶半径 30.7~33.3px，
+# 冰壶像素面积上限（按等效半径 50px 计）。现场记录（runs/rally.json）里冰壶半径 30.7~33.3px，
 # 红色球槌半径约为冰壶的 2.2 倍（~70px），面积约 5 倍，超过的红色块一律不算冰壶。
 # 用面积而不是外接圆半径：冰壶贴着红色场地线时外接圆会被线拉大，面积基本不变。
 MAX_PUCK_AREA_PX = math.pi * 50.0 ** 2

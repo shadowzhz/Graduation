@@ -20,7 +20,7 @@ from air_hockey.simulation import (
     SimulationResult,
     run_simulation,
 )
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 
 def test_config_generates_initial_conditions_and_validates():

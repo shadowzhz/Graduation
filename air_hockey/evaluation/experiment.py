@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..simulation import MotionSimulator, SimulationResult
-from game_state import CurlingState
+from ..game_state import CurlingState
 from .metrics import ErrorStats, EvaluationResult, EvaluationSource, evaluate_result
 
 

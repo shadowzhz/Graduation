@@ -32,7 +32,7 @@ from air_hockey.recording import (
 )
 from air_hockey.simulation import MotionSimulator
 from air_hockey.vision.types import Detection
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
 
@@ -289,7 +289,7 @@ def test_recording_survives_process_exit_and_partial_last_frame():
         code = """
 import os, sys
 from air_hockey.recording import RuntimeRecorder
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 recorder = RuntimeRecorder(sys.argv[1], meta={"run": "crash"})
 recorder.record_frame(1.5, 60.0, CurlingState(x=123.0, y=456.0, timestamp=1.5))
 recorder.record_frame(2.0, 60.0, CurlingState(x=234.0, y=345.0, timestamp=2.0))

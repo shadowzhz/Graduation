@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from game_state import CurlingState
+from ..game_state import CurlingState
 
 
 @dataclass(eq=False)

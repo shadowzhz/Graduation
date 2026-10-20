@@ -16,7 +16,7 @@ import numpy as np
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.vision.detector import StoneDetector
-from game_state import CurlingState
+from air_hockey.game_state import CurlingState
 
 
 def _create_multi_circle_frame(circles, shape=(720, 1280, 3), timestamp=1.0):
