@@ -20,7 +20,7 @@ from air_hockey import core_config as core
 from air_hockey.ai import AIDecision
 from air_hockey.app.rally import ARRIVAL_TOLERANCE, READY_POSITION
 from air_hockey.control import PLCLink, PlcControlAdapter
-from air_hockey.control.plc import DEFAULT_PERIOD, TARGET_MAX_AGE
+from air_hockey.control.link import DEFAULT_PERIOD, TARGET_MAX_AGE
 
 
 COMMANDS = "e enable | h home | c reset | n next point | q quit (then Enter)"

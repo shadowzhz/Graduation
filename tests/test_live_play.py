@@ -14,8 +14,7 @@ from air_hockey.app.rally import READY_POSITION, RallyController, RallyState
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PlcControlAdapter
-from air_hockey.control import plc as protocol
-from air_hockey.control.plc import PLCFeedback, PLCLink
+from air_hockey.control import MotionLimits, PLCFeedback, PLCLink
 from air_hockey.physics import StoneMotion, goal_scorer
 from air_hockey.app.live import submit_rally_target
 
@@ -190,22 +189,18 @@ def test_live_moving_rear_puck_is_bypassed_and_returned():
 
 
 def test_live_rear_contact_uses_runtime_default_command_margin():
-    original_margin = protocol.MOTION_MARGIN_MM
-    try:
-        protocol.set_motion_margin(40.0)
-        table = _LiveTable(StoneMotion(x=300, y=140), (300, 250), PLCLink("offline"))
-        for _ in range(30):
-            _, request = table.observe()
-            assert request is not None
-            table.advance(request)
-            if table.impacts:
-                assert table.game.stone.vy > 0
-                assert table.minimum_y >= 139.0
-                break
-        else:
-            raise AssertionError(("Reachable rear puck was never contacted", table.mallet))
-    finally:
-        protocol.set_motion_margin(original_margin)
+    link = PLCLink("offline", limits=MotionLimits(margin_mm=40.0))
+    table = _LiveTable(StoneMotion(x=300, y=140), (300, 250), link)
+    for _ in range(30):
+        _, request = table.observe()
+        assert request is not None
+        table.advance(request)
+        if table.impacts:
+            assert table.game.stone.vy > 0
+            assert table.minimum_y >= 139.0
+            break
+    else:
+        raise AssertionError(("Reachable rear puck was never contacted", table.mallet))
 
 
 def test_live_unreachable_goal_side_puck_is_not_pushed_into_own_goal():

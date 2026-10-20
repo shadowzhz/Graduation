@@ -7,7 +7,7 @@
 - **全时段平滑混合下发**：斜坡期间 PLC 指令 100% 保持在 `BufferMode=5`（混合滤波），杜绝西门子 TO_Kinematics 顿挫停稳。
 
 ## 2. 核心文件与改动位置
-- `air_hockey/control/plc.py`：第 851 行死区判定改用总目标跨度 `span`，放开微步连续下发；第 880 行混合滤波。
+- `air_hockey/control/interface.py`（原 plc.py 已拆分，见 `control/__init__.py`）：`_prepare_move` 第 407 行死区判定改用总目标跨度 `span`，放开微步连续下发；第 436 行混合滤波。命令余量与 TIA 动力学现在是 `control/limits.py` 的 `MotionLimits` 对象。
 - `air_hockey/ai.py`：第 154 行冲门快球门线优先预判，Y 锁死防守线 140，X 提前堵截。
 - `air_hockey/app/rally.py`：连续物理导引与状态平滑防抖。
 

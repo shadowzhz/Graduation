@@ -58,7 +58,7 @@ from air_hockey.physics import (
     stone_inside_goal_mouth,
 )
 from air_hockey.game_state import GameState, StoneState, TrackingState
-from air_hockey.control.plc import PLCLink
+from air_hockey.control import PLCLink
 from air_hockey.prediction import TrajectoryPredictor
 
 

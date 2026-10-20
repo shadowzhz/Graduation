@@ -14,10 +14,10 @@ from collections import deque
 from pathlib import Path
 
 from ..camera import CameraConfig, CameraManager
-from ..control import PLCLink, PlcControlAdapter
-from ..control import plc as plc_module
+from ..control import MotionLimits, PLCLink, PlcControlAdapter
 from ..control.adapter import PlcTarget
-from ..control.plc import TARGET_MAX_AGE
+from ..control.limits import TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN
+from ..control.link import TARGET_MAX_AGE
 from ..recording import RuntimeRecorder
 from .perf import LatencySamples, build_perf_report, print_latency_report
 from .preview import PreviewBrightness, VisionWindow, encode_preview_ppm
@@ -54,27 +54,33 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False):
     return request
 
 
+def motion_limits_from_args(args):
+    """--motion-margin-mm 与 TIA 动力学预设值（--tia-*，未给的按默认值）。"""
+    overrides = {
+        "margin_mm": args.motion_margin_mm,
+        # ★ TIA 的动力学预设值（改了 TIA 就用这三个参数同步，否则自检是拿旧数字算的）
+        "accel_mm_s2": args.tia_accel_mm_s2,
+        "decel_mm_s2": args.tia_decel_mm_s2,
+        "speed_mm_s": args.tia_speed_mm_s,
+    }
+    return MotionLimits(**{name: value for name, value in overrides.items() if value is not None})
+
+
 def start_plc(args, runtime, rally):
     """按命令行参数配置并启动 PLCLink，打印行程包络与制动自检。"""
-    # ★ 命令余量必须在建 PLCLink 之前设好 —— 夹取用的 COMMAND_* 是
-    #   模块常量，_prepare_move 每次下发时直接读它。
-    if args.motion_margin_mm is not None:
-        plc_module.set_motion_margin(args.motion_margin_mm)
-    # ★ TIA 的动力学预设值（改了 TIA 就用这三个参数同步，否则自检是拿旧数字算的）
-    plc_module.set_axis_dynamics(accel_mm_s2=args.tia_accel_mm_s2,
-                                 decel_mm_s2=args.tia_decel_mm_s2,
-                                 speed_mm_s=args.tia_speed_mm_s)
-    print(f"[PLC] 命令余量 {plc_module.MOTION_MARGIN_MM:.0f}mm → "
-          f"X {plc_module.COMMAND_X_MIN:.0f}..{plc_module.COMMAND_X_MAX:.0f} "
-          f"Y {plc_module.COMMAND_Y_MIN:.0f}..{plc_module.COMMAND_Y_MAX:.0f}"
-          f"（机械行程 {plc_module.TRAVEL_X_MIN:.0f}..{plc_module.TRAVEL_X_MAX:.0f} / "
-          f"{plc_module.TRAVEL_Y_MIN:.0f}..{plc_module.TRAVEL_Y_MAX:.0f}，两端为限位开关）")
+    limits = motion_limits_from_args(args)
+    print(f"[PLC] 命令余量 {limits.margin_mm:.0f}mm → "
+          f"X {limits.command_x_min:.0f}..{limits.command_x_max:.0f} "
+          f"Y {limits.command_y_min:.0f}..{limits.command_y_max:.0f}"
+          f"（机械行程 {TRAVEL_X_MIN:.0f}..{TRAVEL_X_MAX:.0f} / "
+          f"{TRAVEL_Y_MIN:.0f}..{TRAVEL_Y_MAX:.0f}，两端为限位开关）")
     plc = PLCLink(args.plc, period=1.0 / args.plc_rate,
                   trigger_low_time=args.trigger_low_ms / 1000.0,
                   blend_threshold_mm=args.blend_threshold_mm,
                   target_slew_mm=args.target_slew_mm,
                   target_accel_mm_s2=args.target_accel_mm_s2,
-                  sequence_trigger=(args.trigger_mode == "sequence"))
+                  sequence_trigger=(args.trigger_mode == "sequence"),
+                  limits=limits)
     # ★ 把轴的**实际可达范围**交给 AI：它据此限制"可覆盖范围"
     #   （recovery_bounds），免得老是瞄到轴到不了的边角。
     runtime.ai.recovery_bounds = plc.reachable_bounds
@@ -84,11 +90,11 @@ def start_plc(args, runtime, rally):
     #    冲出包络的只可能是轴按 TIA 减速度刹车的那一段，必须小于包络到限位开关的余量。
     #    按 **--plc-rate** 估算；名义值和实测可能差很多，所以只作提示。
     if args.target_slew_mm and args.target_slew_mm > 0.0:
-        brake, speed = plc_module.braking_distance_mm(args.target_slew_mm, args.plc_rate)
+        brake, speed = limits.braking_distance_mm(args.target_slew_mm, args.plc_rate)
         print(f"[PLC] 目标限速 {args.target_slew_mm:g}mm/周期 × {args.plc_rate:g}Hz "
               f"→ 指令速度约 {speed:.0f}mm/s，按 TIA 减速度 "
-              f"{plc_module.AXIS_DECEL_LIMIT_MM_S2:.0f}mm/s^2 估算超调 {brake:.1f}mm")
-        for warning in plc_module.safety_warnings(args.target_slew_mm, args.plc_rate):
+              f"{limits.decel_mm_s2:.0f}mm/s^2 估算超调 {brake:.1f}mm")
+        for warning in limits.safety_warnings(args.target_slew_mm, args.plc_rate):
             print(f"[PLC] [!] 安全自检：{warning}")
     print("[PLC] 行程保护：命令夹在机械行程内缩余量之内；越界由硬件限位开关负责")
     plc.start()

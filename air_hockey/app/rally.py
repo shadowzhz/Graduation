@@ -13,7 +13,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from .. import core_config as core
-from ..control.plc import TARGET_MAX_AGE
+from ..control.link import TARGET_MAX_AGE
 from .vision_runtime import AI_HOME_Y
 
 if TYPE_CHECKING:

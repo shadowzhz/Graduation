@@ -9,11 +9,12 @@ from unittest.mock import patch
 from air_hockey import core_config as core
 from air_hockey.app.rally import ARRIVAL_TOLERANCE, READY_POSITION
 from air_hockey.control import PLCFeedback, PLCLink
-from air_hockey.control.plc import (
+from air_hockey.control.interface import PLCInterface
+from air_hockey.control.limits import (
     TRAVEL_X_MIN, TRAVEL_X_MAX, TRAVEL_Y_MIN, TRAVEL_Y_MAX,
     TABLE_X_MIN, TABLE_X_MAX, TABLE_Y_MIN, TABLE_Y_MAX,
-    PLCInterface, TARGET_MAX_AGE,
 )
+from air_hockey.control.link import TARGET_MAX_AGE
 from air_hockey.tools import probe_rally_points as points_tool
 
 

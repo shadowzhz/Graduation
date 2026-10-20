@@ -67,7 +67,7 @@ Camera -> VisionRuntime
             -> PlcControlAdapter (可选)
 ```
 
-> 仿真端（`sim_gui/`）复用同一 `physics` / `ai` / `prediction` / `game_state` 和 `air_hockey/control/plc.py`，仅保留 GUI 与 GUI 配置。
+> 仿真端（`sim_gui/`）复用同一 `physics` / `ai` / `prediction` / `game_state` 和 `air_hockey/control`（PLCLink），仅保留 GUI 与 GUI 配置。
 
 ### 3. 统一数据契约（`air_hockey/game_state.py`）
 
@@ -281,7 +281,8 @@ Graduation/
 │   ├── estimation/             # KalmanFilter 状态估计层
 │   ├── prediction/             # PredictionState + TrajectoryPredictor（统一物理核心）
 │   ├── planning/               # ControlCommand + TrajectoryPlanner
-│   ├── control/                # PlcControlAdapter + PLCLink（AI/轴反馈闭环）
+│   ├── control/                # PLC 闭环：protocol(DB 布局) / limits(行程·包络·MotionLimits) /
+│   │                           #   feedback / interface(S7 传输+运动规划) / link(PLCLink 线程) / adapter
 │   ├── recording/              # 统一运行日志（JSON schema + RuntimeRecorder）
 │   ├── simulation/             # 无摄像头运动仿真测试环境
 │   ├── evaluation/             # 多组实验误差评估与报告

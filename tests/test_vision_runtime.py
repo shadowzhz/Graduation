@@ -27,7 +27,7 @@ from air_hockey.app.rally import (
 from air_hockey.app.vision_runtime import AI_HOME_Y, VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PlcControlAdapter
-from air_hockey.control.plc import PLCFeedback
+from air_hockey.control import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.game_state import CurlingState, GameState, StoneState
 from air_hockey.vision.tracker import StoneTracker

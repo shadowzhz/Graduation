@@ -19,7 +19,7 @@ from air_hockey.app.rally import (
 from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PLCLink, PlcControlAdapter
-from air_hockey.control.plc import PLCFeedback
+from air_hockey.control import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.vision.types import Detection, Track, TrackState
 from air_hockey.game_state import CurlingState, GameState

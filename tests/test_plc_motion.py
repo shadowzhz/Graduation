@@ -8,8 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from air_hockey import core_config as core
-from air_hockey.control import plc as protocol
-from air_hockey.control.plc import PLCInterface, PLCLink
+from air_hockey.control import protocol
+from air_hockey.control.interface import TRANSITION_RATIO, PLCInterface
+from air_hockey.control.limits import (
+    COORD_EPSILON, DEFAULT_LIMITS, DEFAULT_ZONE, TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN,
+    MotionLimits,
+)
+from air_hockey.control.link import ECHO_TIMEOUT, TARGET_MAX_AGE, PLCLink
 
 
 @contextmanager
@@ -197,9 +202,9 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
         # 用符号常量而不是写死数值：这个断言的本意是验证**分量顺序**
         # （X, 0, Y, 0 —— 实机 TO_Kinematics 用的是分量 1 和 3），
         # 而不是验证行程的具体毫米数。写死数值会在改行程时误报。
-        # 上限是 COMMAND_*（命令限位），比机械行程内缩 MOTION_MARGIN_MM。
+        # 上限是命令包络（limits.command_*），比机械行程内缩 margin_mm。
         assert struct.unpack_from(">ddddi", move) == (
-            protocol.COMMAND_X_MAX, 0.0, protocol.COMMAND_Y_MAX, 0.0, 5)
+            DEFAULT_LIMITS.command_x_max, 0.0, DEFAULT_LIMITS.command_y_max, 0.0, 5)
         assert len(move) == 36
         assert plc.transport.operations[-2:] == [
             ("payload", 1, 20, move), ("bit", 1, 56, 0, True)]
@@ -302,12 +307,12 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
     client = MemoryPLC()
     try:
         assert client.connect()
-        left, right, top, bottom = protocol.DEFAULT_ZONE
+        left, right, top, bottom = DEFAULT_ZONE
         # 场地边缘映射到 **COMMAND_*（命令限位）**，不是 TRAVEL_*（机械行程/限位开关）。
-        # 两者的差值就是 MOTION_MARGIN_MM —— 命令不主动去碰限位开关。
+        # 两者的差值就是 margin_mm —— 命令不主动去碰限位开关。
         for game_point, physical_point in (
-            ((left, top), (protocol.COMMAND_X_MIN, protocol.COMMAND_Y_MIN)),
-            ((right, bottom), (protocol.COMMAND_X_MAX, protocol.COMMAND_Y_MAX)),
+            ((left, top), (DEFAULT_LIMITS.command_x_min, DEFAULT_LIMITS.command_y_min)),
+            ((right, bottom), (DEFAULT_LIMITS.command_x_max, DEFAULT_LIMITS.command_y_max)),
         ):
             client.reset_tracking()
             client.clear_trigger()
@@ -317,16 +322,16 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
 
         client.reset_tracking()
         client.clear_trigger()
-        assert client.send_linear_move(left - protocol.COORD_EPSILON / 2,
-                                       top - protocol.COORD_EPSILON / 2)
+        assert client.send_linear_move(left - COORD_EPSILON / 2,
+                                       top - COORD_EPSILON / 2)
         move = client.transport.moves[-1]
         assert struct.unpack_from(">dddd", move) == (
-            protocol.COMMAND_X_MIN, 0.0, protocol.COMMAND_Y_MIN, 0.0,
+            DEFAULT_LIMITS.command_x_min, 0.0, DEFAULT_LIMITS.command_y_min, 0.0,
         )
 
         before = len(client.transport.moves)
         client.clear_trigger()
-        assert not client.send_linear_move(left - protocol.COORD_EPSILON * 2, top)
+        assert not client.send_linear_move(left - COORD_EPSILON * 2, top)
         assert client.last_send_state == "invalid"
         assert len(client.transport.moves) == before
         assert not client.transport.db[1][56] & 1
@@ -556,7 +561,7 @@ def test_heartbeat_freeze_revokes_motion_and_requires_manual_rearm():
         assert link.enable_axes() and until(lambda: link.armed)
         client.transport.echo = False
         assert until(lambda: not link.feedback.plc_echo_ok and not link.armed,
-                     protocol.ECHO_TIMEOUT + 2.0)
+                     ECHO_TIMEOUT + 2.0)
         link.set_target(450, 180)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count >= cycles + 3)
@@ -580,7 +585,7 @@ def test_stale_target_does_not_emit_motion_or_revoke_arm():
         link._armed = True
         link.set_target(450, 180)
         with link._lock:
-            link._target_at = time.perf_counter() - protocol.TARGET_MAX_AGE - 0.01
+            link._target_at = time.perf_counter() - TARGET_MAX_AGE - 0.01
         link._cycle()
         assert client.transport.moves == []
         assert link.armed
@@ -771,7 +776,7 @@ def _clocked_plc(period=0.01, pulse=0.01):
             clock[0] += 0.002
             return super().db_write(*args)
 
-    with memory_binding(), patch.object(protocol.time, "perf_counter", side_effect=lambda: clock[0]):
+    with memory_binding(), patch.object(time, "perf_counter", side_effect=lambda: clock[0]):
         client = MemoryPLC()
         client.transport = TimedS7()
         assert client.connect()
@@ -1120,14 +1125,13 @@ def test_transition_write_failure_keeps_pulse_and_sequence_motion_connected():
 
 @memory_binding()
 def test_position_inside_physical_limits_can_arm_outside_command_margin():
-    original_margin = protocol.MOTION_MARGIN_MM
+    limits = MotionLimits(margin_mm=40)
     link = None
     try:
-        protocol.set_motion_margin(40)
         client = MemoryPLC()
         struct.pack_into(">dd", client.transport.db[1], 2, 0, -100)
         link = PLCLink("memory", period=0.03, sequence_trigger=True,
-                       client_factory=lambda *args: client)
+                       client_factory=lambda *args: client, limits=limits)
         link.start()
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
         assert not link.armed and not client.transport.moves
@@ -1135,22 +1139,21 @@ def test_position_inside_physical_limits_can_arm_outside_command_margin():
         assert link.set_target(300, 180)
         assert until(lambda: client.last_send_state == "sent")
         px, _, py, _, _ = struct.unpack(">ddddi", client.transport.moves[-1])
-        assert protocol.COMMAND_X_MIN <= px <= protocol.COMMAND_X_MAX
-        assert protocol.COMMAND_Y_MIN <= py <= protocol.COMMAND_Y_MAX
+        assert limits.command_x_min <= px <= limits.command_x_max
+        assert limits.command_y_min <= py <= limits.command_y_max
         assert link.armed
     finally:
         if link is not None:
             assert link.stop(timeout=2.0)
-        protocol.set_motion_margin(original_margin)
 
 
 @memory_binding()
 def test_position_past_travel_does_not_trip_software_limit():
     """软件不再设软限位：行程越界交给硬件限位开关（触发后 TIA 报轴故障再撤销）。"""
-    for x, y in ((protocol.TRAVEL_X_MIN - 0.1, 0),
-                 (protocol.TRAVEL_X_MAX + 0.1, 0),
-                 (0, protocol.TRAVEL_Y_MIN - 0.1),
-                 (0, protocol.TRAVEL_Y_MAX + 0.1)):
+    for x, y in ((TRAVEL_X_MIN - 0.1, 0),
+                 (TRAVEL_X_MAX + 0.1, 0),
+                 (0, TRAVEL_Y_MIN - 0.1),
+                 (0, TRAVEL_Y_MAX + 0.1)):
         client = MemoryPLC()
         link = PLCLink("memory", period=0.03, sequence_trigger=True,
                        client_factory=lambda *args: client)
@@ -1166,85 +1169,79 @@ def test_position_past_travel_does_not_trip_software_limit():
             assert link.set_target(300, 180)
             assert until(lambda: client.last_send_state == "sent")
             px, _, py, _, _ = struct.unpack(">ddddi", client.transport.moves[-1])
-            assert min(protocol.COMMAND_X_MIN, x) <= px <= max(protocol.COMMAND_X_MAX, x)
-            assert min(protocol.COMMAND_Y_MIN, y) <= py <= max(protocol.COMMAND_Y_MAX, y)
+            assert min(DEFAULT_LIMITS.command_x_min, x) <= px <= max(DEFAULT_LIMITS.command_x_max, x)
+            assert min(DEFAULT_LIMITS.command_y_min, y) <= py <= max(DEFAULT_LIMITS.command_y_max, y)
         finally:
             assert link.stop(timeout=2.0)
 
 
 @memory_binding()
 def test_advance_braking_prevents_accel_overshoot_and_warns():
-    original_margin = protocol.MOTION_MARGIN_MM
-    try:
-        protocol.set_motion_margin(40.0)
-        warns = protocol.safety_warnings(12.0, 100.0, 12000.0)
-        assert len(warns) == 1
-        assert "制动距离 60mm > 包络到限位开关的余量 40mm" in warns[0]
+    limits = MotionLimits(margin_mm=40.0)
+    warns = limits.safety_warnings(12.0, 100.0, 12000.0)
+    assert len(warns) == 1
+    assert "制动距离 60mm > 包络到限位开关的余量 40mm" in warns[0]
 
-        for busy in (True, False):
-            client = MemoryPLC()
-            client.period = 0.01
-            client.target_slew_mm = 12.0
-            client.target_accel_mm_s2 = 12000.0
-            client.actual_game = client.physical_to_game(0.0, 0.0)
-            client.actual_busy = busy
+    for busy in (True, False):
+        client = MemoryPLC()
+        client.limits = limits
+        client.period = 0.01
+        client.target_slew_mm = 12.0
+        client.target_accel_mm_s2 = 12000.0
+        client.actual_game = client.physical_to_game(0.0, 0.0)
+        client.actual_busy = busy
 
-            sim_time = 1000.0
-            orig_time = protocol.time.perf_counter
-            protocol.time.perf_counter = lambda: sim_time
-            gx, gy = client.physical_to_game(175.0, 0.0)
-            commands = []
-            try:
-                for i in range(30):
-                    sim_time = 1000.0 + i * 0.01
-                    prep = client._prepare_move(gx, gy)
-                    if prep is not None:
-                        px, py, bm, dist = prep
-                        client._commit_move(px, py, bm, dist)
-                        commands.append(px)
-            finally:
-                protocol.time.perf_counter = orig_time
+        sim_time = 1000.0
+        orig_time = time.perf_counter
+        time.perf_counter = lambda: sim_time
+        gx, gy = client.physical_to_game(175.0, 0.0)
+        commands = []
+        try:
+            for i in range(30):
+                sim_time = 1000.0 + i * 0.01
+                prep = client._prepare_move(gx, gy)
+                if prep is not None:
+                    px, py, bm, dist = prep
+                    client._commit_move(px, py, bm, dist)
+                    commands.append(px)
+        finally:
+            time.perf_counter = orig_time
 
-            assert commands, "Must produce commands"
-            assert max(commands) <= 175.0 + 1e-6
-            assert max(commands) <= protocol.TRAVEL_X_MAX
-            for prev, curr in zip(commands, commands[1:]):
-                assert curr - prev <= 12.0 + 1e-6
-    finally:
-        protocol.set_motion_margin(original_margin)
+        assert commands, "Must produce commands"
+        assert max(commands) <= 175.0 + 1e-6
+        assert max(commands) <= TRAVEL_X_MAX
+        for prev, curr in zip(commands, commands[1:]):
+            assert curr - prev <= 12.0 + 1e-6
 
 
 @memory_binding()
 def test_envelope_recovery_from_actual_game_steps_smoothly_without_jump():
-    original_margin = protocol.MOTION_MARGIN_MM
-    try:
-        protocol.set_motion_margin(40.0)
-        client = MemoryPLC()
-        client.period = 0.01
-        client.target_slew_mm = 12.0
-        client.actual_game = client.physical_to_game(-170.0, -120.0)
-        client.actual_busy = False
+    limits = MotionLimits(margin_mm=40.0)
+    client = MemoryPLC()
+    client.limits = limits
+    client.period = 0.01
+    client.target_slew_mm = 12.0
+    client.actual_game = client.physical_to_game(-170.0, -120.0)
+    client.actual_busy = False
 
-        gx, gy = client.physical_to_game(0.0, 0.0)
-        prep = client._prepare_move(gx, gy)
-        assert prep is not None
-        px, py, bm, dist = prep
-        step = max(abs(px - (-170.0)), abs(py - (-120.0)))
-        assert step <= 12.0 + 1e-6
-        assert px < protocol.COMMAND_X_MIN
-        assert px >= protocol.TRAVEL_X_MIN
-        assert py >= protocol.TRAVEL_Y_MIN
+    gx, gy = client.physical_to_game(0.0, 0.0)
+    prep = client._prepare_move(gx, gy)
+    assert prep is not None
+    px, py, bm, dist = prep
+    step = max(abs(px - (-170.0)), abs(py - (-120.0)))
+    assert step <= 12.0 + 1e-6
+    assert px < limits.command_x_min
+    assert px >= TRAVEL_X_MIN
+    assert py >= TRAVEL_Y_MIN
 
-        client._commit_move(px, py, bm, dist)
-        prep2 = client._prepare_move(gx, gy)
-        assert prep2 is not None
-        px2, py2, bm2, dist2 = prep2
-        step2 = max(abs(px2 - px), abs(py2 - py))
-        assert step2 <= 12.0 + 1e-6
-        assert px2 >= protocol.TRAVEL_X_MIN
-        assert py2 >= protocol.TRAVEL_Y_MIN
-    finally:
-        protocol.set_motion_margin(original_margin)
+    client._commit_move(px, py, bm, dist)
+    prep2 = client._prepare_move(gx, gy)
+    assert prep2 is not None
+    px2, py2, bm2, dist2 = prep2
+    step2 = max(abs(px2 - px), abs(py2 - py))
+    assert step2 <= 12.0 + 1e-6
+    assert px2 >= TRAVEL_X_MIN
+    assert py2 >= TRAVEL_Y_MIN
 
 
 def test_prepare_move_reports_step_actually_sent_after_accel_limit():
@@ -1260,7 +1257,7 @@ def test_prepare_move_reports_step_actually_sent_after_accel_limit():
     sent = max(abs(phys_x), abs(phys_y))
     assert sent < 10.0
     assert abs(distance - sent) < 1e-9
-    assert min(client.blend_threshold_mm, distance * protocol.TRANSITION_RATIO) < sent
+    assert min(client.blend_threshold_mm, distance * TRANSITION_RATIO) < sent
 
 
 @memory_binding()
