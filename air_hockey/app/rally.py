@@ -72,6 +72,9 @@ OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡
 MIDLINE_HYSTERESIS = 12.0          # 中线迟滞带（球台单位，约 11mm），进攻态需退至 392 才解除
 OUTGOING_VEL_THRESHOLD = 20.0      # 人类半场离开球门的速度阈值，低于此值不提前放弃防守
 STATE_DWELL_SECONDS = 0.08         # 最小状态驻留时间（80ms），防止单帧图像噪点引起状态来回抽搐
+# 放手迟滞：往外飞的球预测停点越过中线就放手；放手后要预测停点回落到中线以内这么多才重新进攻。
+# 现场 play2 3.58s：打软的球停点在 434→378 之间随速度估计抖动，没有迟滞就会放手/进攻来回切。
+LET_GO_HYSTERESIS = 40.0
 
 class RallyController:
     def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT,
@@ -92,6 +95,7 @@ class RallyController:
         self._last_seen_at = 0.0
         self._last_active_state = RallyState.WAITING
         self._state_changed_at = 0.0
+        self._letting_go = False
 
     def can_retrieve(self, stone) -> bool:
         """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
@@ -153,9 +157,17 @@ class RallyController:
                 machine_half = stone.y <= core.RINK_CENTER_Y
 
             puck_stopped = direction == "still"
-            # 冰壶往对方飞（刚被打出去）时，不管在哪个半场都回 READY ——
-            # 原来只在人类半场这样做，机器半场里会追上去再打第二次。
-            if direction != "outgoing":
+            # 冰壶往对方飞时，只有它**自己能飞出机器半场**才放手回 READY（刚被打出去，不追第二次）；
+            # 打软了 / 撞墙弹回、按物理会停在机器半场的慢球照样进攻，不回 READY 干等。
+            prediction = getattr(result, "prediction", None)
+            # 判据是"预测路线会不会越过中线"，不是停点：快球会在对方半场撞墙弹回、停点落回我方半场，
+            # 那也是先进了人那半场，回来时按来球防守。放手后回落到中线以内 LET_GO_HYSTERESIS 才重新进攻。
+            line = core.RINK_CENTER_Y - (LET_GO_HYSTERESIS if self._letting_go else 0.0)
+            leaving = direction == "outgoing" and (
+                not machine_half or prediction is None
+                or max(point[1] for point in prediction.trajectory) > line)
+            self._letting_go = leaving
+            if not leaving:
                 # 状态防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
                 desired_state = RallyState.ATTACKING if machine_half else RallyState.DEFENDING
                 if (previous in (RallyState.ATTACKING, RallyState.DEFENDING)

@@ -426,3 +426,11 @@ def test_puck_hit_away_in_machine_half_is_not_chased_again():
     # 冰壶停在机器半场以后，照常上去回收
     still = tick(controller, observation(2.0, x=340, y=300, vx=0, vy=0))
     assert still.target is not None and still.target != READY_POSITION, still
+
+
+def test_weak_outgoing_puck_that_stays_in_machine_half_is_still_attacked():
+    """往外溜、但按物理会停在机器半场的慢球（打软了 / 撞墙弹回）要继续进攻，不能回 READY 干等。"""
+    controller = RallyController()
+    weak = tick(controller, observation(1.0, x=340, y=250, vx=0, vy=60))
+    assert weak.state == RallyState.ATTACKING, weak
+    assert weak.target is not None and weak.target != READY_POSITION, weak

@@ -10,6 +10,11 @@ import numpy as np
 
 from .vision_runtime import VisionResult
 
+# 叠加层配色（BGR）。白色球台、红色冰壶上都要醒目：冰壶相关统一用青色，AI 目标用琥珀色。
+COLOR_TABLE = (150, 150, 150)       # 球台 ROI：细灰线，只做参照
+COLOR_PUCK = (255, 200, 0)          # 冰壶观测 / 速度 / 预测轨迹
+COLOR_TARGET = (0, 170, 255)        # 球槌目标
+
 
 def render(result: VisionResult, table_roi: Sequence[int], camera_geometry) -> np.ndarray:
     """可视化绘制函数。
@@ -59,60 +64,38 @@ def _draw_annotations(
         return max(1, round(value * scale))
 
     rx, ry, rw, rh = table_roi
-    cv2.rectangle(output, point(rx, ry), point(rx + rw, ry + rh), (0, 255, 255), size(2))
+    cv2.rectangle(output, point(rx, ry), point(rx + rw, ry + rh), COLOR_TABLE, 1)
 
     if result.detection is not None:
         center = point(result.detection.center_x, result.detection.center_y)
-        cv2.circle(output, center, size(result.detection.radius), (0, 255, 0), size(2))
-        cv2.circle(output, center, size(3), (0, 255, 0), -1)
+        cv2.circle(output, center, size(result.detection.radius), COLOR_PUCK, size(2), cv2.LINE_AA)
+        cv2.circle(output, center, size(3), COLOR_PUCK, -1, cv2.LINE_AA)
 
     if result.track is not None:
         center = point(result.track.center_x, result.track.center_y)
         end = point(result.track.center_x + result.track.vx * 0.1, result.track.center_y + result.track.vy * 0.1)
-        cv2.arrowedLine(output, center, end, (0, 0, 255), size(2), tipLength=0.2)
+        cv2.arrowedLine(output, center, end, COLOR_PUCK, size(2), cv2.LINE_AA, tipLength=0.2)
 
     if result.trajectory and len(result.trajectory) > 1:
         pixel_trajectory = camera_geometry.table_to_raw_batch(result.trajectory)
         for i in range(len(pixel_trajectory) - 1):
-            pt1 = point(*pixel_trajectory[i])
-            pt2 = point(*pixel_trajectory[i + 1])
-            fade = max(50, 255 - i * 6)
-            line_color = (fade, int(fade * 0.75), 50)
-            cv2.line(output, pt1, pt2, line_color, size(2), cv2.LINE_AA)
-        for i, (px, py) in enumerate(pixel_trajectory):
-            alpha = max(60, 255 - i * 6)
-            cv2.circle(output, point(px, py), size(2), (alpha, 170, 70), -1)
+            cv2.line(output, point(*pixel_trajectory[i]), point(*pixel_trajectory[i + 1]),
+                     COLOR_PUCK, size(1), cv2.LINE_AA)
+        for px, py in pixel_trajectory[1:]:
+            cv2.circle(output, point(px, py), size(3), COLOR_PUCK, -1, cv2.LINE_AA)
 
-    # 轨迹调试：在预测终点画一个三角标记，与 AI 目标十字区分
+    # 预测终点：空心圆，与 AI 目标的十字区分
     if result.trajectory_debug is not None:
         ex, ey = result.trajectory_debug.predicted_endpoint
         end_px, end_py = camera_geometry.table_to_raw(ex, ey)
-        cv2.drawMarker(
-            output,
-            point(end_px, end_py),
-            (0, 165, 255),
-            cv2.MARKER_TRIANGLE_UP,
-            size(18),
-            size(2),
-        )
+        cv2.circle(output, point(end_px, end_py), size(10), COLOR_PUCK, size(2), cv2.LINE_AA)
 
     target = result.rally.target if result.rally is not None else result.ai_target
     if target is not None:
         tx, ty = camera_geometry.table_to_raw(target[0], target[1])
-        cv2.drawMarker(
-            output,
-            point(tx, ty),
-            (255, 0, 255),
-            cv2.MARKER_CROSS,
-            size(28),
-            size(3),
-        )
-
-    cv2.putText(output, f"FPS {result.fps:.1f}", point(14, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                0.7 * scale, (255, 255, 255), size(2))
-    if result.rally is not None:
-        cv2.putText(output, result.rally.state.name, point(150, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5 * scale, (255, 255, 255), size(1))
+        center = point(tx, ty)
+        cv2.circle(output, center, size(18), COLOR_TARGET, size(2), cv2.LINE_AA)
+        cv2.drawMarker(output, center, COLOR_TARGET, cv2.MARKER_CROSS, size(24), size(2))
     return output
 
 

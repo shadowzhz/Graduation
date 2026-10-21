@@ -26,13 +26,13 @@
 - 删除脉冲触发（`--trigger-mode`、`--trigger-low-ms`），只用序号握手；序号由 `PLCInterface.sequence` 管理。
 - **默认改为终点模式**（`--target-slew-mm 0`）：只发 AI 终点、BufferMode 固定 5、舍入间距 -1（TO 最大）；轴忙时新终点变化 < 10mm 不发（`ENDPOINT_RESEND_MM`）。旧斜坡模式用 `--target-slew-mm 12 --target-accel-mm-s2 12000` 恢复。
 - AI 提前量（`ai.py:_lead_target`）：冰壶比 --mallet-speed 快时不再瞄"冰壶当前位置"，改为沿真实物理路径找最早来得及的拦截点（仿真接触率 28/30 → 30/30）。
-- 二次追打：`rally.py` 冰壶往对方飞（vy > 20）时不管在哪个半场都回 READY（原来机器半场里会追上去再打一次，play2 日志 3.579s 打出后 3.857s 又打一次）。
+- 二次追打：`rally.py` 冰壶往对方飞（vy > 20）且预测路线越过中线才放手回 READY；会停在机器半场的软球照样进攻；放手后路线回落到中线以内 40 才重新进攻（`LET_GO_HYSTERESIS`）。play2 日志里放手/进攻切换 17s 内仅 3 次。
+- 预览窗口改为深色仪表盘：左画面、右侧栏（回合状态 / 冰壶 / 速度 / 目标 / 球槌 / PLC 授权·安全·说明）、底栏按钮带快捷键；叠加层配色常量在 `renderer.py` 的 `COLOR_*`。
 
 ## 5. 反应慢排查（2026-10-20）
 - 旧现场日志 runs/play.log（10-14，Windows，未纳入 git）：视觉 160~185 FPS、单帧 0.4~5 ms，PLC 周期约 29 Hz、序号落后 0~1；
   但球槌约 1/3 的移动背离当前目标、目标跳变后约 300 ms 才开始移动，并出现 busy=True 却原地不动 ——
   轴在执行早先下发的指令，嫌疑在 PLC/TO 执行环节（日志无时间戳，只能估量级）。
-- 软件链路仿真（理想轴）：击球后 29~53 ms AI 目标对准拦截点，slew 12 时指令位置约 170~200 ms 到位。
 
 ## 6. 现场延迟数据（2026-10-20 lag_test，Windows）
 - 相机：漏了 --camera-fast，停在 YUY2 **9.9 FPS**（目标每 100ms 才更新）。已改为默认 MJPG（--camera-slow 退回），并在采集 < 30 FPS 时告警。

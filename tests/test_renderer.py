@@ -4,7 +4,7 @@ import numpy as np
 
 from air_hockey import core_config as core
 from air_hockey.app.rally import RallyDecision, RallyState
-from air_hockey.app.renderer import format_status, render, render_preview
+from air_hockey.app.renderer import COLOR_TARGET, format_status, render, render_preview
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
 from air_hockey.vision.types import Detection, Track, TrackState
@@ -118,11 +118,11 @@ def _assert_requested_target(preview_width, rally_present, rally_target):
     if target is not None:
         x = round((target[0] + geometry.offset_x) * scale)
         y = round((target[1] + geometry.offset_y) * scale)
-        assert np.array_equal(output[y, x], [255, 0, 255])
+        assert np.array_equal(output[y, x], COLOR_TARGET)
         assert geometry.calls == [target]
     else:
         assert geometry.calls == []
-        assert not np.any(np.all(output == [255, 0, 255], axis=2))
+        assert not np.any(np.all(output == COLOR_TARGET, axis=2))
 
     if rally_present:
         old_x = round((result.ai_target[0] + geometry.offset_x) * scale)

@@ -6,6 +6,12 @@ from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
 from air_hockey.vision.types import Detection
 from air_hockey.app.preview import DISPLAY_WIDTH, PreviewBrightness, encode_preview_ppm
+from air_hockey.app.renderer import COLOR_PUCK, COLOR_TABLE, COLOR_TARGET
+
+
+def rgb_of(bgr):
+    return tuple(reversed(bgr))
+
 
 TABLE_ROI = (350, 0, 580, 650)
 
@@ -42,9 +48,9 @@ def test_encode_preview_ppm_draws_in_scaled_raw_pixel_coordinates():
 
     assert (width, height, maxval) == (DISPLAY_WIDTH, 360, 255)
     assert tuple(rgb[330, 500]) == (30, 20, 10)  # BGR 输入被转换为 RGB，不在标注区
-    assert tuple(rgb[120, 175]) == (255, 255, 0)  # 球台 ROI 左边框缩放到一半
-    assert tuple(rgb[150, 250]) == (0, 255, 0)  # 冰壶观测中心
-    assert tuple(rgb[200, 500]) == (255, 0, 255)  # table->raw 后的 AI 十字中心
+    assert tuple(rgb[120, 175]) == rgb_of(COLOR_TABLE)  # 球台 ROI 左边框缩放到一半
+    assert tuple(rgb[150, 250]) == rgb_of(COLOR_PUCK)  # 冰壶观测中心
+    assert tuple(rgb[200, 500]) == rgb_of(COLOR_TARGET)  # table->raw 后的 AI 十字中心
     assert tuple(rgb[275, 550]) != (30, 20, 10)  # 预测轨迹连线
     assert np.all(result.frame.image == (10, 20, 30))  # 绘制不污染处理帧
 
@@ -56,7 +62,7 @@ def test_encode_preview_ppm_preserves_non_default_aspect_ratio():
     width, height, _, pixels = split_ppm(encode_preview_ppm(result, TABLE_ROI, MockGeometry()))
     rgb = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
     assert (width, height) == (640, 320)
-    assert tuple(rgb[160, 320]) == (0, 255, 0)
+    assert tuple(rgb[160, 320]) == rgb_of(COLOR_PUCK)
 
 
 def test_encode_preview_brightness_gain_does_not_change_camera_frame():

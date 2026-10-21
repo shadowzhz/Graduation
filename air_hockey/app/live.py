@@ -177,14 +177,14 @@ class LiveSession:
         )
 
         if not self.headless:
-            self.window = VisionWindow()
+            self.window = VisionWindow(dry_run=args.dry_run)
             self.preview_lock = threading.Lock()
             self.shared = {
                 "result": None,
                 "result_seq": -1,
                 "ppm": None,
                 "ppm_seq": 0,
-                "status": "等待画面",
+                "plc": None,
                 "fatal": None,
             }
 
@@ -341,7 +341,7 @@ class LiveSession:
         )
         if self.args.dry_run:
             status_text += " | DRY-RUN: motion blocked"
-        plc_gate = None
+        plc_gate = plc_text = None
         if plc is not None:
             plc_text, plc_gate = plc_status_text(plc, feedback, time.perf_counter())
             status_text += plc_text
@@ -350,7 +350,7 @@ class LiveSession:
             with self.preview_lock:
                 self.shared["result"] = result
                 self.shared["result_seq"] = result.frame.sequence
-                self.shared["status"] = status_text + "    Q / ESC 退出"
+                self.shared["plc"] = None if plc is None else (plc_text, plc_gate)
 
         stats_interval = 1.0 if self.headless else STATS_INTERVAL
         if time.perf_counter() - self._stats_timer >= stats_interval:
