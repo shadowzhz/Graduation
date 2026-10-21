@@ -187,7 +187,10 @@ class PLCLink:
         client = self._client
         trans = getattr(client, "last_transition_mm", None)
         if getattr(client, "transition_enabled", False):
-            text += (f" | 精磨 {trans:.1f}mm" if trans is not None else " | 精磨 未发")
+            if trans is None:
+                text += " | 精磨 未发"
+            else:
+                text += " | 精磨 TO最大" if trans < 0 else f" | 精磨 {trans:.1f}mm"
         else:
             text += " | 精磨 关（DB1.DBD150 写失败）"
         if counters["other"]:

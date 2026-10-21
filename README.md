@@ -176,7 +176,7 @@ Windows 将 `python3` 改为 `python`，相机用 `--camera-device 0`。标定�
 
 GUI/控制台显示当前动作、track_valid、球速度、目标、球槌实际位置、身后球击打阶段及 PLC armed/safe。动作/追踪/授权变化立即打印，不按每帧刷。没有反应时核对检测标记是否跟球、目标是否变化、PLC 是否授权及实际位置是否跟上；不能用仿真成功替代实机接触验证。
 
-运动积压保护：每条指令在 TO_Kinematics 里都是一条排队作业（BufferMode=5）。轴忙、且上次下发点领先实际位置超过 4 步（`MAX_BACKLOG_STEPS × --target-slew-mm`，默认 48mm）时，本周期不再追加作业，等轴追上来再继续，避免轴把一串过时的中间点依次走完。诊断行里的"轴积压暂停追加 N"就是被挡下的次数；实机若出现走走停停，调大 `control/interface.py` 的 `MAX_BACKLOG_STEPS`。
+下发方式（默认终点模式）：`--target-slew-mm` 默认 0，只下发 AI 的终点，BufferMode 固定 5（混合），舍入间距 `TransitionParameter[1]` 写 -1（由 TO 按 TIA「最大舍入间距」取最大值），速度/加速度完全由 TIA 运动机构设置决定。`MC_MoveLinearAbsolute` 只有 BufferMode 1/2/5、没有"中止当前作业"（西门子 S7-1500T Kinematics 手册参数表），新终点总是排在当前作业后面混合进去，所以轴忙时新终点离上次终点不足 10mm（`interface.ENDPOINT_RESEND_MM`）就不发。若报跟随误差 801，要把 TIA 运动机构的加速度/减速度降到轴能力以内。`--target-slew-mm > 0` 退回旧的斜坡模式（切成中间点下发），此时轴忙且上次下发点领先实际位置超过 4 步（`MAX_BACKLOG_STEPS`）会暂停追加，诊断行显示"轴积压暂停追加 N"。
 
 运动中报警撤销授权时，工作线程只打印一条 `运动撤销快照`，包含前后使能/就绪/轴故障/busy 状态、当前运动学错误码、原始机械位置、最后已发送的物理目标及 BufferMode。801 表示参与运动系统的轴未就绪，具体原因仍需结合这条快照和 TIA 诊断；不会自动复位或重新授权。人工 E 重新授权会清除本地已发送目标的死区缓存，避免把报警中断的目标当作已完成；报警清除本身不重发目标。Windows 现场可用 `python -u main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30 2>&1 | Tee-Object -FilePath play_console.log` 保留控制台；故障时提供这条快照而不是仅截取“禁止运动”。
 

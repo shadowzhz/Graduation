@@ -203,8 +203,11 @@ def test_measured_kinematics_component_order_and_circular_bit_survive():
         assert struct.unpack_from(">ddddi", move) == (
             DEFAULT_LIMITS.command_x_max, 0.0, DEFAULT_LIMITS.command_y_max, 0.0, 5)
         assert len(move) == 36
-        assert plc.transport.operations[-2:] == [
-            ("payload", 1, 20, move), ("sequence", 1, protocol.COMM_SEQ_OFFSET, struct.pack(">i", plc.sequence))]
+        assert plc.transport.operations[-3:] == [
+            ("payload", 1, 20, move),
+            # 终点模式：舍入间距写 -1 = 由 TO 取最大可能值
+            ("transition", 1, protocol.COMM_TRANSITION_OFFSET, struct.pack(">d", -1.0)),
+            ("sequence", 1, protocol.COMM_SEQ_OFFSET, struct.pack(">i", plc.sequence))]
         assert plc.transport.db[1][56] == 0x02  # 圆弧启动位不被碰
         assert plc.transport.db[1][0] == 0  # 不能覆盖使能与复位控制位
     finally:
@@ -239,11 +242,9 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
     client = MemoryPLC()
     try:
         assert client.connect()
-        # ★ buffer_mode 只允许 TO_Kinematics 认的 1/2/5：
-        #     1 = 附加运动（先走完当前、停下、再走新的）
-        #     5 = 滤波处理（达到混合距离时混合，较高速度）
-        #   ⚠️ 轴版的 0（立即中止）在运动机构版里是**非法值**，作业会被拒绝。
-        for x, expected_mode in ((0.0, 5), (2.0, None), (8.0, 5), (25.0, 1)):
+        # ★ buffer_mode 只发 5（混合）：TO_Kinematics 只认 1/2/5，1 会停稳，
+        #   轴版的 0（立即中止）在运动机构版里是**非法值**，作业会被拒绝。
+        for x, expected_mode in ((0.0, 5), (2.0, None), (8.0, 5), (25.0, 5)):
             game = client.physical_to_game(x, 0.0)
             before = len(client.transport.moves)
             client.clear_trigger()
@@ -285,7 +286,7 @@ def test_slew_roundoff_does_not_switch_blending_to_stop_and_append():
 
         client.target_slew_mm = 0.0
         assert client.send_linear_move(500, 300)
-        assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 1
+        assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 5
     finally:
         client.disconnect()
 
@@ -598,10 +599,11 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
             assert (client._last_phys_x, client._last_phys_y,
                     client.last_buffer_mode, client.sequence) == previous
             operations = client.transport.operations[start:]
-            # 每次下发按顺序写：目标块 → 精磨距离 → 序号。
+            # 每次下发按顺序写：目标块 →（精磨距离）→ 序号。
+            #   终点模式的精磨距离固定 -1，第一次下发已写过，这次不再重写。
             #   · payload 失败在第 1 步 → 只有 1 次操作
-            #   · 序号失败在第 3 步 → 前 2 次都已经写出去，但没有多出一次运动
-            assert len(operations) == (1 if failure == "payload" else 3)
+            #   · 序号失败 → 目标块已写出去，但没有多出一次运动
+            assert len(operations) == (1 if failure == "payload" else 2)
         finally:
             client.disconnect()
 
@@ -945,6 +947,7 @@ def test_diagnostics_runs_without_client_local_and_reports_transition():
     "实时处理失败：name 'client' is not defined"，看起来像整条视觉管线坏了。
     """
     client = MemoryPLC()
+    client.target_slew_mm = 20.0  # 斜坡模式才按步距算精磨距离（client_factory 不继承 link 的参数）
     link = PLCLink("memory", period=0.03, target_slew_mm=20.0,
                    blend_threshold_mm=20.0, client_factory=lambda *args: client)
     link.start()

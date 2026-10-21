@@ -87,7 +87,9 @@ def start_plc(args, runtime, rally):
     # ★★ 启动就自检"余量够不够刹得住"：目标斜坡自己会提前减速停在包络内，
     #    冲出包络的只可能是轴按 TIA 减速度刹车的那一段，必须小于包络到限位开关的余量。
     #    按 **--plc-rate** 估算；名义值和实测可能差很多，所以只作提示。
-    if args.target_slew_mm and args.target_slew_mm > 0.0:
+    if not args.target_slew_mm or args.target_slew_mm <= 0.0:
+        print("[PLC] 终点模式：只下发 AI 终点；速度/加速度由 TIA 运动机构设置决定")
+    else:
         brake, speed = limits.braking_distance_mm(args.target_slew_mm, args.plc_rate)
         print(f"[PLC] 目标限速 {args.target_slew_mm:g}mm/周期 × {args.plc_rate:g}Hz "
               f"→ 指令速度约 {speed:.0f}mm/s，按 TIA 减速度 "

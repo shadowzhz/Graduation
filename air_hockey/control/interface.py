@@ -54,6 +54,13 @@ TRANSITION_RATIO = 0.75
 # ponytail: 4 步 ≈ 30Hz 下 130ms 的余量（含反馈与序号确认各约一个周期）；实机若出现走走停停就调大。
 MAX_BACKLOG_STEPS = 4.0
 
+# 终点模式（target_slew_mm <= 0）：只下发 AI 的终点，不再切成一串中间点。
+# MC_MoveLinearAbsolute 没有"中止当前作业"的 BufferMode（只有 1/2/5，见西门子 S7-1500T
+# Kinematics 手册 MC_MoveLinearAbsolute 参数表），每个新终点都会排进作业队列。所以轴忙时
+# 新终点离上次下发的终点不够远就不发，避免 AI 目标的小抖动把队列塞满。
+# ponytail: 10mm 是估计值；实机若反应迟钝就调小，若又出现一顿一顿就调大。
+ENDPOINT_RESEND_MM = 10.0
+
 
 def _braking_step(dist: float, max_delta: float) -> float:
     """按剩余距离算出不超调的最大离散步长。"""
@@ -338,9 +345,11 @@ class PLCInterface:
             self.last_send_state = "invalid"
             return None
         # 执行中的同点不再排队；在限速前比较，避免挡住仍在推进的斜坡目标。
+        # 终点模式下"同点"放宽到 ENDPOINT_RESEND_MM。
+        same_point_mm = ENDPOINT_RESEND_MM if self.target_slew_mm <= 0.0 else DEAD_ZONE_MM
         if (self.actual_busy and self._last_phys_x is not None
                 and max(abs(phys_x - self._last_phys_x),
-                        abs(phys_y - self._last_phys_y)) < DEAD_ZONE_MM):
+                        abs(phys_y - self._last_phys_y)) < same_point_mm):
             self.last_send_state = "pending"
             return None
         # 运动积压：轴忙且上次下发点已远远领先实际位置 → 队列里已有好几条作业在排，先不追加。
@@ -439,23 +448,12 @@ class PLCInterface:
                     self.last_send_state = "deadzone"
                     return None
                 self.last_send_state = "deadzone-resend"
-            # 步距 ≤ blend_threshold → 混合（平滑）；更大 → 附加运动（先走完、停下、再走）。
-            #
-            # ★★★ TO_Kinematics 的 BufferMode 取值和**轴版完全不同**，别照搬轴的 0/1：
-            #     1 = 附加运动    当前的运动序列已完成，运动系统将停止，之后才执行新作业  ← 会停
-            #     2 = 滤波处理（较低速度）  达到混合距离时与当前运动混合
-            #     5 = 滤波处理（较高速度）  达到混合距离时与当前运动混合
-            #   而轴版 MC_MoveAbsolute 的 0=立即中止 / 1=混合 —— **运动机构版没有 0**。
-            #
-            # 现场踩过：这里原来发 0（照抄轴版语义），对 TO_Kinematics 是**非法值**，
-            # 作业被拒绝、目标直接丢失。日志里 `BufferMode 混合 N / 中止 1` 的那个
-            # "中止 1" 就是它。
-            #
-            # 现在大跳变时发 1（附加运动）= 明确的"走完当前再走新的"，语义最接近原来
-            # 想要的中止重开，而且是**合法值**。
-            # 限速开启时，所有斜坡步均由软件规划保证连续平滑，统一保持 BufferMode=5（混合滤波），
-            # 彻底杜绝中途停稳造成的卡顿；只有未开启限速（slew<=0）且步距超阈值时才发模式 1。
-            buffer_mode = 1 if (self.target_slew_mm <= 0.0 and distance > self.blend_threshold_mm + COORD_EPSILON) else 5
+            # ★★★ TO_Kinematics 的 BufferMode 只有 1/2/5，和轴版不同（**没有 0 = 中止**）：
+            #     1 = 附加运动    当前运动走完、停稳后才执行新作业  ← 会停
+            #     2 = 混合（较低速度）  5 = 混合（较高速度）
+            # 现场踩过：照抄轴版发 0 是非法值，作业被拒绝。
+            # 斜坡模式和终点模式都统一用 5：新作业与当前运动混合，不停稳。
+            buffer_mode = 5
             # 精磨距离和诊断步距必须用**实际发出去的步长**（加速度限幅、包络兜底之后）。
             # 限幅前的 distance 可能比实际步长大好几倍（目标反向时实测 20mm vs 6.5mm），
             # 精磨距离按它算就会超过整段运动，TO 把整段圆掉、到不了目标点。
@@ -500,9 +498,14 @@ class PLCInterface:
         """
         if not self.transition_enabled:
             return
-        if distance is None or distance <= DEAD_ZONE_MM:
+        if self.target_slew_mm <= 0.0:
+            # 终点模式：-1 = 由 TO 取"最大可能的舍入间距"（受 TIA「最大舍入间距」设置限制），
+            # 新终点一来就尽早拐向它，不必先走到旧终点附近。
+            value = -1.0
+        elif distance is None or distance <= DEAD_ZONE_MM:
             return          # 步距太小：保持上一次的精磨距离，不要写 0
-        value = min(self.blend_threshold_mm, distance * TRANSITION_RATIO)
+        else:
+            value = min(self.blend_threshold_mm, distance * TRANSITION_RATIO)
         value = round(value, 1)
         # 变化不大就不写 —— 省一次往返，也避免 PLC 读到中间态。
         if (self._last_transition is not None

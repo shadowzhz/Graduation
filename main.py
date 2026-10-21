@@ -67,39 +67,21 @@ def build_parser():
                              "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
                              "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
     parser.add_argument("--blend-threshold-mm", type=float, default=12.0, metavar="MM",
-                        help="相邻两条目标之间步距超过它就改用 BufferMode=1（附加停稳），"
-                             "否则用 5（混合）。默认 12，与 --target-slew-mm 默认值相同 —— "
-                             "步距不超阈值时保持混合。"
-                             "★ 太小会频繁附加停稳；不修改 PLC 的实际速度或加速度")
-    parser.add_argument("--target-slew-mm", type=float, default=12.0, metavar="MM",
-                        help="目标限速（mm/周期），默认 12。"
-                             "★★★ 这个治的是「顿」：rally 状态机切换时目标会**瞬间跳变**"
-                             "（现场实测 p95 步距 192.8mm），大步会使用 "
-                             "BufferMode=1，完成当前运动并停稳后再执行下一条。"
-                             "★★★ 但它决定**指令速度**（= slew × 实测周期），"
-                             "所以直接决定刹不刹得住：超调 = v^2/(2×TIA 减速度) 必须小于 "
-                             "--motion-margin-mm，否则全速冲向边缘时可能碰到限位开关。"
-                             "默认 12 @30Hz = 360mm/s，超调约 2mm，配默认余量 5mm 是安全的；"
-                             "调大 slew 时看启动自检，必要时同步加大余量")
+                        help="仅斜坡模式（--target-slew-mm > 0）使用：精磨距离上限。默认 12")
+    parser.add_argument("--target-slew-mm", type=float, default=0.0, metavar="MM",
+                        help="默认 0 = 终点模式：只下发 AI 的终点，速度/加速度完全由 TIA 运动机构的设置决定。"
+                             "> 0 = 旧的斜坡模式：每周期最多走这么多毫米，切成一串中间点下发"
+                             "（现场表现为一顿一顿）。斜坡模式下指令速度 = slew × 实测周期，"
+                             "超调 = v^2/(2×TIA 减速度) 必须小于 --motion-margin-mm")
     parser.add_argument("--motion-margin-mm", type=float, default=5.0, metavar="MM",
                         help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
                              "默认 5。机械行程 X -192..224 / Y -129..187，"
                              "包络 = 行程内缩它。程序不另设软件行程保护；"
                              "★ 它应大于启动自检打印的超调距离，否则全速冲向边缘时可能碰到限位开关")
-    parser.add_argument("--target-accel-mm-s2", type=float, default=12000.0, metavar="MM_S2",
-                        help="目标加速度限幅（mm/s^2），默认 12000；0 = 关闭。"
-                             "★★★ 治的是**跟随误差 801**：只限步长（--target-slew-mm）"
-                             "管不住「目标突然反向」——限速器只看步长大小、不看方向。"
-                             "★★ 必须**低于 TIA「运动机构运动 → 加速度」的预设值**"
-                             "（现在是 15000），否则等于没限。"
-                             "现场 TIA 工艺对象 Y轴「状态位和错误位」实测："
-                             "错误=跟随误差(红)、警告=动态限值(黄)、已归位=绿、驱动装置=灰，"
-                             "快照 physical Y=110.49（行程正中间、prev_busy=True）——"
-                             "**轴在正常位置自由运动途中跟不上指令，不是撞限位**。"
-                             "算下来 40mm/周期 @65Hz 需要约 169,000 mm/s^2，"
-                             "而轴的能力只有 106N/3kg ≈ 35,000 mm/s^2，差约 5 倍。"
-                             "限加速度后急转时目标自己拐大弯、直线时仍可全速。"
-                             "★ 调大更跟手但更容易报跟随误差；调小更稳但急转变慢")
+    parser.add_argument("--target-accel-mm-s2", type=float, default=0.0, metavar="MM_S2",
+                        help="仅斜坡模式使用：目标加速度限幅（mm/s^2），默认 0 = 关闭。"
+                             "终点模式下加减速由 TIA 决定；若报跟随误差 801，"
+                             "要把 TIA「运动机构运动 → 加速度/减速度」调到轴能力以内（约 35000）")
     parser.add_argument("--tia-decel-mm-s2", type=float, default=None, metavar="MM_S2",
                         help="同步 TIA「运动机构运动 → 减速度」的预设值（默认按 35000）。"
                              "★★★ 它决定**制动距离** = v^2/(2x减速度)，也就决定"
