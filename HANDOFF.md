@@ -26,7 +26,8 @@
 - 删除脉冲触发（`--trigger-mode`、`--trigger-low-ms`），只用序号握手；序号由 `PLCInterface.sequence` 管理。
 - **默认改为终点模式**（`--target-slew-mm 0`）：只发 AI 终点、BufferMode 固定 5、舍入间距 -1（TO 最大）；轴忙时新终点变化 < 10mm 不发（`ENDPOINT_RESEND_MM`）。旧斜坡模式用 `--target-slew-mm 12 --target-accel-mm-s2 12000` 恢复。
 - AI 提前量（`ai.py:_lead_target`）：冰壶比 --mallet-speed 快时不再瞄"冰壶当前位置"，改为沿真实物理路径找最早来得及的拦截点（仿真接触率 28/30 → 30/30）。
-- 二次追打：`rally.py` 冰壶往对方飞（vy > 20）且预测路线越过中线才放手回 READY；会停在机器半场的软球照样进攻；放手后路线回落到中线以内 40 才重新进攻（`LET_GO_HYSTERESIS`）。play2 日志里放手/进攻切换 17s 内仅 3 次。
+- 二次追打：`rally.py` 冰壶往对方飞，且**球槌 1s 内碰过它**（中心距 ≤ 两半径 + 30，`TOUCH_MARGIN/TOUCH_MEMORY`）、预测路线越过中线才放手回 READY；没碰过的（从机器端角落弹出来的）照样进攻。放手后路线回落到中线以内 40 才重新进攻（`LET_GO_HYSTERESIS`）。play2 回放与旧规则逐帧一致。
+- 迎击：`ai.py:_strike_through` 球槌已等在拦截/守门点、冰壶沿直线 0.15s 内就到时，目标沿来球方向往回推 60（`STRIKE_WINDOW/STRIKE_THROUGH`），接触时球槌在冲而不是停着。仿真直线冲门球接触时球槌速度 0 → 满速。
 - 预览窗口改为深色仪表盘：左画面、右侧栏（回合状态 / 冰壶 / 速度 / 目标 / 球槌 / PLC 授权·安全·说明）、底栏按钮带快捷键；叠加层配色常量在 `renderer.py` 的 `COLOR_*`。
 
 ## 5. 挡不住球的根因（2026-10-21 play2 回放）

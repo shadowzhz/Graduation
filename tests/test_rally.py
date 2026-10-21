@@ -422,11 +422,20 @@ def test_puck_hit_away_in_machine_half_is_not_chased_again():
     回归 play2 现场日志 3.866s：冰壶被击出 v=(460,627)，目标却变成 (497,335) 追着打。
     """
     controller = RallyController()
-    hit = tick(controller, observation(1.0, x=340, y=250, vx=460, vy=627))
+    mallet = (330, 195)     # 击出那一刻球槌就贴在冰壶后面
+    hit = tick(controller, observation(1.0, x=340, y=250, vx=460, vy=627, mallet=mallet), mallet=mallet)
     assert hit.target == READY_POSITION, hit
     # 冰壶停在机器半场以后，照常上去回收
     still = tick(controller, observation(2.0, x=340, y=300, vx=0, vy=0))
     assert still.target is not None and still.target != READY_POSITION, still
+
+
+def test_untouched_puck_bouncing_out_of_machine_corner_is_attacked():
+    """球槌没碰过、从机器端角落弹出来往外飞的球不能当成"刚打出去"放走，要上去打一次。"""
+    controller = RallyController()
+    rebound = tick(controller, observation(1.0, x=500, y=120, vx=-150, vy=300))
+    assert rebound.state == RallyState.ATTACKING, rebound
+    assert rebound.target is not None and rebound.target != READY_POSITION, rebound
 
 
 def test_weak_outgoing_puck_that_stays_in_machine_half_is_still_attacked():

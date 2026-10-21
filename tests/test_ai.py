@@ -1,6 +1,8 @@
 ﻿from dataclasses import replace
 import math
+from unittest.mock import patch
 
+from air_hockey import ai as ai_module
 from air_hockey import core_config as layout
 from air_hockey.ai import AirHockeyAI
 from air_hockey.control import PLCLink
@@ -298,11 +300,24 @@ def test_fast_shot_guard_has_hysteresis_against_velocity_noise():
         assert ai.choose_target(_live_state(x, 330.0, 0.0, -300.0)).target_y == home
     # 明确偏离球门才退出
     assert ai.choose_target(_live_state(outside, 330.0, 0.0, -300.0)).target_y > home + 100.0
-    # 速度迟滞：守门模式下 vy 落在进入阈值以上、退出阈值以下仍保持
+    # 速度迟滞：守门模式下 vy 落在进入阈值以上、退出阈值以下仍保持（这里只看守门判断，关掉迎击）
     ai = AirHockeyAI()
-    assert ai.choose_target(_live_state(300.0, 200.0, 0.0, -300.0)).target_y == home
-    assert ai.choose_target(_live_state(300.0, 180.0, 0.0, -100.0)).target_y == home
-    assert ai.choose_target(_live_state(300.0, 150.0, 0.0, -45.0)).target_y == home
+    with patch.object(ai_module, "STRIKE_THROUGH", 0.0):
+        assert ai.choose_target(_live_state(300.0, 200.0, 0.0, -300.0)).target_y == home
+        assert ai.choose_target(_live_state(300.0, 180.0, 0.0, -100.0)).target_y == home
+        assert ai.choose_target(_live_state(300.0, 150.0, 0.0, -45.0)).target_y == home
+
+
+def test_goal_guard_strikes_through_only_when_puck_is_about_to_arrive():
+    """守门线等球时，冰壶快到了才迎着来球方向冲出去打，远的时候老老实实等在防守线。"""
+    home = ai_home_y()
+    contact = layout.STONE_RADIUS + layout.MALLET_RADIUS
+    far = AirHockeyAI().choose_target(_live_state(300.0, 330.0, 0.0, -600.0))
+    assert far.target_y == home
+    # 再过约 0.05s 就碰到球槌：目标沿来球方向（+y）往前推
+    near = AirHockeyAI().choose_target(_live_state(300.0, home + contact + 30.0, 0.0, -600.0))
+    assert near.target_x == 300.0
+    assert near.target_y == home + ai_module.STRIKE_THROUGH
 
 
 def test_slow_ball_that_stops_before_defense_line_is_attacked_not_guarded():

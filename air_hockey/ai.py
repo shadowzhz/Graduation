@@ -26,6 +26,11 @@ FAST_SHOT_ENTER_VY = -60.0
 FAST_SHOT_EXIT_VY = -20.0
 FAST_SHOT_ENTER_MARGIN = core.STONE_RADIUS
 FAST_SHOT_EXIT_MARGIN = core.STONE_RADIUS * 3.0
+# 迎击：终点模式下球槌开到目标就停住，球只是撞上一个静止的球槌弹回去。
+# 冰壶再过 STRIKE_WINDOW 秒就碰到球槌时，把目标沿来球方向往回推 STRIKE_THROUGH，
+# 球槌在接触瞬间还在朝球冲，把球打回去。窗口之前照常等在原位，不提前离开防守位置。
+STRIKE_WINDOW = 0.15
+STRIKE_THROUGH = 60.0
 
 
 @dataclass
@@ -182,17 +187,19 @@ class AirHockeyAI:
         self._goal_guard = fast_shot_on_goal
         if fast_shot_on_goal:
             blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_goal_x * difficulty.prediction
-            target_x = clamp(blended_x + error, safe_left, safe_right)
-            return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)
+            strike_x, strike_y = self._strike_through(state, blended_x + error, state.ai_home_y)
+            return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom),
+                              stalled_stone_phase)
 
         # 冰壶在自己前方且进了攻击区才主动追。
         # 这里原来直接瞄冰壶当前位置 → 球动了轴才追，永远慢一拍；
         # 现在过一遍 _lead_target 加上球槌响应延迟的提前量。
         if stone_in_attack_zone and not stone_behind_ai:
             lead_x, lead_y = self._lead_target(state, state.stone.x, state.stone.y)
+            strike_x, strike_y = self._strike_through(state, lead_x + error, lead_y)
             return AIDecision(
-                clamp(lead_x + error, safe_left, safe_right),
-                clamp(lead_y, safe_top, safe_bottom),
+                clamp(strike_x, safe_left, safe_right),
+                clamp(strike_y, safe_top, safe_bottom),
                 stalled_stone_phase,
             )
 
@@ -207,7 +214,27 @@ class AirHockeyAI:
             target_x = clamp(lead_x + error, safe_left, safe_right)
         else:
             target_x = clamp(core.RINK_CENTER_X + error * 0.35, safe_left, safe_right)
-        return AIDecision(target_x, state.ai_home_y, stalled_stone_phase)
+        strike_x, strike_y = self._strike_through(state, target_x, state.ai_home_y)
+        return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom),
+                          stalled_stone_phase)
+
+    @staticmethod
+    def _strike_through(state: GameState, target_x: float, target_y: float):
+        """冰壶快要碰到等在 target 的球槌时，把目标沿来球方向往回推，让球槌迎着球打出去。"""
+        vx, vy = state.stone.vx, state.stone.vy
+        speed = math.hypot(vx, vy)
+        if speed <= core.STONE_STOP_SPEED:
+            return target_x, target_y
+        dx, dy = target_x - state.stone.x, target_y - state.stone.y
+        contact = core.STONE_RADIUS + core.MALLET_RADIUS
+        gap = math.hypot(dx, dy) - contact
+        # 球槌得已经**等在**那个位置附近：还在赶路时它本来就在动，往回推只会把它带离拦截点
+        waiting = math.hypot(state.ai_x - target_x, state.ai_y - target_y) <= STRIKE_THROUGH
+        # 等的位置要在冰壶**现在这条直线**上（中间不撞墙）才迎击；要先撞墙的，按现在方向冲出去会打空
+        on_path = abs(dx * vy - dy * vx) / speed <= contact
+        if not waiting or dx * vx + dy * vy <= 0.0 or not on_path or gap / speed > STRIKE_WINDOW:
+            return target_x, target_y
+        return target_x - vx / speed * STRIKE_THROUGH, target_y - vy / speed * STRIKE_THROUGH
 
     def advance_serve_phase(self, state: GameState, dt: float) -> str:
         """AI 开球时，就位了才切到击球阶段。"""

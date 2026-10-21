@@ -75,6 +75,11 @@ STATE_DWELL_SECONDS = 0.08         # 最小状态驻留时间（80ms），防止
 # 放手迟滞：往外飞的球预测停点越过中线就放手；放手后要预测停点回落到中线以内这么多才重新进攻。
 # 现场 play2 3.58s：打软的球停点在 434→378 之间随速度估计抖动，没有迟滞就会放手/进攻来回切。
 LET_GO_HYSTERESIS = 40.0
+# 只有"刚被我们打过"的球才放手：球槌与冰壶中心距离进过接触距离 + TOUCH_MARGIN 才算碰过
+# （PLC 位置约晚 20~30ms，留余量）。碰过之后 TOUCH_MEMORY 秒内往外飞才放手；
+# 没碰过的球（例如从机器端角落弹出来的）照样进攻。play2 里三次真实击打最近距离 14~34。
+TOUCH_MARGIN = 30.0
+TOUCH_MEMORY = 1.0
 
 class RallyController:
     def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT,
@@ -96,6 +101,7 @@ class RallyController:
         self._last_active_state = RallyState.WAITING
         self._state_changed_at = 0.0
         self._letting_go = False
+        self._touched_at = -math.inf
 
     def can_retrieve(self, stone) -> bool:
         """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
@@ -157,15 +163,18 @@ class RallyController:
                 machine_half = stone.y <= core.RINK_CENTER_Y
 
             puck_stopped = direction == "still"
-            # 冰壶往对方飞时，只有它**自己能飞出机器半场**才放手回 READY（刚被打出去，不追第二次）；
-            # 打软了 / 撞墙弹回、按物理会停在机器半场的慢球照样进攻，不回 READY 干等。
+            if math.dist(position, (stone.x, stone.y)) <= core.STONE_RADIUS + core.MALLET_RADIUS + TOUCH_MARGIN:
+                self._touched_at = now
+            # 冰壶往对方飞时，只有**刚被我们打过**、且它自己能飞出机器半场才放手回 READY（不追第二次）；
+            # 打软了、按物理会停在机器半场的慢球，以及没碰过、从角落弹出来的球照样进攻。
             prediction = getattr(result, "prediction", None)
             # 判据是"预测路线会不会越过中线"，不是停点：快球会在对方半场撞墙弹回、停点落回我方半场，
             # 那也是先进了人那半场，回来时按来球防守。放手后回落到中线以内 LET_GO_HYSTERESIS 才重新进攻。
             line = core.RINK_CENTER_Y - (LET_GO_HYSTERESIS if self._letting_go else 0.0)
             leaving = direction == "outgoing" and (
-                not machine_half or prediction is None
-                or max(point[1] for point in prediction.trajectory) > line)
+                not machine_half
+                or (now - self._touched_at <= TOUCH_MEMORY
+                    and (prediction is None or max(point[1] for point in prediction.trajectory) > line)))
             self._letting_go = leaving
             if not leaving:
                 # 状态防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
