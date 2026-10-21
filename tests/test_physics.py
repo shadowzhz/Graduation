@@ -55,7 +55,7 @@ def test_step_resolves_wall_before_friction():
 def test_step_resolves_goal_post_before_velocity_update():
     post_x, post_y = layout.GOAL_POSTS[0]
     dt = 0.01
-    stone = StoneMotion(x=post_x + 14.1, y=post_y + 15.0, vx=0.0, vy=-200.0)
+    stone = StoneMotion(x=post_x + layout.STONE_RADIUS + 0.1, y=post_y + 15.0, vx=0.0, vy=-200.0)
     expected = StoneMotion(x=stone.x, y=stone.y, vx=stone.vx, vy=stone.vy)
     expected.x += expected.vx * dt
     expected.y += expected.vy * dt
@@ -345,7 +345,8 @@ def test_default_forecast_reaches_stop_after_multiple_bounces():
     assert prediction[-1] == prediction.endpoint
     assert abs(prediction.duration - steps * step) < 1e-9
     assert prediction.duration > 1024 * step
-    assert sum(x in (50.0, 550.0) for x, _ in prediction) > 2
+    walls = (layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
+    assert sum(x in walls for x, _ in prediction) > 2
     assert source.vx == layout.MAX_STONE_SPEED
 
 

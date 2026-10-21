@@ -93,17 +93,18 @@ def test_goal_and_obstacle_terminal_positions_are_exact():
     assert goal.endpoint == goal[-1]
     assert goal.endpoint[1] + core.STONE_RADIUS < core.RINK_TOP
     assert goal.duration > 0.0
-    already_scored = predictor.predict(300.0, 20.0, 0.0, -150.0)
-    assert already_scored.trajectory == [(300.0, 20.0)]
+    scored_y = core.RINK_TOP - core.STONE_RADIUS - 6.0
+    already_scored = predictor.predict(300.0, scored_y, 0.0, -150.0)
+    assert already_scored.trajectory == [(300.0, scored_y)]
     assert already_scored.duration == 0.0
 
-    obstacle = (350.0, 380.0)
+    obstacle = (300.0 + core.STONE_RADIUS + core.MALLET_RADIUS + 20.0, 380.0)
     contact = predictor.predict(300.0, 380.0, 150.0, 0.0, obstacles=(obstacle,))
     assert contact.endpoint == contact[-1]
     assert math.dist(contact.endpoint, obstacle) <= core.STONE_RADIUS + core.MALLET_RADIUS
     assert contact.duration > 0.0
-    already_touching = predictor.predict(350.0, 380.0, 150.0, 0.0, obstacles=(obstacle,))
-    assert already_touching.trajectory == [(350.0, 380.0)]
+    already_touching = predictor.predict(obstacle[0], 380.0, 150.0, 0.0, obstacles=(obstacle,))
+    assert already_touching.trajectory == [(obstacle[0], 380.0)]
     assert already_touching.duration == 0.0
 
 

@@ -475,7 +475,8 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
     for sequence, y in enumerate((600, 600, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150), 1):
         timestamp = 10.0 + (sequence - 1) * 0.1
         image = np.zeros((720, 1280, 3), dtype=np.uint8)
-        cv2.circle(image, (900, y), 30, (0, 0, 255), -1)
+        # x=1000px 离球门足够远（球门 ±1 个冰壶半径之外），走进攻而不是门线堵截
+        cv2.circle(image, (1000, y), 30, (0, 0, 255), -1)
         result = runtime.process_frame(Frame(image, timestamp=timestamp, sequence=sequence))
         identities.append(result.track.track_id)
         assert result.detection is not None
@@ -507,7 +508,7 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
     assert len(ys) > 1, f"Y 没有动，只有 {ys}"
     assert max(ys) > AI_HOME_Y + 100.0, f"Y 的前向行程被压掉了：最大只有 {max(ys)}"
     targets = {(round(x, 2), round(y, 2)) for x, y in active_targets}
-    assert (407.25, READY_POSITION[1]) in targets
+    assert (448.5, READY_POSITION[1]) in targets
 
 
 def test_low_fps_real_miss_keeps_confirmation_within_grace_period():

@@ -169,7 +169,7 @@ def test_behind_mallet_puck_uses_existing_goal_side_retrieval():
     decision = tick(RallyController(), result, mallet=current)
     assert decision.state == RallyState.ATTACKING
     assert result.ai_decision.stalled_stone_phase == "sidestepping"
-    assert decision.target == (353, 250)
+    assert decision.target == (300 + core.STONE_RADIUS + core.MALLET_RADIUS + 8, 250)
 
 
 def test_returned_human_half_puck_requests_ready_on_same_observation():
@@ -345,7 +345,8 @@ def test_rally_retrieves_stopped_puck_that_is_deep_enough():
 
 def test_rally_rejects_stopped_pucks_outside_contact_reach():
     controller = RallyController(reachable_bounds=(118.0, 486.0, 125.0, 314.0))
-    for x, y in ((50, 250), (550, 250), (300, 370), (300, 125)):
+    beyond_reach_y = 314.0 + core.STONE_RADIUS + core.MALLET_RADIUS + 1.0
+    for x, y in ((50, 250), (550, 250), (300, beyond_reach_y), (300, 125)):
         result = observation(1, x=x, y=y, vx=0, vy=0)
         assert not controller.can_retrieve(result.curling_state)
         assert tick(controller, result).target is None
