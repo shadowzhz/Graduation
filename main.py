@@ -73,9 +73,9 @@ def build_parser():
                              "> 0 = 旧的斜坡模式：每周期最多走这么多毫米，切成一串中间点下发"
                              "（现场表现为一顿一顿）。斜坡模式下指令速度 = slew × 实测周期，"
                              "超调 = v^2/(2×TIA 减速度) 必须小于 --motion-margin-mm")
-    parser.add_argument("--motion-margin-mm", type=float, default=5.0, metavar="MM",
+    parser.add_argument("--motion-margin-mm", type=float, default=0.0, metavar="MM",
                         help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
-                             "默认 5。机械行程 X -192..224 / Y -129..187，"
+                             "默认 0（走满行程，冲到边上可能碰限位开关停轴）。机械行程 X -192..224 / Y -129..187，"
                              "包络 = 行程内缩它。程序不另设软件行程保护；"
                              "★ 它应大于启动自检打印的超调距离，否则全速冲向边缘时可能碰到限位开关")
     parser.add_argument("--target-accel-mm-s2", type=float, default=0.0, metavar="MM_S2",

@@ -40,9 +40,10 @@ DEFAULT_ZONE = (
     core_config.RINK_TOP, core_config.RINK_CENTER_Y,
 )
 
-# 命令余量：下发目标离机械行程端点（限位开关）再往内收这么多毫米，
-# 正常运动和超调都不主动碰限位开关。运行期可用 --motion-margin-mm 覆盖。
-DEFAULT_MOTION_MARGIN_MM = 5.0
+# 命令余量：下发目标离机械行程端点（限位开关）再往内收这么多毫米。
+# 2026-10-21 现场要求让球槌走满机械行程，改为 0（原 5）：全速冲到边上时可能碰到限位开关停轴，
+# 频繁碰到就用 --motion-margin-mm 加回来。
+DEFAULT_MOTION_MARGIN_MM = 0.0
 
 
 # ============================================================================
@@ -54,8 +55,8 @@ DEFAULT_MOTION_MARGIN_MM = 5.0
 #      中的表示」。注意运动学里 x=X 轴、z=Y 轴，见 _write_payload 注释）
 #          X -192 .. 224        Y -129 .. 187
 #      行程两端是硬件限位开关（2026-10-20 起代码不再另设软限位）。
-#   ② 代码命令包络 = TRAVEL_* 再内缩 MotionLimits.margin_mm（默认 5mm）
-#          X -187 .. 219        Y -124 .. 182
+#   ② 代码命令包络 = TRAVEL_* 再内缩 MotionLimits.margin_mm（默认 0，即机械行程本身）
+#          X -192 .. 224        Y -129 .. 187
 #   ③ 超调距离 = v² / (2a)，v = target_slew_mm × 实际周期（不是 --plc-rate），
 #      a = TIA 减速度。目标斜坡本身会提前减速、停在包络内（_braking_step）；
 #      冲过包络的只可能是轴跟不上、按自身减速度刹车的那一段，所以用 TIA 减速度估算。
