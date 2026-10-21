@@ -2,7 +2,7 @@
 
 流程：
   1. 从相机抓取一帧原始图像（或使用 --image 提供的静态图片）；
-  2. 依次点击球台四角：左上(TL) -> 右上(TR) -> 右下(BR) -> 左下(BL)，坐标为 raw pixel；
+  2. 依次点击球台墙内四角 TL -> TR -> BR -> BL（游戏坐标的四角，见 CORNER_HINT），坐标为 raw pixel；
   3. 使用 CameraGeometry.raw_to_undistorted() 把四点转换到 undistorted pixel；
   4. cv2.getPerspectiveTransform() 求解 undistorted pixel -> table/rink 的 3x3 单应矩阵；
   5. 保存 homography_matrix / raw_points / undistorted_points 到 npz。
@@ -24,8 +24,10 @@ from air_hockey import core_config as core
 from air_hockey.camera import CameraConfig, CameraManager
 from air_hockey.vision.geometry import CameraGeometry
 
-# 固定的点击顺序：左上 -> 右上 -> 右下 -> 左下
+# 点击顺序是【游戏坐标】的四角，不是屏幕上的左上右上：TL=(RINK_LEFT, RINK_TOP) 在机器端。
+# 相机可以横着看球台（现场就是：机器端在画面左边），所以只要求屏幕上顺时针，不要求 TL 在屏幕左上。
 CORNER_LABELS = ("TL", "TR", "BR", "BL")
+CORNER_HINT = "TL/TR = machine end, BR/BL = human end; clockwise on screen"
 RINK_CORNERS = np.array(
     [
         [core.RINK_LEFT, core.RINK_TOP],
@@ -69,14 +71,12 @@ def validate_corner_points(points, image_size) -> float:
     if any(np.linalg.norm(quad[i] - quad[j]) < 5.0 for i in range(4) for j in range(i + 1, 4)):
         raise ValueError("角点重复或距离过近（小于 5 像素）")
 
-    tl, tr, br, bl = quad
-    if not (tl[0] < tr[0] and bl[0] < br[0] and tl[1] < bl[1] and tr[1] < br[1]):
-        raise ValueError("角点顺序错误；必须按 TL -> TR -> BR -> BL 点击")
-
+    # 只查绕向：游戏四角 TL->TR->BR->BL 在 y 向下的坐标里是顺时针，屏幕上也必须顺时针
+    # （旋转可以，镜像/交叉不行）。不查"TL 在屏幕左上"，相机横放时那样反而点不对。
     edges = np.roll(quad, -1, axis=0) - quad
     crosses = edges[:, 0] * np.roll(edges[:, 1], -1) - edges[:, 1] * np.roll(edges[:, 0], -1)
-    if not (np.all(crosses > 0) or np.all(crosses < 0)):
-        raise ValueError("四角必须组成无自交的凸四边形")
+    if not np.all(crosses > 0):
+        raise ValueError("角点顺序错误或四边形自交；必须按 TL -> TR -> BR -> BL 在屏幕上顺时针点击")
     area = abs(float(np.dot(quad[:, 0], np.roll(quad[:, 1], -1))
                      - np.dot(quad[:, 1], np.roll(quad[:, 0], -1)))) / 2.0
     if area < width * height * 0.05:
@@ -135,7 +135,7 @@ class CornerCollector:
         else:
             tip = "4 corners done   s: save   r: reset   q/ESC: quit"
         cv2.putText(view, tip, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(view, f"order: {' -> '.join(CORNER_LABELS)}", (16, 58),
+        cv2.putText(view, f"order: {' -> '.join(CORNER_LABELS)}   {CORNER_HINT}", (16, 58),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         return view
 
@@ -207,7 +207,9 @@ def main():
     cv2.namedWindow(collector.window, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(collector.window, collector.on_mouse)
 
-    print("依次点击球台四角：左上(TL) -> 右上(TR) -> 右下(BR) -> 左下(BL)")
+    print("依次点击球台墙内四角 TL -> TR -> BR -> BL（屏幕上顺时针）：")
+    print("  TL = 机器端、靠 PLC X 负方向那一侧；TR = 机器端另一侧；BR、BL = 人类端，与 TR、TL 隔着球台相对")
+    print("  点白色台面与墙的交线；圆角处点两条直墙延长线的交点")
     print("点击完成后按 s 保存，r 重置，q / ESC 退出")
     while True:
         cv2.imshow(collector.window, collector.render())

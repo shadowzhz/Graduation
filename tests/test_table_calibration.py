@@ -30,6 +30,17 @@ def test_corner_validation_rejects_wrong_order():
         assert "TL -> TR -> BR -> BL" in str(exc)
 
 
+def test_sideways_camera_accepts_game_corner_order_and_rejects_mirror():
+    # 现场相机横放：机器端在画面左边，TL 在画面左下，屏幕上顺时针点击
+    sideways = np.array([[60.0, 650.0], [60.0, 50.0], [1200.0, 40.0], [1210.0, 660.0]])
+    assert calibrate_table.validate_corner_points(sideways, IMAGE_SIZE) > 0
+    try:
+        calibrate_table.validate_corner_points(sideways[::-1], IMAGE_SIZE)
+        assert False, "mirrored order should be rejected"
+    except ValueError as exc:
+        assert "TL -> TR -> BR -> BL" in str(exc)
+
+
 def test_corner_validation_rejects_repeated_points():
     repeated = VALID_QUAD.copy()
     repeated[1] = repeated[0]
