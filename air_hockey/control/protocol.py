@@ -53,7 +53,7 @@ GROUP_COMM_LOST_LATCH_BIT = 4
 STATUS_READ_START = 0
 # DB1 读取长度：原来 141（0~140）。序号握手加的 上次序号 在 146，
 # 所以要读到 149 才拿得到 —— 150 字节正好覆盖 0~149。
-# [!] 不能超过 DB1 实际长度（现场 DB1 最后一个变量是 气缸启动@150.0，共 151 字节）。
+# [!] 不能超过 DB1 实际长度（现场 DB1：TransitionParameter[1..5] LReal @150~189，气缸启动 @190.0）。
 STATUS_READ_SIZE = 150
 COMM_READ_START = 0
 # DB18 随现场变量表增长：58（原始）→ 62 → 66（加 Reaction）→ 92 → 96（RemainingDistance
@@ -105,7 +105,7 @@ COMM_KIN_REACTION_OFFSET = 62
 # 现场 DB1 里 TIA 把这两个变量追加到了末尾：
 #     指令序号   DInt   142.0
 #     上次序号   DInt   146.0
-# （气缸启动 150.0 是 DB1 的最后一个变量 → DB1 共 151 字节）
+# （之后是 TransitionParameter @150.0~189，气缸启动 @190.0）
 COMM_SEQ_OFFSET = 142         # DInt：Python 写，指令序号
 COMM_SEQ_ACK_OFFSET = 146     # DInt：PLC 写，已处理的序号（读回来就是"落后几条"）
 

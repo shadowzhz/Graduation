@@ -82,7 +82,7 @@ def test_moving_machine_half_puck_pursuit_is_capped_by_depth_limit():
     完全固定 Y 会让轴看起来像不动。
     """
     controller = RallyController(defense_forward_limit=90.0)
-    decision = tick(controller, observation(1, x=420, y=250, vy=200))
+    decision = tick(controller, observation(1, x=420, y=250, vy=-200))
     assert decision.state == RallyState.ATTACKING
     assert decision.target == (420.0, READY_POSITION[1] + 90.0)
 
@@ -90,14 +90,14 @@ def test_moving_machine_half_puck_pursuit_is_capped_by_depth_limit():
 def test_zero_forward_limit_pins_to_defense_line():
     """上限为 0 时等价于钉死在防守线上（Y 完全不动）。"""
     controller = RallyController(defense_forward_limit=0.0)
-    decision = tick(controller, observation(1, x=420, y=250, vy=200))
+    decision = tick(controller, observation(1, x=420, y=250, vy=-200))
     assert decision.target == (420.0, READY_POSITION[1])
 
 
 def test_unlimited_pursuit_matches_ai_target():
     """不设上限时等于原来的主动追球行为。"""
     decision = tick(RallyController(defense_forward_limit=None),
-                    observation(1, x=420, y=250, vy=200))
+                    observation(1, x=420, y=250, vy=-200))
     assert decision.target == (420.0, 250.0)
 
 
@@ -413,3 +413,16 @@ def test_midline_hysteresis_and_velocity_deadband_prevent_chatter():
     # 5. 只有明确向玩家球门飞去（vy > 20）才触发回位 READY
     dec_out = tick(controller, observation(1.5, x=450, y=500.0, vy=100.0))
     assert dec_out.state in (RallyState.RECOVERING, RallyState.WAITING) and dec_out.target == READY_POSITION
+
+
+def test_puck_hit_away_in_machine_half_is_not_chased_again():
+    """球槌把冰壶打出去之后（还在机器半场、往对方飞），回 READY，不能再追上去打第二次。
+
+    回归 play2 现场日志 3.866s：冰壶被击出 v=(460,627)，目标却变成 (497,335) 追着打。
+    """
+    controller = RallyController()
+    hit = tick(controller, observation(1.0, x=340, y=250, vx=460, vy=627))
+    assert hit.target == READY_POSITION, hit
+    # 冰壶停在机器半场以后，照常上去回收
+    still = tick(controller, observation(2.0, x=340, y=300, vx=0, vy=0))
+    assert still.target is not None and still.target != READY_POSITION, still

@@ -25,14 +25,14 @@
 - 卡尔曼：远处假目标待确认那一帧不再拿旧观测更新（原来会让滤波时间倒退、位置往回跳），`vision_runtime.py` 第 339 行。
 - 删除脉冲触发（`--trigger-mode`、`--trigger-low-ms`），只用序号握手；序号由 `PLCInterface.sequence` 管理。
 - **默认改为终点模式**（`--target-slew-mm 0`）：只发 AI 终点、BufferMode 固定 5、舍入间距 -1（TO 最大）；轴忙时新终点变化 < 10mm 不发（`ENDPOINT_RESEND_MM`）。旧斜坡模式用 `--target-slew-mm 12 --target-accel-mm-s2 12000` 恢复。
-- AI 提前量（`ai.py:_lead_target`）：冰壶比 --mallet-speed 快时不再退回瞄"冰壶当前位置"，改为沿真实物理路径找最早来得及的拦截点。全链路仿真（120fps、30 种射门）：轴 800 单位/s、延迟 0.1s 时接触率 28/30 → 30/30；轴 300 单位/s、延迟 0.4s 时仍有 26/30 —— 仿真里上位机不是接不住的主因，要看实机 `[延迟]` 行。
+- AI 提前量（`ai.py:_lead_target`）：冰壶比 --mallet-speed 快时不再瞄"冰壶当前位置"，改为沿真实物理路径找最早来得及的拦截点（仿真接触率 28/30 → 30/30）。
+- 二次追打：`rally.py` 冰壶往对方飞（vy > 20）时不管在哪个半场都回 READY（原来机器半场里会追上去再打一次，play2 日志 3.579s 打出后 3.857s 又打一次）。
 
 ## 5. 反应慢排查（2026-10-20）
 - 旧现场日志 runs/play.log（10-14，Windows，未纳入 git）：视觉 160~185 FPS、单帧 0.4~5 ms，PLC 周期约 29 Hz、序号落后 0~1；
   但球槌约 1/3 的移动背离当前目标、目标跳变后约 300 ms 才开始移动，并出现 busy=True 却原地不动 ——
   轴在执行早先下发的指令，嫌疑在 PLC/TO 执行环节（日志无时间戳，只能估量级）。
 - 软件链路仿真（理想轴）：击球后 29~53 ms AI 目标对准拦截点，slew 12 时指令位置约 170~200 ms 到位。
-- 新增 `[延迟]` 分段统计（`air_hockey/control/latency.py`）和记录里的 `plc_state`，下次实机运行即可定位瓶颈。
 
 ## 6. 现场延迟数据（2026-10-20 lag_test，Windows）
 - 相机：漏了 --camera-fast，停在 YUY2 **9.9 FPS**（目标每 100ms 才更新）。已改为默认 MJPG（--camera-slow 退回），并在采集 < 30 FPS 时告警。
@@ -44,7 +44,7 @@
   需要看 PLC 侧触发 MC_MoveLinearAbsolute 的程序（Execute 上升沿处理、Velocity/Acceleration/Jerk 输入、BufferMode）。
 
 ## 7. 下一步待办事项
-- [ ] TIA 核对 DB1 第 150 字节：注释一处说是 TransitionParameter，一处说是"气缸启动@150.0"（`protocol.py:56,108,146`）。
+- [ ] PLC 改单轴 MC_MoveAbsolute（play2 日志：MC_MoveLinearAbsolute 不能中止，轴先走完旧终点，8.80s 换向后 480ms 才回头）。截图里已加 X/Y 两块，但：P 沿与直线块共用 DB21.DBX0.0/0.3（Y 收不到沿）、动态参数 -1 用的是轴默认 12000mm/s / 240000mm/s²、Done/Busy 写进了点动位 DB1.DBX0.0~0.3、Busy 没进 DB1.DBX18.0。
 - [ ] 确保球台现场视野内无红色杂物（如人类球槌、备用球），确保单目标检测器 100% 锁在真球上。
 - [ ] 实机对打验证终点模式：Y 轴是否不再一顿一顿；若报 801，把 TIA 运动机构加/减速度降到轴能力以内（约 35000）。
-- [ ] TIA 核对「最大舍入间距」：终点模式靠它决定新终点多早混合进来（之前 100% 时出现过"卡住"，建议先试 30~50%）。
+- [ ] 改单轴后实测：起步等待、时间滞后是否降到 100ms 内；再决定 ENDPOINT_RESEND_MM 是否调小。

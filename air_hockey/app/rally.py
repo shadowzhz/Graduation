@@ -153,7 +153,9 @@ class RallyController:
                 machine_half = stone.y <= core.RINK_CENTER_Y
 
             puck_stopped = direction == "still"
-            if machine_half or direction != "outgoing":
+            # 冰壶往对方飞（刚被打出去）时，不管在哪个半场都回 READY ——
+            # 原来只在人类半场这样做，机器半场里会追上去再打第二次。
+            if direction != "outgoing":
                 # 状态防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
                 desired_state = RallyState.ATTACKING if machine_half else RallyState.DEFENDING
                 if (previous in (RallyState.ATTACKING, RallyState.DEFENDING)
@@ -195,7 +197,7 @@ class RallyController:
                         self._last_target = target
                         self._last_active_state = self.state
             else:
-                reason = "puck on human side moving away; READY"
+                reason = "puck moving away; READY"
                 # ★ 主动回 READY 时清掉旧目标 —— 否则后面一次遮挡会把一个
                 #   陈旧的追击点"复活"，机械臂又冲回去。
                 self._last_target = None
