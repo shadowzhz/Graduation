@@ -19,11 +19,13 @@ def test_clamp():
 
 def test_wall_bounce_reflects_velocity():
     stone = StoneMotion(x=layout.RINK_LEFT + layout.STONE_RADIUS - 5.0, y=layout.RINK_CENTER_Y)
-    stone.set_immediate_velocity(-300.0, 0.0)
+    stone.set_immediate_velocity(-300.0, 200.0)
     stone.x += stone.vx * 0.01
     assert stone.resolve_walls()
     assert stone.x == layout.RINK_LEFT + layout.STONE_RADIUS
     assert abs(stone.vx - 300.0 * layout.WALL_RESTITUTION) < 1e-9
+    # 实测边墙也吃掉沿墙方向的速度；不折减的话反弹后的落点会偏出去几十
+    assert abs(stone.vy - 200.0 * layout.WALL_TANGENT_RETENTION) < 1e-9
 
 
 def test_step_matches_position_then_velocity_order_without_collisions():

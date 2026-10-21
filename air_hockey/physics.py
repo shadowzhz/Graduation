@@ -184,11 +184,15 @@ class StoneMotion:
         self.x, reflected_vx, bounced = resolve_wall_axis(self.x, vx, left_limit, right_limit)
         if bounced:
             _, reflected_target_vx, _ = resolve_wall_axis(self.x, target_vx, left_limit, right_limit)
+            reflected_vy *= core.WALL_TANGENT_RETENTION
+            reflected_target_vy *= core.WALL_TANGENT_RETENTION
         # 球门口不封上下边，让球能进洞
         if not stone_inside_goal_mouth(self.x):
-            self.y, reflected_vy, y_bounced = resolve_wall_axis(self.y, vy, top_limit, bottom_limit)
+            self.y, reflected_vy, y_bounced = resolve_wall_axis(self.y, reflected_vy, top_limit, bottom_limit)
             if y_bounced:
-                _, reflected_target_vy, _ = resolve_wall_axis(self.y, target_vy, top_limit, bottom_limit)
+                _, reflected_target_vy, _ = resolve_wall_axis(self.y, reflected_target_vy, top_limit, bottom_limit)
+                reflected_vx *= core.WALL_TANGENT_RETENTION
+                reflected_target_vx *= core.WALL_TANGENT_RETENTION
             bounced = bounced or y_bounced
         # 卡在角落出不来时给一个最小弹出速度
         at_left_or_right = self.x <= left_limit + eps or self.x >= right_limit - eps

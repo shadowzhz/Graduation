@@ -198,11 +198,15 @@ class KalmanFilter:
         next_x, vx, hit_x = resolve_wall_axis(
             x, vx, core.RINK_LEFT + core.STONE_RADIUS, core.RINK_RIGHT - core.STONE_RADIUS
         )
+        if hit_x:
+            vy *= core.WALL_TANGENT_RETENTION
         next_y, hit_y = y, False
         if not stone_inside_goal_mouth(next_x):
             next_y, vy, hit_y = resolve_wall_axis(
                 y, vy, core.RINK_TOP + core.STONE_RADIUS, core.RINK_BOTTOM - core.STONE_RADIUS
             )
+            if hit_y:
+                vx *= core.WALL_TANGENT_RETENTION
         transition = np.array(
             [[1.0, 0.0, dt, 0.0], [0.0, 1.0, 0.0, dt],
              [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
@@ -211,10 +215,13 @@ class KalmanFilter:
             transition[0, :] = 0.0
         if hit_y or next_y != y:
             transition[1, :] = 0.0
+        # 与 physics.resolve_walls 同一规则：法向 ×(-恢复系数)，沿墙 ×保留系数
         if hit_x:
             transition[2, 2] = -core.WALL_RESTITUTION
+            transition[3, 3] *= core.WALL_TANGENT_RETENTION
         if hit_y:
-            transition[3, 3] = -core.WALL_RESTITUTION
+            transition[3, 3] *= -core.WALL_RESTITUTION
+            transition[2, 2] *= core.WALL_TANGENT_RETENTION
         transition[2:, :] = self._friction_velocity_jacobian(vx, vy, dt) @ transition[2:, :]
         next_vx, next_vy = apply_friction_velocity(vx, vy, dt)
         self._x[:] = next_x, next_y, next_vx, next_vy

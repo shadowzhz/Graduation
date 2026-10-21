@@ -50,6 +50,7 @@ def test_collision_prediction_reflects_all_four_wall_normals():
         state = estimator.predict(dt)
         reflected = list(initial[2:])
         reflected[axis] *= -core.WALL_RESTITUTION
+        reflected[1 - axis] *= core.WALL_TANGENT_RETENTION
         expected_velocity = apply_friction_velocity(*reflected, dt)
         assert (state.x, state.y)[axis] == limit
         np.testing.assert_allclose((state.vx, state.vy), expected_velocity, atol=1e-12, rtol=0.0)

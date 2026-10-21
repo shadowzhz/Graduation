@@ -173,8 +173,10 @@ def test_default_budget_covers_lower_identified_friction():
     from unittest.mock import patch
     from air_hockey import core_config as core_module
     from air_hockey.prediction.predictor import default_max_simulation_steps
-    # 摩擦 45 时旧的固定 4000 步预算会抛 RuntimeError（实测滑行约 17.2s）
-    with patch.object(core_module, "STONE_FRICTION_DECELERATION", 45.0):
+    # 摩擦 45 时旧的固定 4000 步预算会抛 RuntimeError（实测滑行约 17.2s）；
+    # 墙按无损反弹，才能造出"来回弹墙滑很久"的最坏情况
+    with patch.object(core_module, "STONE_FRICTION_DECELERATION", 45.0), \
+            patch.object(core_module, "WALL_RESTITUTION", 1.0):
         steps = default_max_simulation_steps(core_module.PREDICTION_SUBSTEP)
         assert steps * core_module.PREDICTION_SUBSTEP > core_module.MAX_STONE_SPEED / 45.0
         prediction = TrajectoryPredictor().predict(300.0, 380.0, 0.0, 0.0)
