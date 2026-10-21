@@ -10,3 +10,7 @@ venv/
 
 # 现场运行产物（日志、记录、截图）
 runs/
+
+# IDE 与编辑器配置
+.vscode/
+.commandcode/
