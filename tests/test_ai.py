@@ -169,26 +169,24 @@ def test_mallet_speed_does_not_lead_a_still_puck():
     assert (lead.target_x, lead.target_y) == (420.0, 250.0)
 
 
-def test_lead_does_not_diverge_when_puck_outruns_mallet():
-    """球比球槌快时必须退回瞄当前位置，不能把目标推到场地角落。
+def test_lead_aims_ahead_on_path_when_puck_outruns_mallet():
+    """球比球槌快时要瞄它**将要经过**的位置，不能退回瞄它现在的位置（那样永远追在后面），
+    也不能发散到场地角落。
 
-    回归：最初用"反复迭代 距离/速度"的写法，球速 447、mallet_speed 300 时
-    迭代发散，目标变成 (533, 77) 这种远角 —— 比不提前还差。
+    回归：实时链路里冰壶进入机器半场、又不是正对球门时，旧写法无解就瞄冰壶当前位置，
+    球槌离开防守线上本来正确的拦截点，往前冲 200 多单位后一路追在球后面。
     """
     state = make_state(420.0, 250.0, vx=400.0, vy=-200.0)
     decision = AirHockeyAI(mallet_speed=300.0).choose_target(state)     # 比球慢
-    assert (decision.target_x, decision.target_y) == (420.0, 250.0)
-    assert decision.target_x < layout.RINK_RIGHT - layout.MALLET_RADIUS
-    assert decision.target_y > layout.RINK_TOP + layout.MALLET_RADIUS
+    ahead = (decision.target_x - 420.0) * 400.0 + (decision.target_y - 250.0) * -200.0
+    assert ahead > 0.0, decision
+    assert layout.RINK_LEFT + layout.MALLET_RADIUS <= decision.target_x <= layout.RINK_RIGHT - layout.MALLET_RADIUS
+    assert layout.RINK_TOP + layout.MALLET_RADIUS <= decision.target_y
 
 
 def test_lead_target_accounts_for_wall_bounce():
-    """提前量遇到侧墙反弹时：必须按物理微步计算反弹后的位置，而不是向墙外线性外推。
-
-    回归：530, 250, vx=400, vy=0, mallet=(300, 139.52), mallet_speed=500 时，
-    纯线性外推给出 lead_x=770 并被 clamp 钉在右极限 533；
-    实际台面冰壶在右墙反弹后，0.6s 物理位置已向左弹回到约 350.93。
-    """
+    """提前量遇到侧墙反弹时：必须按物理微步计算反弹后的位置，而不是向墙外线性外推，
+    并且取球槌**来得及赶到**的最早那个点。"""
     state = make_state(530.0, 250.0, vx=400.0, vy=0.0, ai_y=139.52)
     state = replace(state, ai_x=300.0)
 
@@ -196,8 +194,10 @@ def test_lead_target_accounts_for_wall_bounce():
     assert (plain.target_x, plain.target_y) == (530.0, 250.0)
 
     decision = AirHockeyAI(mallet_speed=500.0).choose_target(state)
-    assert abs(decision.target_x - 350.93) < 0.1
-    assert abs(decision.target_y - 250.00) < 0.1
+    # 冰壶撞右墙后往左弹回：目标在反弹后的路径上（x < 530），没有被钉在右极限
+    assert decision.target_x < 530.0 and abs(decision.target_y - 250.0) < 0.1
+    # 是"最早来得及"的点：比旧写法的 0.6s 位置（约 350.9）更靠前
+    assert decision.target_x > 360.0, decision
 
 def test_defense_uses_injected_predictor():
     # 注入不同参数的预测器，防守预测的目标横坐标必须不同

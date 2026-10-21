@@ -299,19 +299,17 @@ class AirHockeyAI:
         return current
 
     def _lead_target(self, state: GameState, lead_x: float, lead_y: float):
-        """把目标从"冰壶现在的位置"提前到"球槌赶到时冰壶的位置"。
+        """把目标从"冰壶现在的位置"提前到"球槌来得及赶到的、冰壶将要经过的位置"。
 
-        现场反馈：轴总是慢一拍 —— 球离开一个位置之后轴才追到那里。
-        原因是原来的目标就是冰壶的当前位置，完全没有提前量。
+        做法：按真实物理（摩擦、撞墙反弹）逐微步推演冰壶，取第一个满足
+            |冰壶(t) − 球槌| ≤ mallet_speed · t
+        的点，也就是球槌以 mallet_speed 直线赶过去能先到的最早拦截点。
+        MAX_LEAD_TIME 内都赶不上时，瞄冰壶在 MAX_LEAD_TIME 时会到的位置 —— 依然在它的
+        真实路径上、在它前方。
 
-        做法是解拦截时间 t（球槌以速度 s 直线赶去拦截匀速运动的冰壶）：
-            |d + v·t| = s·t     →     (v·v − s²)t² + 2(d·v)t + d·d = 0
-        取最小的正根。
-
-        ⚠️ 不能用"反复迭代距离/速度"的写法：当冰壶比球槌快时那个迭代会发散，
-        目标会被一路推到场地角落（实测 mallet_speed=300、球速 447 时目标变成
-        (533, 77) 那个远角，比直接瞄当前位置还差）。这里用闭式解，
-        无正根（即追不上）时直接退回瞄当前位置。
+        ⚠️ 不能在追不上时退回瞄"冰壶现在的位置"：实时链路里冰壶进入机器半场、又不是正对
+        球门时，旧写法就这样把球槌从防守线上正确的拦截点叫走，往前冲 200 多单位后一路追在
+        球后面（几乎接不到球）。也不能用"反复迭代 距离/速度"：冰壶比球槌快时会发散到角落。
 
         没有球槌速度模型时原样返回 —— 仿真与不传该参数时行为不变。
         """
@@ -321,35 +319,16 @@ class AirHockeyAI:
         if math.hypot(stone.vx, stone.vy) <= core.STONE_STOP_SPEED:
             return lead_x, lead_y          # 基本静止，提前量没有意义
 
-        dx = stone.x - state.ai_x
-        dy = stone.y - state.ai_y
-        s = self.mallet_speed
-        a = stone.vx * stone.vx + stone.vy * stone.vy - s * s
-        b = 2.0 * (dx * stone.vx + dy * stone.vy)
-        c = dx * dx + dy * dy
-
-        t = None
-        if abs(a) < 1e-9:
-            if abs(b) > 1e-9:
-                t = -c / b
-        else:
-            disc = b * b - 4.0 * a * c
-            if disc >= 0.0:
-                root = math.sqrt(disc)
-                for candidate in ((-b - root) / (2.0 * a), (-b + root) / (2.0 * a)):
-                    if candidate > 0.0 and (t is None or candidate < t):
-                        t = candidate
-        if t is None or not math.isfinite(t) or t <= 0.0:
-            return lead_x, lead_y          # 追不上：不外推，直接瞄现在的位置
-        t = min(t, self.MAX_LEAD_TIME)
         motion = StoneMotion(stone.x, stone.y)
         motion.set_immediate_velocity(stone.vx, stone.vy)
-        remaining = t
         substep = core.PREDICTION_SUBSTEP
-        while remaining > 1e-9:
-            step_dt = min(substep, remaining)
+        elapsed = 0.0
+        while elapsed < self.MAX_LEAD_TIME - 1e-9:
+            step_dt = min(substep, self.MAX_LEAD_TIME - elapsed)
             motion.step(step_dt)
-            remaining -= step_dt
+            elapsed += step_dt
+            if math.hypot(motion.x - state.ai_x, motion.y - state.ai_y) <= self.mallet_speed * elapsed:
+                break
             if abs(motion.vx) < 1e-9 and abs(motion.vy) < 1e-9 and not motion.response_active:
                 break
         return motion.x, motion.y

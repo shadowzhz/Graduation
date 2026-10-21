@@ -24,8 +24,8 @@
 - 删除软限位（现场已装硬件限位开关）：命令夹到机械行程 X -192..224 / Y -129..187 内缩 5mm（`--motion-margin-mm`），不再有软件越界撤销。
 - 卡尔曼：远处假目标待确认那一帧不再拿旧观测更新（原来会让滤波时间倒退、位置往回跳），`vision_runtime.py` 第 339 行。
 - 删除脉冲触发（`--trigger-mode`、`--trigger-low-ms`），只用序号握手；序号由 `PLCInterface.sequence` 管理。
-- 运动积压保护：斜坡模式下轴忙且上次下发点领先实际位置 > 4 步时暂停追加作业（`interface.MAX_BACKLOG_STEPS`）。
 - **默认改为终点模式**（`--target-slew-mm 0`）：只发 AI 终点、BufferMode 固定 5、舍入间距 -1（TO 最大）；轴忙时新终点变化 < 10mm 不发（`ENDPOINT_RESEND_MM`）。旧斜坡模式用 `--target-slew-mm 12 --target-accel-mm-s2 12000` 恢复。
+- AI 提前量（`ai.py:_lead_target`）：冰壶比 --mallet-speed 快时不再退回瞄"冰壶当前位置"，改为沿真实物理路径找最早来得及的拦截点。全链路仿真（120fps、30 种射门）：轴 800 单位/s、延迟 0.1s 时接触率 28/30 → 30/30；轴 300 单位/s、延迟 0.4s 时仍有 26/30 —— 仿真里上位机不是接不住的主因，要看实机 `[延迟]` 行。
 
 ## 5. 反应慢排查（2026-10-20）
 - 旧现场日志 runs/play.log（10-14，Windows，未纳入 git）：视觉 160~185 FPS、单帧 0.4~5 ms，PLC 周期约 29 Hz、序号落后 0~1；
