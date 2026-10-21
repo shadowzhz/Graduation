@@ -47,65 +47,29 @@ DEFAULT_MOTION_MARGIN_MM = 2.0
 
 
 # ============================================================================
-# 安全自检
+# 行程与命令包络
 # ============================================================================
-# 一张表说清所有限值 —— 现场调参只看这一段。
-#
 #   ① 轴的真实机械行程（现场量的；TIA 工艺对象 XY轴 → 几何结构 →「3D 显示
 #      中的表示」。注意运动学里 x=X 轴、z=Y 轴，见 _write_payload 注释）
 #          X -192 .. 224        Y -129 .. 187
 #      行程两端是硬件限位开关（2026-10-20 起代码不再另设软限位）。
 #   ② 代码命令包络 = TRAVEL_* 再内缩 MotionLimits.margin_mm（默认 2mm）
 #          X -190 .. 222        Y -127 .. 185
-#   ③ 超调距离 = v² / (2a)，v = target_slew_mm × 实际周期（不是 --plc-rate），
-#      a = TIA 减速度。目标斜坡本身会提前减速、停在包络内（_braking_step）；
-#      冲过包络的只可能是轴跟不上、按自身减速度刹车的那一段，所以用 TIA 减速度估算。
-#
-# ★★ 铁律：② 到 ① 之间的余量必须 > ③，否则全速冲向边缘时会碰到限位开关。
-#
-# TIA「工艺对象 XY轴 → 动力学 → 预设值和限值」里的**预设值**（不是右边的最大值）。
-# 现场实测（2026-10，运动机构运动）：
-#     速度    3750 mm/s      （最大值也是 3750，已经顶到）
-#     加速度  35000 mm/s^2   ← 决定起步 / 跟不跟得上，**跟随误差看它**
-#     减速度  35000 mm/s^2   ← ★★★ 决定**制动距离**，**撞不撞限位看它**
-#     加加速度 300000 mm/s^3
-#
-# ★★ 两者不是一回事，混了就会算错：
-#   · --target-accel-mm-s2（软件限幅器）要**低于加速度**，否则等于没限 → 跟随误差
-#   · 制动距离必须用**减速度**算 —— 用加速度算会**低估一半以上**
-#     （35000 算成 112mm，15000 才是 261mm），那正是"以为算过了、结果还是撞"
-#
-# ⚠️ 这三个值必须和 TIA 里一致。改了 TIA 就用 --tia-{accel,decel,speed}-* 同步，
-#    否则自检要么白丢速度、要么说安全却会撞（后者才要命）。
-DEFAULT_AXIS_ACCEL_MM_S2 = 35000.0   # 加速度：给软件限幅器做上限参考
-DEFAULT_AXIS_DECEL_MM_S2 = 35000.0   # ★ 减速度：制动距离 = v^2 / (2 x 这个)
-DEFAULT_AXIS_SPEED_MM_S = 3750.0
+#   速度 / 加减速完全由 TIA「运动机构运动」的设置决定，代码只下发终点。
 
 
 @dataclass(frozen=True)
 class MotionLimits:
-    """命令余量 + TIA 动力学预设值：决定命令包络，以及"余量够不够刹得住"的自检。
-
-    由 --motion-margin-mm / --tia-{accel,decel,speed}-* 构造，经 PLCLink 交给 PLCInterface。
-    （原来是 set_motion_margin() / set_axis_dynamics() 改模块全局变量 —— 必须赶在
-    建 PLCLink 之前改，而且整个进程共享一份。现在每个 PLCLink 带自己的一份，不可变。）
+    """命令余量：决定命令包络。由 --motion-margin-mm 构造，经 PLCLink 交给 PLCInterface。
 
     margin_mm：轴碰到限位开关时把它调大即可。这是"少走一点"和"不碰限位开关"
     之间的取舍：调大更安全、可覆盖范围更小。
-
-    **改了 TIA 就必须同步动力学三个值**，否则安全自检拿旧数字算：
-      · 减速度填小了 → 明明安全的 slew 被误报"会撞"，白丢一半速度
-      · 减速度填大了 → 明明会撞却说安全 —— 那才是要命的
     """
 
     margin_mm: float = DEFAULT_MOTION_MARGIN_MM
-    accel_mm_s2: float = DEFAULT_AXIS_ACCEL_MM_S2
-    decel_mm_s2: float = DEFAULT_AXIS_DECEL_MM_S2
-    speed_mm_s: float = DEFAULT_AXIS_SPEED_MM_S
 
     def __post_init__(self):
-        for name in ("margin_mm", "accel_mm_s2", "decel_mm_s2", "speed_mm_s"):
-            object.__setattr__(self, name, float(getattr(self, name)))
+        object.__setattr__(self, "margin_mm", float(self.margin_mm))
         if self.margin_mm < 0.0:
             raise ValueError("motion margin must be >= 0")
 
@@ -130,44 +94,6 @@ class MotionLimits:
         """把机器坐标夹进命令包络。"""
         return (max(self.command_x_min, min(self.command_x_max, px)),
                 max(self.command_y_min, min(self.command_y_max, py)))
-
-    def braking_distance_mm(self, slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
-        """从指令速度刹停需要多长距离（mm）。返回 (制动距离, 指令速度mm/s)。"""
-        accel = self.decel_mm_s2 if accel_mm_s2 is None else float(accel_mm_s2)
-        if accel <= 0.0 or rate_hz <= 0.0:
-            return 0.0, 0.0
-        speed = float(slew_mm_per_cycle) * float(rate_hz)
-        return speed * speed / (2.0 * accel), speed
-
-    def safety_warnings(self, slew_mm_per_cycle, rate_hz, accel_mm_s2=None):
-        """按当前参数算出安全警告列表（空列表 = 安全）。
-
-        这是把"余量够不够刹得住"从人脑里搬到程序里 —— 现场踩过的撞死挡，
-        根源就是没人会在跑之前先算这一步。
-        """
-        warnings = []
-        brake, speed = self.braking_distance_mm(slew_mm_per_cycle, rate_hz, accel_mm_s2)
-        margin = min(self.command_x_min - TRAVEL_X_MIN, TRAVEL_X_MAX - self.command_x_max,
-                     self.command_y_min - TRAVEL_Y_MIN, TRAVEL_Y_MAX - self.command_y_max)
-        if margin <= 0.0:
-            warnings.append(
-                f"命令包络没有余量（margin_mm={self.margin_mm:.0f}）—— "
-                f"指令会直接落在机械行程端点（限位开关）上")
-        if speed > self.speed_mm_s:
-            warnings.append(
-                f"指令速度 {speed:.0f}mm/s 超过 TIA 预设最大速度 "
-                f"{self.speed_mm_s:.0f}mm/s —— TO 会截断，轴跟不上 → 跟随误差")
-        if brake > margin:
-            # 要让制动距离塞进余量，slew 必须 ≤ sqrt(2·a·margin) / 周期
-            accel = self.decel_mm_s2 if accel_mm_s2 is None else float(accel_mm_s2)
-            safe_slew = (2.0 * accel * margin) ** 0.5 / max(rate_hz, 1e-6)
-            warnings.append(
-                f"制动距离 {brake:.0f}mm > 包络到限位开关的余量 {margin:.0f}mm"
-                f"（缺 {brake - margin:.0f}mm）—— 全速冲向边缘时可能碰到限位开关。"
-                f"三选一：① --target-slew-mm 降到 {safe_slew:.0f} 以下；"
-                f"② --motion-margin-mm 加到 {brake + 5:.0f}（会明显缩小可覆盖范围）；"
-                f"③ 在 TIA 里把加速度从 {accel:.0f} 提高（现按此值估算）")
-        return warnings
 
 
 DEFAULT_LIMITS = MotionLimits()

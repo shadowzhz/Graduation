@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from air_hockey import core_config as core
 from air_hockey.control import protocol
-from air_hockey.control.interface import MAX_BACKLOG_STEPS, TRANSITION_RATIO, PLCInterface
+from air_hockey.control.interface import PLCInterface
 from air_hockey.control.limits import (
     COORD_EPSILON, DEFAULT_LIMITS, DEFAULT_ZONE, TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN,
     MotionLimits,
@@ -269,24 +269,6 @@ def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
             assert not client.send_linear_move(invalid, 0)
             assert client.last_send_state == "invalid"
             assert len(client.transport.moves) == before
-    finally:
-        client.disconnect()
-
-
-@memory_binding()
-def test_slew_roundoff_does_not_switch_blending_to_stop_and_append():
-    client = MemoryPLC()
-    client.blend_threshold_mm = 12.0
-    client.target_slew_mm = 12.0
-    client.actual_game = (300, 140)
-    try:
-        assert client.connect()
-        assert client.send_linear_move(105.83333333333334, 77)
-        assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 5
-
-        client.target_slew_mm = 0.0
-        assert client.send_linear_move(500, 300)
-        assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == 5
     finally:
         client.disconnect()
 
@@ -839,52 +821,6 @@ def test_busy_target_is_not_requeued_but_changed_and_idle_targets_are_sent():
 
 
 @memory_binding()
-def test_busy_motion_still_receives_distinct_slew_waypoints():
-    client = MemoryPLC()
-    client.target_slew_mm = 12.0
-    client.blend_threshold_mm = 12.0
-    client.transport.db[1][protocol.MOTION_BUSY_BYTE] |= 1
-    link = PLCLink("memory", period=0.02, client_factory=lambda *args: client)
-    link.start()
-    try:
-        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
-        assert link.enable_axes() and until(lambda: link.armed)
-        assert link.set_target(450, 250)
-        assert until(lambda: len(client.transport.moves) >= 4)
-        points = [struct.unpack_from(">ddddi", packet) for packet in client.transport.moves[:4]]
-        for previous, current in zip(points, points[1:]):
-            assert current[0] > previous[0]
-            assert 0 < max(abs(current[0] - previous[0]), abs(current[2] - previous[2])) <= 12.0 + 1e-6
-            assert current[4] == 5
-        assert link.armed and link.feedback.busy
-    finally:
-        assert link.stop(timeout=2.0)
-
-
-@memory_binding()
-def test_busy_axis_far_behind_last_command_stops_queueing_new_jobs():
-    """轴忙且落后上次下发点超过 MAX_BACKLOG_STEPS 步时不再追加作业，轴追上后继续。"""
-    client = MemoryPLC()
-    client.target_slew_mm = 12.0
-    client.blend_threshold_mm = 12.0
-    try:
-        assert client.connect()
-        client.actual_game = client.physical_to_game(0.0, 0.0)
-        client.actual_busy = True
-        far = client.physical_to_game(150.0, 0.0)
-        for _ in range(int(MAX_BACKLOG_STEPS) + 1):
-            assert client.send_linear_move(*far) and client.last_send_state == "sent"
-        sent = len(client.transport.moves)
-        assert client.send_linear_move(*far) and client.last_send_state == "backlog"
-        assert len(client.transport.moves) == sent
-        # 轴追上来以后恢复追加
-        client.actual_game = client.physical_to_game(client._last_phys_x, 0.0)
-        assert client.send_linear_move(*far) and client.last_send_state == "sent"
-    finally:
-        client.disconnect()
-
-
-@memory_binding()
 def test_single_axis_enable_only_touches_that_axis_and_blocks_motion():
     """★ 单轴使能 / 撤销必须安全：
 
@@ -947,9 +883,7 @@ def test_diagnostics_runs_without_client_local_and_reports_transition():
     "实时处理失败：name 'client' is not defined"，看起来像整条视觉管线坏了。
     """
     client = MemoryPLC()
-    client.target_slew_mm = 20.0  # 斜坡模式才按步距算精磨距离（client_factory 不继承 link 的参数）
-    link = PLCLink("memory", period=0.03, target_slew_mm=20.0,
-                   blend_threshold_mm=20.0, client_factory=lambda *args: client)
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
     link.start()
     try:
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
@@ -961,12 +895,9 @@ def test_diagnostics_runs_without_client_local_and_reports_transition():
         assert link.set_target(300, 180)
         assert until(lambda: len(client.transport.moves) >= 1)
         text = link.diagnostics()
-        # 下发过之后必须报出实际的精磨距离（步距 20mm 以内 → 0.75 倍，且 < 步距）
-        assert "精磨" in text and "关（" not in text, text
-        value = client.last_transition_mm
-        assert value is not None and 0.0 < value < 20.0, value
-        # 精磨距离必须严格小于步距 —— 等于或大于就会把整段圆掉、到不了目标
-        assert value < client.last_send_dist_mm + 1e-9, (value, client.last_send_dist_mm)
+        # 下发过之后必须报出舍入间距：终点模式固定 -1（TO 最大）
+        assert "精磨 TO最大" in text and "关（" not in text, text
+        assert client.last_transition_mm == -1.0
     finally:
         assert link.stop(timeout=2.0)
 
@@ -1041,91 +972,6 @@ def test_position_past_travel_does_not_trip_software_limit():
             assert min(DEFAULT_LIMITS.command_y_min, y) <= py <= max(DEFAULT_LIMITS.command_y_max, y)
         finally:
             assert link.stop(timeout=2.0)
-
-
-@memory_binding()
-def test_advance_braking_prevents_accel_overshoot_and_warns():
-    limits = MotionLimits(margin_mm=40.0)
-    warns = limits.safety_warnings(12.0, 100.0, 12000.0)
-    assert len(warns) == 1
-    assert "制动距离 60mm > 包络到限位开关的余量 40mm" in warns[0]
-
-    for busy in (True, False):
-        client = MemoryPLC()
-        client.limits = limits
-        client.period = 0.01
-        client.target_slew_mm = 12.0
-        client.target_accel_mm_s2 = 12000.0
-        client.actual_game = client.physical_to_game(0.0, 0.0)
-        client.actual_busy = busy
-
-        sim_time = 1000.0
-        orig_time = time.perf_counter
-        time.perf_counter = lambda: sim_time
-        gx, gy = client.physical_to_game(175.0, 0.0)
-        commands = []
-        try:
-            for i in range(30):
-                sim_time = 1000.0 + i * 0.01
-                prep = client._prepare_move(gx, gy)
-                if prep is not None:
-                    px, py, bm, dist = prep
-                    client._commit_move(px, py, bm, dist)
-                    commands.append(px)
-        finally:
-            time.perf_counter = orig_time
-
-        assert commands, "Must produce commands"
-        assert max(commands) <= 175.0 + 1e-6
-        assert max(commands) <= TRAVEL_X_MAX
-        for prev, curr in zip(commands, commands[1:]):
-            assert curr - prev <= 12.0 + 1e-6
-
-
-@memory_binding()
-def test_envelope_recovery_from_actual_game_steps_smoothly_without_jump():
-    limits = MotionLimits(margin_mm=40.0)
-    client = MemoryPLC()
-    client.limits = limits
-    client.period = 0.01
-    client.target_slew_mm = 12.0
-    client.actual_game = client.physical_to_game(-170.0, -120.0)
-    client.actual_busy = False
-
-    gx, gy = client.physical_to_game(0.0, 0.0)
-    prep = client._prepare_move(gx, gy)
-    assert prep is not None
-    px, py, bm, dist = prep
-    step = max(abs(px - (-170.0)), abs(py - (-120.0)))
-    assert step <= 12.0 + 1e-6
-    assert px < limits.command_x_min
-    assert px >= TRAVEL_X_MIN
-    assert py >= TRAVEL_Y_MIN
-
-    client._commit_move(px, py, bm, dist)
-    prep2 = client._prepare_move(gx, gy)
-    assert prep2 is not None
-    px2, py2, bm2, dist2 = prep2
-    step2 = max(abs(px2 - px), abs(py2 - py))
-    assert step2 <= 12.0 + 1e-6
-    assert px2 >= TRAVEL_X_MIN
-    assert py2 >= TRAVEL_Y_MIN
-
-
-def test_prepare_move_reports_step_actually_sent_after_accel_limit():
-    """目标突然反向时，加速度限幅让实际步长远小于限速步长；
-    精磨距离/诊断步距必须按实际步长算，否则精磨距离超过整段运动。"""
-    client = PLCInterface(target_slew_mm=20.0, target_accel_mm_s2=15000.0,
-                          period=0.03, blend_threshold_mm=10.0)
-    client._last_phys_x, client._last_phys_y = 0.0, 0.0
-    client._last_step = (20.0, 0.0)
-    client._last_send_at = time.perf_counter() - 0.03
-    goal = client.physical_to_game(-100.0, 0.0)
-    phys_x, phys_y, _mode, distance = client._prepare_move(*goal)
-    sent = max(abs(phys_x), abs(phys_y))
-    assert sent < 10.0
-    assert abs(distance - sent) < 1e-9
-    assert min(client.blend_threshold_mm, distance * TRANSITION_RATIO) < sent
 
 
 @memory_binding()

@@ -40,10 +40,10 @@ def test_axis_lag_is_measured_and_blamed_on_plc_side():
     assert any("瓶颈在 PLC/TO 执行" in hint for hint in hints), hints
 
 
-def test_axis_that_keeps_up_points_to_command_speed_limit():
+def test_axis_that_keeps_up_points_to_tia_motion_settings():
     text, hints = _run(axis_delay=0.0)
     assert "轴落后指令 0% 周期" in text, text
-    assert any("瓶颈是指令速度上限" in hint for hint in hints), hints
+    assert any("瓶颈是 TIA 运动机构" in hint for hint in hints), hints
     assert not any("PLC/TO" in hint for hint in hints), hints
 
 

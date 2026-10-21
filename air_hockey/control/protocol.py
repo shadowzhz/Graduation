@@ -61,7 +61,6 @@ COMM_READ_START = 0
 # 现场改 PLC 变量表时不该把整个连接判死（那会表现成"PLC 未连接"，很难查）。
 # [!] 读**超过** DB 实际长度会失败，所以列表里必须含实际长度（或其以下的值）。
 COMM_READ_SIZES = (96, 92, 66, 62, 58)
-COMM_READ_SIZE_LEGACY = COMM_READ_SIZES[-1]
 COMM_KIN_ERROR_OFFSET = 56
 # ★ 轴自己的故障码 —— PLC 早就导出来了，代码一直没读：
 #   DB18.2  Word  X轴ERRORID
@@ -120,19 +119,17 @@ COMM_SEQ_ACK_OFFSET = 146     # DInt：PLC 写，已处理的序号（读回来�
 #   58.3  error                      Bool     MC 块的 Error
 #   60.0  errorid                    Word     MC 块的 ErrorId
 #   62.0  XY轴ErrorDetail.Reaction   DInt     ★ TO 对该错误的反应
-#   66.0  XY轴.WarningWord           DWord    ★ 预警字（软限位预警在这里）
+#   66.0  XY轴.WarningWord           DWord    预警字（代码不读）
 #   70.0  XY轴RemainingDistance      LReal    ★ 当前运动还差多远（接的是 MC.RemainingDistance）
 #   78.0  mcRemaining                LReal    ← 旧字段，现在没人写它（保留不动，代码不读）
 #   86.0  infoData                   LTime    ★ OB1 循环时间（RT_INFO，单位**纳秒**）
-#   94.0  ret_Val                    Int      ← RT_INFO 的状态码，不是时间
+#   94.0  ret_Val                    Int      ← RT_INFO 的状态码，不是时间（代码不读）
 #
 # ★ 注意 DB18 里**没有** CommandAborted 字段了（曾经想加在 70.0，后来被 RemainingDistance 占了）。
 #   所以代码不再读它 —— 否则会把 RemainingDistance 的字节当成"中止标志"，永远显示 True。
 #   MC 块上的 CommandAborted 输出目前也还是写死的 false，没有数据可用。
-COMM_WARNING_WORD_OFFSET = 66
 COMM_MC_REMAINING_OFFSET = 70      # XY轴RemainingDistance（不是那个旧的 mcRemaining@78）
 COMM_OB1_TIME_OFFSET = 86          # LTime，纳秒
-COMM_RTINFO_STATUS_OFFSET = 94     # Int，RT_INFO 状态码
 COMM_BYTE = 0
 COMM_HEARTBEAT_BIT = 0
 COMM_PLC_HEARTBEAT_BIT = 1

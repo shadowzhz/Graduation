@@ -1,7 +1,7 @@
 """卡尔曼滤波状态估计层。
 
 用常量速度（CV）模型平滑 Detector/Tracker 给出的位置观测，估计更稳定的位置与速度，
-默认模型输出统一的 CurlingState，降低视觉抖动；friction 用于自由滑动 EKF，collision_aware 增加已知球台坐标下的墙法向反弹。三种模型都不处理门柱碰撞，实时默认仍为 CV。
+默认模型输出统一的 CurlingState，降低视觉抖动；friction 用于自由滑动 EKF，collision_aware 增加已知球台坐标下的墙法向反弹。三种模型都不处理门柱碰撞，实时运行用 collision_aware。
 
 状态向量 x = [px, py, vx, vy]^T，观测 z = [px, py]^T。
 """

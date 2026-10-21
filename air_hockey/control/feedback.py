@@ -18,8 +18,6 @@ class PLCFeedback:
     vy: float = 0.0
     x_en: bool = False
     y_en: bool = False
-    x_home: bool = False
-    y_home: bool = False
     x_err: bool = False
     y_err: bool = False
     # ★ 轴自己的故障码（DB18.2 / DB18.6）。撞软限位、跟随误差等都会在这里给出
@@ -44,10 +42,8 @@ class PLCFeedback:
     # None = 没读到（PLC 还没加这个字段）。
     seq_ack: Optional[int] = None
     # ---- 诊断补充（PLC 加了多少就显示多少；None = 未读到）----
-    warning_word: Optional[int] = None     # ★ 预警字（软限位预警在这里）
     mc_remaining: Optional[float] = None   # ★ 当前运动还差多远（MC.RemainingDistance）
     ob1_ns: Optional[int] = None           # ★ OB1 循环时间（纳秒，来自 RT_INFO）
-    rtinfo_status: Optional[int] = None    # RT_INFO 的状态码（0 = 正常）
 
     @property
     def ob1_ms(self):

@@ -66,34 +66,10 @@ def build_parser():
                              "**默认不限制**（= ai.py 自身的上限，现场选的是「全部追球」）。"
                              "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
                              "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
-    parser.add_argument("--blend-threshold-mm", type=float, default=12.0, metavar="MM",
-                        help="仅斜坡模式（--target-slew-mm > 0）使用：精磨距离上限。默认 12")
-    parser.add_argument("--target-slew-mm", type=float, default=0.0, metavar="MM",
-                        help="默认 0 = 终点模式：只下发 AI 的终点，速度/加速度完全由 TIA 运动机构的设置决定。"
-                             "> 0 = 旧的斜坡模式：每周期最多走这么多毫米，切成一串中间点下发"
-                             "（现场表现为一顿一顿）。斜坡模式下指令速度 = slew × 实测周期，"
-                             "超调 = v^2/(2×TIA 减速度) 必须小于 --motion-margin-mm")
     parser.add_argument("--motion-margin-mm", type=float, default=2.0, metavar="MM",
                         help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
                              "默认 2（冲到边上可能碰限位开关停轴，频繁发生就调大）。机械行程 X -192..224 / Y -129..187，"
-                             "包络 = 行程内缩它。程序不另设软件行程保护；"
-                             "★ 它应大于启动自检打印的超调距离，否则全速冲向边缘时可能碰到限位开关")
-    parser.add_argument("--target-accel-mm-s2", type=float, default=0.0, metavar="MM_S2",
-                        help="仅斜坡模式使用：目标加速度限幅（mm/s^2），默认 0 = 关闭。"
-                             "终点模式下加减速由 TIA 决定；若报跟随误差 801，"
-                             "要把 TIA「运动机构运动 → 加速度/减速度」调到轴能力以内（约 35000）")
-    parser.add_argument("--tia-decel-mm-s2", type=float, default=None, metavar="MM_S2",
-                        help="同步 TIA「运动机构运动 → 减速度」的预设值（默认按 35000）。"
-                             "★★★ 它决定**制动距离** = v^2/(2x减速度)，也就决定"
-                             "「这个 slew 会不会撞限位」。默认值是按现场已改好的 35000；"
-                             "**如果你其实没改减速度，就加 --tia-decel-mm-s2 15000** —— "
-                             "否则自检会说安全而实际会撞")
-    parser.add_argument("--tia-accel-mm-s2", type=float, default=None, metavar="MM_S2",
-                        help="同步 TIA「运动机构运动 → 加速度」的预设值（默认按 35000）。"
-                             "用来判断 --target-accel-mm-s2 有没有超过机器能力")
-    parser.add_argument("--tia-speed-mm-s", type=float, default=None, metavar="MM_S",
-                        help="同步 TIA「运动机构运动 → 速度」的预设值（默认按 3750）。"
-                             "用来判断指令速度会不会被 TO 截断")
+                             "包络 = 行程内缩它。程序不另设软件行程保护")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
     parser.add_argument("--camera-slow", action="store_true",

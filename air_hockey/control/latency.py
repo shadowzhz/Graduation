@@ -182,12 +182,11 @@ class LatencyProbe:
             hints.append("轴起步等待长：指令到了 PLC 但轴迟迟不动（TO 作业排队/触发逻辑）")
         lag = _percentile(w["lag_ms"], 0.5)
         if armed and behind > 0.3 * armed and lag is not None and lag > 150.0:
-            hints.append("轴长期落后于已下发指令：瓶颈在 PLC/TO 执行，不在视觉和上位机；"
-                         "此时调大 --target-slew-mm 只会让积压更多")
+            hints.append("轴长期落后于已下发指令：瓶颈在 PLC/TO 执行，不在视觉和上位机")
         act, cmd = _percentile(w["act_speed"], 0.95), _percentile(w["cmd_speed"], 0.95)
         if act is not None and cmd is not None and cmd > 0 and act < 0.6 * cmd:
             hints.append(f"轴实测速度只有指令速度的 {100.0 * act / cmd:.0f}%")
         keeps_up = armed and (behind <= 0.1 * armed or (lag is not None and lag < 100.0))
         if keeps_up and act is not None and cmd is not None and act >= 0.8 * cmd:
-            hints.append("轴跟得上指令：瓶颈是指令速度上限（--target-slew-mm × 下发频率），可以逐步调大")
+            hints.append("轴跟得上指令：瓶颈是 TIA 运动机构速度/加速度设置，可以逐步调大")
         return " | ".join(parts), hints

@@ -601,7 +601,9 @@ def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
         assert missed.curling_state.x > previous.curling_state.x
         assert math.isclose(missed.curling_state.x,
                             previous.curling_state.x + previous.curling_state.vx * 0.005)
-        assert math.isclose(missed.curling_state.vx, previous.curling_state.vx)
+        # 实时估计器带摩擦：漏检帧速度只按摩擦减一点，不会被清零或乱跳
+        assert math.isclose(missed.curling_state.vx, previous.curling_state.vx,
+                            abs_tol=core.STONE_FRICTION_DECELERATION * 0.005 + 1e-9)
 
     assert results[-2].track.track_id == 1     # 远处第一次出现只是候选
     new = results[-1]

@@ -13,7 +13,7 @@ import time
 
 from . import protocol
 from .feedback import PLCFeedback
-from .interface import BUFFER_MODE_IMMEDIATE_MM, PLCInterface
+from .interface import PLCInterface
 from .latency import LatencyProbe
 from .limits import (
     DEFAULT_LIMITS, DEFAULT_ZONE, TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN,
@@ -33,29 +33,17 @@ class PLCLink:
     """Single-owner worker; start/stop and target publication do no network I/O."""
 
     def __init__(self, ip, rack=0, slot=1, period=DEFAULT_PERIOD,
-                 client_factory=None, zone=None,
-                 blend_threshold_mm=BUFFER_MODE_IMMEDIATE_MM,
-                 target_slew_mm=0.0, target_accel_mm_s2=0.0, limits=None):
+                 client_factory=None, zone=None, limits=None):
         self.ip = ip
         self.zone = validated_zone(DEFAULT_ZONE if zone is None else zone)
-        # 命令包络与 TIA 动力学：AI 的可达范围、下发夹取和安全自检都用这一份
+        # 命令包络：AI 的可达范围和下发夹取都用这一份
         self.limits = DEFAULT_LIMITS if limits is None else limits
         self.period = max(0.005, float(period))
         if not math.isfinite(self.period):
             raise ValueError("PLC period must be finite")
         self._sequence_sent = 0
         self._requires_snap7 = client_factory is None
-        self.blend_threshold_mm = float(blend_threshold_mm)
-        self.target_slew_mm = float(target_slew_mm)
-        # ★ 目标加速度限幅（mm/s^2）。见 PLCInterface._prepare_move 的说明：
-        #   TIA 里 Y 轴报的是「跟随误差」，纯限步长治不了（急转需要的加速度
-        #   是轴能力的约 5 倍）。0 = 关闭。
-        self.target_accel_mm_s2 = float(target_accel_mm_s2)
-        self._client = (PLCInterface(ip, rack, slot, zone=self.zone,
-                                     blend_threshold_mm=self.blend_threshold_mm,
-                                     target_slew_mm=self.target_slew_mm,
-                                     target_accel_mm_s2=self.target_accel_mm_s2,
-                                     period=self.period, limits=self.limits)
+        self._client = (PLCInterface(ip, rack, slot, zone=self.zone, limits=self.limits)
                         if client_factory is None else client_factory(ip, rack, slot))
         if isinstance(self._client, PLCInterface):
             self._client.zone = self.zone
@@ -71,7 +59,6 @@ class PLCLink:
         self._disable_on_stop = False
         self._armed = False
         self._arm_pending = False
-        self._connect_attempted = False
         self._ever_connected = False
         self._snap7_warned = False
         self._last_retry = 0.0
@@ -79,11 +66,10 @@ class PLCLink:
         self._echo_change_at = 0.0
         self._echo_seen = False
         self.cycle_count = 0
-        # 统计实际频率、同点跳过、模式分布和目标步距；不把它们直接当作 801 的原因。
+        # 统计实际频率、同点跳过和目标步距；不把它们直接当作 801 的原因。
         self._stats_at = time.perf_counter()
         self._stats_cycles = 0
-        self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "backlog": 0, "other": 0,
-                                "mode1": 0, "mode5": 0}
+        self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0}
         self._stats_dists = []
         # 现场延迟排查：PC → PLC → 轴 分段统计（见 control/latency.py）
         self.latency = LatencyProbe(self.period)
@@ -145,7 +131,7 @@ class PLCLink:
         return self._client.last_send_state
 
     def diagnostics(self):
-        """返回并重置通信频率、BufferMode 分布和相邻目标步距，不代表电机执行确认。"""
+        """返回并重置通信频率、跳过次数和相邻目标步距，不代表电机执行确认。"""
         with self._lock:
             now = time.perf_counter()
             elapsed = max(1e-9, now - self._stats_at)
@@ -154,33 +140,23 @@ class PLCLink:
             cycles = self.cycle_count - self._stats_cycles
             self._stats_at = now
             self._stats_cycles = self.cycle_count
-            self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "backlog": 0, "other": 0,
-                                    "mode1": 0, "mode5": 0}
+            self._stats_counters = {"sent": 0, "deadzone": 0, "pending": 0, "other": 0}
             self._stats_dists = []
             # 序号模式的诊断：PLC 已处理到哪
             seq_ack = self._feedback.seq_ack
             seq_now = getattr(self._client, "sequence", None)
             seq_sent = self._sequence_sent
 
-        mode_total = counters["mode1"] + counters["mode5"]
         dists.sort()
         median = dists[len(dists) // 2] if dists else 0.0
         p95 = dists[min(len(dists) - 1, int(len(dists) * 0.95))] if dists else 0.0
 
         text = (f"周期 {cycles / elapsed:5.1f}Hz | 下发 {counters['sent'] / elapsed:5.1f}Hz | "
                 f"死区跳过 {counters['deadzone']} | 执行中同点跳过 {counters['pending']}")
-        if counters["backlog"]:
-            text += f" | 轴积压暂停追加 {counters['backlog']}"
-        if mode_total:
-            stop_pct = 100.0 * counters["mode1"] / mode_total
-            text += (f" | BufferMode 混合 {counters['mode5']} / 附加停稳 {counters['mode1']}"
-                     f"（附加停稳 {stop_pct:.0f}%）")
-        else:
-            text += " | BufferMode 无下发"
         text += f" | 步距中位 {median:.1f}mm p95 {p95:.1f}mm"
-        # ★ 精磨距离（TransitionParameter[1]）：混合起点离目标多远，随步距自适应。
+        # ★ 舍入间距（TransitionParameter[1]）：固定 -1 = TO 最大。
         #   如果这里一直显示 "关"，说明写 DB1.DBD150 失败了 —— 那时混合距离
-        #   退回由 TO「最大舍入间距」决定，就是"每点停一下"的老毛病。
+        #   退回由 TO「最大舍入间距」决定。
         # ★ 这里必须用 self._client —— diagnostics() 里没有名为 client 的局部变量。
         #   （踩过：写成 client 会 NameError，而且是在每个 [stats] 行上崩，表现为
         #     "实时处理失败"，看起来像整个视觉管线坏了。）
@@ -195,8 +171,6 @@ class PLCLink:
             text += " | 精磨 关（DB1.DBD150 写失败）"
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
-        if mode_total and 100.0 * counters["mode1"] / mode_total > 20.0:
-            text += "  ← 附加停稳占比偏高（大步目标）；核对 --target-slew-mm 和 --blend-threshold-mm"
         # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到行程边缘。
         clamp_stats = getattr(client, "clamp_stats", None)
         counts = clamp_stats.snapshot() if clamp_stats is not None else {"total": 0}
@@ -218,46 +192,8 @@ class PLCLink:
             text += f" | 序号 已发 {seq_sent} 条 / PLC 落后 {lag}"
             if lag > 3:
                 text += "  ← PLC 跟不上，指令在积压"
-        # ★★ 用**实测周期**做安全自检 —— 不要用 --plc-rate 名义值。
-        #    实测常只有 60~70Hz（S7 往返耗时主导），而名义可能是 200：
-        #    用名义值算会把 slew 12 误判成 2400mm/s（制动 192mm）而狂报警，
-        #    用实测值算才是真实的 840mm/s（制动 24mm）。
-        #    限速器的单位是 mm/**周期**，所以"周期多快"直接决定指令速度。
-        rate_hz = cycles / elapsed
-        warn = self._safety_warning_text(rate_hz)
-        if warn:
-            text += warn
         return text
 
-    def _safety_warning_text(self, rate_hz):
-        """把"余量够不够刹得住"挂到诊断行上（有实测周期才算得准）。
-
-        返回 ""（安全）或一段警告。只在**不安全**时输出，安全时不占地方。
-        """
-        slew = self.target_slew_mm
-        if not slew or slew <= 0.0 or rate_hz <= 0.0:
-            return ""
-        # 超调按 TIA 减速度估算（见安全自检说明），不用软件加速度限幅
-        try:
-            warnings = self.limits.safety_warnings(slew, rate_hz)
-        except Exception:
-            return ""
-        if not warnings:
-            return ""
-        brake, speed = self.limits.braking_distance_mm(slew, rate_hz)
-        # 包络到限位开关之间的余量就是 margin_mm（包络 = TRAVEL_* 内缩它）
-        margin = self.limits.margin_mm
-        return (f" | [!]安全自检 {speed:.0f}mm/s 制动{brake:.0f}mm > 余量{margin:.0f}mm"
-                f" —— 冲向限位会刹不住，降 --target-slew-mm 或加 --motion-margin-mm")
-
-
-    @property
-    def connect_attempted(self):
-        return self._connect_attempted
-
-    @property
-    def ever_connected(self):
-        return self._ever_connected
 
     @property
     def feedback(self):
@@ -488,14 +424,12 @@ class PLCLink:
         if not protocol.HAS_SNAP7 and self._requires_snap7:
             if not self._snap7_warned:
                 self._snap7_warned = True
-                self._connect_attempted = True
                 self._messages.put(protocol.SNAP7_ERROR)
             return
         if now - self._last_retry < RECONNECT_INTERVAL or self._stop_event.is_set():
             return
         self._last_retry = now
         was_connected = self._ever_connected
-        self._connect_attempted = True
         if self._client.connect(quiet=True):
             self._ever_connected = True
             self._last_plc_heartbeat = None
@@ -529,7 +463,6 @@ class PLCLink:
             self._feedback = PLCFeedback(
                 stamp=now, valid=True, x=x, y=y, vx=vx, vy=vy,
                 x_en=status["x_en"], y_en=status["y_en"],
-                x_home=status["x_home"], y_home=status["y_home"],
                 x_err=status["x_err"], y_err=status["y_err"],
                 x_errid=status["x_errid"], y_errid=status["y_errid"],
                 mc_error=status["mc_error"], mc_errid=status["mc_errid"],
@@ -540,10 +473,8 @@ class PLCLink:
                 kinematics_error=status["kinematics_error"],
                 kin_reaction=status["kin_reaction"],
                 seq_ack=status["seq_ack"],
-                warning_word=status["warning_word"],
                 mc_remaining=status["mc_remaining"],
                 ob1_ns=status["ob1_ns"],
-                rtinfo_status=status["rtinfo_status"],
             )
             return self._feedback
 
@@ -688,17 +619,12 @@ class PLCLink:
                     #   把"轴到底动没动"这个判断彻底带偏。
                     if state in ("sent", "deadzone-resend"):
                         self._stats_counters["sent"] += 1
-                        mode = getattr(client, "last_buffer_mode", None)
-                        if mode in (1, 5):
-                            self._stats_counters["mode1" if mode == 1 else "mode5"] += 1
-                            self._stats_dists.append(
-                                float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
+                        self._stats_dists.append(
+                            float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
                     elif state == "deadzone":
                         self._stats_counters["deadzone"] += 1
                     elif state == "pending":
                         self._stats_counters["pending"] += 1
-                    elif state == "backlog":
-                        self._stats_counters["backlog"] += 1
                     else:
                         self._stats_counters["other"] += 1
             except Exception:

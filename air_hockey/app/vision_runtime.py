@@ -188,7 +188,10 @@ class VisionRuntime:
             max_missed_frames=self.detection_interval * 8, min_confirmed_hits=1,
             replacement_hits=TRACK_REPLACEMENT_HITS,
         )
-        self.kalman = kalman or KalmanFilter(maneuver_gate=REALTIME_MANEUVER_GATE)
+        # 带墙反弹的模型：冰壶撞侧墙那一帧估计器自己就把速度反过来。常速模型会继续"穿墙"外推 2~3 帧，
+        # 等机动检测触发才改向，期间 AI 目标乱跳 100~280 单位、被排进 PLC 队列，球槌被拉偏。
+        # 前提是球台标定的墙位置准确；标定错时模型碰不到真墙，弹墙仍靠机动检测。
+        self.kalman = kalman or KalmanFilter(maneuver_gate=REALTIME_MANEUVER_GATE, motion_model="collision_aware")
         self.predictor = predictor or TrajectoryPredictor()
         self._reuse_prediction_for_ai = ai is None
         # mallet_speed 给了才会做"提前量"（球槌响应延迟补偿）；None 时行为与原来一致。
@@ -232,7 +235,6 @@ class VisionRuntime:
         self.ai_current_pos = [core.RINK_CENTER_X, self.ai_home_y]
         self._ai_feedback_position = None
         self.prediction_errors = 0
-        self.last_prediction_error: Optional[Exception] = None
 
     def set_ai_feedback(self, feedback) -> None:
         """只接受新鲜的轴位置；反馈丢失时不把旧位置当作实机当前位置。"""
@@ -362,11 +364,10 @@ class VisionRuntime:
             try:
                 prediction_state = self.predictor.predict(curling)
                 ai_prediction = prediction_state
-            except (RuntimeError, ValueError) as exc:
+            except (RuntimeError, ValueError):
                 # 预测失败（步数预算耗尽 / 非有限状态）不能打死实时线程。
                 # 结果里如实记为"无预测"，AI 退化为按当前位置防守（单点轨迹）。
                 self.prediction_errors += 1
-                self.last_prediction_error = exc
                 prediction_state = None
                 ai_prediction = PredictionState([curling.position], curling.position, 0.0, curling)
             if self.profile:
