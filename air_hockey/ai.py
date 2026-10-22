@@ -108,7 +108,19 @@ class AirHockeyAI:
             self._retrieving = False
             self._retrieve_step = 0
         stone_near_center = state.stone.y <= core.RINK_CENTER_Y + core.STONE_RADIUS + 2.0
+        # 冲门判断与下面的防守分支共用一次预测（实时链路会直接传进来）
+        if prediction is None and state.stone.vy < FAST_SHOT_EXIT_VY:
+            prediction = self.predictor.predict(state.stone)
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
+        if stone_behind_ai:
+            # 球已越过球槌还在冲门：抢到它前方再堵，不能按死球去绕（绕的途中会从后面把球推进自家门）。
+            # 仿真：球越过球槌后原来 22%~63% 漏进自家门。球前方已没有球槌的位置就只能交给回收规划器。
+            guard_y = state.stone.y - (core.STONE_RADIUS + core.MALLET_RADIUS)
+            if guard_y >= safe_top:
+                guard = self._goal_guard_decision(state, prediction, min(guard_y, state.ai_home_y), error,
+                                                  safe_left, safe_right, safe_top, safe_bottom)
+                if guard is not None:
+                    return guard
         if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
             self._goal_guard = False
             # （safe_* 已经在上面按 recovery_bounds 收窄过了，这里不用再收一次）
@@ -173,23 +185,10 @@ class AirHockeyAI:
         # 预测轨迹真的能滑到防守线，且穿过防守线的位置落在球门有效防御区内：
         # 不前扑迎球（迎球会缩短反应时间导致漏球），守在防守线（Y = ai_home_y）
         # 提前横移到预判截获点堵截。进入/退出带迟滞，见 FAST_SHOT_* 常量。
-        vy_limit = FAST_SHOT_EXIT_VY if self._goal_guard else FAST_SHOT_ENTER_VY
-        margin = FAST_SHOT_EXIT_MARGIN if self._goal_guard else FAST_SHOT_ENTER_MARGIN
-        fast_shot_on_goal = False
-        if state.stone.vy < vy_limit and not stone_behind_ai:
-            if prediction is None:
-                prediction = self.predictor.predict(state.stone)
-            # 滑不到防守线就停下的慢球不算冲门 —— 这种球应该上前击打
-            reaches_line = any(point_y <= state.ai_home_y for _x, point_y in prediction.trajectory)
-            if reaches_line:
-                predicted_goal_x = self._predict_stone_x(state, state.ai_home_y, prediction)
-                fast_shot_on_goal = (core.GOAL_LEFT - margin <= predicted_goal_x <= core.GOAL_RIGHT + margin)
-        self._goal_guard = fast_shot_on_goal
-        if fast_shot_on_goal:
-            blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_goal_x * difficulty.prediction
-            strike_x, strike_y = self._strike_through(state, blended_x + error, state.ai_home_y)
-            return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom),
-                              stalled_stone_phase)
+        guard = self._goal_guard_decision(state, prediction, state.ai_home_y, error,
+                                          safe_left, safe_right, safe_top, safe_bottom)
+        if guard is not None:
+            return guard
 
         # 冰壶在自己前方且进了攻击区才主动追。
         # 这里原来直接瞄冰壶当前位置 → 球动了轴才追，永远慢一拍；
@@ -217,6 +216,24 @@ class AirHockeyAI:
         strike_x, strike_y = self._strike_through(state, target_x, state.ai_home_y)
         return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom),
                           stalled_stone_phase)
+
+    def _goal_guard_decision(self, state, prediction, guard_y, error, safe_left, safe_right, safe_top, safe_bottom):
+        """冲门球：守在 guard_y 这条线上、横移到穿线点堵截；不是冲门球返回 None。"""
+        vy_limit = FAST_SHOT_EXIT_VY if self._goal_guard else FAST_SHOT_ENTER_VY
+        margin = FAST_SHOT_EXIT_MARGIN if self._goal_guard else FAST_SHOT_ENTER_MARGIN
+        self._goal_guard = False
+        if state.stone.vy >= vy_limit:
+            return None
+        # 滑不到这条线就停下的慢球不算冲门 —— 这种球应该上前击打
+        if not any(point_y <= guard_y for _x, point_y in prediction.trajectory):
+            return None
+        predicted_x = self._predict_stone_x(state, guard_y, prediction)
+        if not core.GOAL_LEFT - margin <= predicted_x <= core.GOAL_RIGHT + margin:
+            return None
+        self._goal_guard = True
+        blended_x = core.RINK_CENTER_X * (1.0 - state.difficulty.prediction) + predicted_x * state.difficulty.prediction
+        strike_x, strike_y = self._strike_through(state, blended_x + error, guard_y)
+        return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom), "idle")
 
     @staticmethod
     def _strike_through(state: GameState, target_x: float, target_y: float):
