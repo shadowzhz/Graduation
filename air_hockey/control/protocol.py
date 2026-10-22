@@ -50,6 +50,9 @@ GROUP_CTRL_BYTE = 140
 GROUP_RESET_BIT = 3
 GROUP_STOP_BIT = 2
 GROUP_COMM_LOST_LATCH_BIT = 4
+# 现场 DB1：气缸启动 Bool @190.0（位于 TransitionParameter[1..5] @150~189 之后）
+CYLINDER_BYTE = 190
+CYLINDER_START_BIT = 0
 STATUS_READ_START = 0
 # DB1 读取长度：原来 141（0~140）。序号握手加的 上次序号 在 146，
 # 所以要读到 149 才拿得到 —— 150 字节正好覆盖 0~149。

@@ -355,6 +355,11 @@ class PLCLink:
     def axes_reset(self):
         return self._queue_disarmed_command("轴复位", self._client.axes_reset)
 
+    def set_cylinder(self, on):
+        """开关气缸启动（DB1.190.0）。不改变轴授权/目标状态。"""
+        return self._run_on_worker("气缸" + ("开" if on else "关"),
+                                   lambda: self._client.set_cylinder(on))
+
     def drain_messages(self):
         messages = []
         while True:
@@ -635,6 +640,9 @@ class PLCLink:
 
     def _run(self):
         client = self._client
+        # ★ 绝对截止时间排程：原来每轮都 wait(period - 耗时)，
+        #   线程唤醒的固定开销会累加成 +1.5ms 的周期误差（30Hz 只到 28.8）。
+        next_due = time.perf_counter()
         try:
             while not self._stop_event.is_set():
                 cycle_start = time.perf_counter()
@@ -650,9 +658,12 @@ class PLCLink:
                     self._messages.put(f"PLC 通信异常：{exc}")
                     self._invalidate_feedback()
                     client.disconnect()
-                remaining = self.period - (time.perf_counter() - cycle_start)
+                next_due += self.period
+                remaining = next_due - time.perf_counter()
                 if remaining > 0:
                     self._stop_event.wait(remaining)
+                else:
+                    next_due = time.perf_counter()   # 落后太多就重新对齐，避免雪崩
         finally:
             self._invalidate_feedback()
             if client.connected:

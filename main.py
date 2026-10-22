@@ -53,7 +53,7 @@ def build_parser():
     parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
     parser.add_argument("--dry-run", action="store_true", help="完整回合影子运行：显示/记录请求目标，不发送 PLC 运动或现场轴命令")
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置学弟版 DB1/DB18 的 S7-1500T；轴需现场主动使能")
-    parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
+    parser.add_argument("--plc-rate", type=float, default=40.0, help="PLC 通信周期频率（Hz，默认 40）")
     parser.add_argument("--mallet-speed", type=float, default=500.0, metavar="UNITS_PER_SEC",
                         help="球槌可达速度估计（球台单位/秒，默认 500）。用来算提前量："
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
