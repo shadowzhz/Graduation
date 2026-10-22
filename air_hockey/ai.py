@@ -13,11 +13,6 @@ from .prediction import PredictionState, TrajectoryPredictor
 
 AI_SERVE_SETUP_GAP = 6.0
 
-# 近门保护：冰壶离自家球门太近（y <= back_line）时按兵不动，避免把它推进自家门。
-#
-# 2026-10-13 现场要求"全部追球"，所以关掉。想恢复防守式保护把它改回 True。
-GUARD_OWN_GOAL_NEAR_LINE = False
-
 # 冲门快球"守门线"模式的迟滞。守门线（Y=防守线）和追球（Y≈冰壶）两种目标在 Y 上
 # 相差约 160 单位（≈210mm），判据若只是单个阈值，速度估计的噪声就会让 Y 目标在两者
 # 之间来回跳（仿真：±15 速度噪声下 1.2s 内跳 37 次），实机表现为前后急刹、反复折返。
@@ -112,21 +107,11 @@ class AirHockeyAI:
         if prediction is None and state.stone.vy < FAST_SHOT_EXIT_VY:
             prediction = self.predictor.predict(state.stone)
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
-        if stone_behind_ai:
-            # 球已越过球槌还在冲门：抢到它前方再堵，不能按死球去绕（绕的途中会从后面把球推进自家门）。
-            # 仿真：球越过球槌后原来 22%~63% 漏进自家门。球前方已没有球槌的位置就只能交给回收规划器。
-            guard_y = state.stone.y - (core.STONE_RADIUS + core.MALLET_RADIUS)
-            if guard_y >= safe_top:
-                guard = self._goal_guard_decision(state, prediction, min(guard_y, state.ai_home_y), error,
-                                                  safe_left, safe_right, safe_top, safe_bottom)
-                if guard is not None:
-                    return guard
         if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
             self._goal_guard = False
             # （safe_* 已经在上面按 recovery_bounds 收窄过了，这里不用再收一次）
             return self._choose_stalled_stone_target(state, safe_left, safe_right, safe_top, safe_bottom)
         stalled_stone_phase = "idle"
-        stone_threatening_goal = state.stone.vy < -25.0
 
         stone_in_attack_zone = state.stone.y <= difficulty.attack_line
         if stone_speed <= core.STONE_STOP_SPEED and stone_near_center:
@@ -185,7 +170,7 @@ class AirHockeyAI:
         # 预测轨迹真的能滑到防守线，且穿过防守线的位置落在球门有效防御区内：
         # 不前扑迎球（迎球会缩短反应时间导致漏球），守在防守线（Y = ai_home_y）
         # 提前横移到预判截获点堵截。进入/退出带迟滞，见 FAST_SHOT_* 常量。
-        guard = self._goal_guard_decision(state, prediction, state.ai_home_y, error,
+        guard = self._goal_guard_decision(state, prediction, error,
                                           safe_left, safe_right, safe_top, safe_bottom)
         if guard is not None:
             return guard
@@ -202,8 +187,9 @@ class AirHockeyAI:
                 stalled_stone_phase,
             )
 
-        if stone_threatening_goal:
-            # 冲门的球：预判它会从防守线哪个 X 穿过（这一支本来就有提前量）。
+        if state.stone.vy < -25.0:
+            # 冲门快球之外的来球（含先撞墙再进门的）：预判它从防守线哪个 X 穿过。
+            # 仿真难度的 prediction 系数靠这一支区分强弱，不能并进冲门快球那一支。
             predicted_x = self._predict_stone_x(state, state.ai_home_y, prediction)
             blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
             target_x = clamp(blended_x + error, safe_left, safe_right)
@@ -217,8 +203,9 @@ class AirHockeyAI:
         return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom),
                           stalled_stone_phase)
 
-    def _goal_guard_decision(self, state, prediction, guard_y, error, safe_left, safe_right, safe_top, safe_bottom):
-        """冲门球：守在 guard_y 这条线上、横移到穿线点堵截；不是冲门球返回 None。"""
+    def _goal_guard_decision(self, state, prediction, error, safe_left, safe_right, safe_top, safe_bottom):
+        """冲门球：守在防守线上、横移到穿线点堵截；不是冲门球返回 None。"""
+        guard_y = state.ai_home_y
         vy_limit = FAST_SHOT_EXIT_VY if self._goal_guard else FAST_SHOT_ENTER_VY
         margin = FAST_SHOT_EXIT_MARGIN if self._goal_guard else FAST_SHOT_ENTER_MARGIN
         self._goal_guard = False
@@ -293,12 +280,8 @@ class AirHockeyAI:
             if abs(state.ai_x - state.stone.x) < clearance - tolerance:
                 return AIDecision(staging_x, state.ai_y, "sidestepping")
             return AIDecision(staging_x, staging_y, "positioning")
-        # ponytail: below the post-clearance line, hold off rather than push toward our goal.
-        # 2026-10-13 现场要求"全部追球"，这条近门保护由 GUARD_OWN_GOAL_NEAR_LINE 控制，
-        # 默认已关闭。想恢复防守式保护把它改回 True。
         # 实机若连球心后方都退不到，不能对齐后从前侧把球推向自家门。
-        if ((self.recovery_bounds is not None and state.stone.y <= safe_top)
-                or (GUARD_OWN_GOAL_NEAR_LINE and state.stone.y <= back_line)):
+        if self.recovery_bounds is not None and state.stone.y <= safe_top:
             return AIDecision(staging_x, staging_y, "positioning")
         if not striking and abs(state.ai_x - striking_x) > tolerance:
             return AIDecision(striking_x, staging_y, "aligning")

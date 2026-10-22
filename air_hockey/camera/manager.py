@@ -1,13 +1,11 @@
 """Latest-frame camera capture with observable startup and runtime failures."""
 
 import glob
-import sys
 import threading
 import time
 
 from .buffer import FrameBuffer
 from .gst_backend import GStreamerBackend
-from .opencv_backend import OpenCVBackend
 from .stats import FPSStats
 from .types import CameraConfig, Frame
 
@@ -45,8 +43,6 @@ class CameraManager:
     def _devices(self):
         if self.config.device:
             return [self.config.device]
-        if sys.platform == "win32":
-            return ["0"]
         devices = glob.glob("/dev/video*")
         return sorted(
             (device for device in devices if device.rsplit("video", 1)[-1].isdigit()),
@@ -84,9 +80,8 @@ class CameraManager:
 
             errors = []
             devices = self._devices()
-            backend_class = OpenCVBackend if sys.platform == "win32" else GStreamerBackend
             for device in devices:
-                backend = backend_class(self.config)
+                backend = GStreamerBackend(self.config)
                 try:
                     backend.open(device)
                 except Exception as exc:

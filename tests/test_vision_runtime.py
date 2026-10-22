@@ -19,7 +19,6 @@ import numpy as np
 from air_hockey import core_config as core
 from air_hockey.ai import AIDecision, AirHockeyAI
 from air_hockey.app.rally import (
-    DEFAULT_DEFENSE_FORWARD_LIMIT,
     READY_POSITION,
     RallyController,
     RallyState,
@@ -493,10 +492,6 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
             else:
                 assert result.curling_state.vy < -25
             assert request is not None
-            # 默认不限制深入（现场选的是"全部追"），x/y 都跟 AI 目标走。
-            # ⚠️ 回归点：默认曾经是 90，把 Y 卡在 AI_HOME_Y+90 = 229.52，
-            # 而 ai.py 允许到 349 —— 少了 111mm 前向行程，症状是"左右能到极限、Y 到不了"。
-            assert DEFAULT_DEFENSE_FORWARD_LIMIT is None
             assert request.target_x == result.ai_target[0]
             assert request.target_y == result.ai_target[1]
             assert request.target_x > READY_POSITION[0] + core.MALLET_RADIUS

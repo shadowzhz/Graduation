@@ -29,7 +29,6 @@ for _stream in (sys.stdout, sys.stderr):
         pass  # 老解释器 / 被重定向到不支持的对象：忽略，不影响运行
 
 from air_hockey.app.live import run_vision
-from air_hockey.app.rally import DEFAULT_DEFENSE_FORWARD_LIMIT
 
 
 def run_game(plc_ip=None, plc_rate=30.0):
@@ -59,21 +58,12 @@ def build_parser():
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
                              "不然轴总是慢一拍、球走了才追到。设 0 关闭提前量。"
                              "这不是 PLC 轴速度设置，需要在现场实测后调准")
-    parser.add_argument("--defense-forward-limit", type=float,
-                        default=DEFAULT_DEFENSE_FORWARD_LIMIT, metavar="UNITS",
-                        help="冰壶在机器半场还在运动时，机械臂最多离开防守线往前多少"
-                             "（球台单位，1 单位≈1.317mm）；冰壶停住（死球）时不受此限。"
-                             "**默认不限制**（= ai.py 自身的上限，现场选的是「全部追球」）。"
-                             "想保守再显式给值：0 = 钉死在防守线（Y 完全不动），"
-                             "50 ≈ 往前 66mm，100 ≈ 往前 132mm（数值越大越主动）")
     parser.add_argument("--motion-margin-mm", type=float, default=2.0, metavar="MM",
                         help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
                              "默认 2（冲到边上可能碰限位开关停轴，频繁发生就调大）。机械行程 X -192..224 / Y -129..187，"
                              "包络 = 行程内缩它。程序不另设软件行程保护")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
-    parser.add_argument("--camera-device", default=None, help="Linux 相机路径（如 /dev/video2）；Windows 摄像头编号（默认 0）")
-    parser.add_argument("--camera-slow", action="store_true",
-                        help="不在打开时协商 MJPG（旧行为）。这台相机在 Windows 上会停在 YUY2 10 FPS，仅排查用")
+    parser.add_argument("--camera-device", default=None, help="相机路径（如 /dev/video2）；不给则依次尝试 /dev/video*")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")
     parser.add_argument("--table-calibration", default="calibration/table_homography.npz", help="球台四点 Homography 标定文件")
     parser.add_argument("--disable-undistort", action="store_true", help="关闭相机畸变校正（必须同时 --disable-homography）")

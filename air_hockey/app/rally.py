@@ -42,22 +42,6 @@ class RallyDecision:
     held_target: bool = False
 
 
-# 主防御的"深入上限"（球台单位，1 单位 ≈ 0.928mm）。
-#
-# ⚠️ 默认是 None = **不限制**。
-#
-# 2026-10-13 现场选的是「全部追球」，但最初我把默认值设成 90，结果 Y 被卡在
-# AI_HOME_Y + 90 = 229.52，而 ai.py 自己允许到 RINK_CENTER_Y - MALLET_RADIUS = 349
-# —— **少了 119.5 单位 ≈ 111mm 的前向行程**，表现为"左右能到极限、Y 到不了"。
-# 所以默认改成不限制，需要保守时再用 --defense-forward-limit 显式收窄。
-#
-# 物理对照：球台 y∈[46,380] 对应 Y 轴 -125~185（现场实测），防守线 AI_HOME_Y=139.52。
-#     0    → 钉死在防守线（Y 完全不动）
-#    50    → 往前约 41mm
-#    90    → 往前约 75mm
-#    210   → 约等于不限制（= ai.py 自身的上限 349）
-DEFAULT_DEFENSE_FORWARD_LIMIT = None
-
 # ★ 遮挡保持：球槌压到球上时，球被球槌挡住 → 检测消失 → 轨道丢弃 →
 # track_confirmed=False → rally 切 RECOVERING、目标回 READY → 球槌退开 →
 # 球又可见 → 再去 → 再次遮挡 …… 现场日志里连续循环好几轮。
@@ -82,18 +66,11 @@ TOUCH_MARGIN = 30.0
 TOUCH_MEMORY = 1.0
 
 class RallyController:
-    def __init__(self, defense_forward_limit: float | None = DEFAULT_DEFENSE_FORWARD_LIMIT,
-                 reachable_bounds: tuple | None = None):
-        """defense_forward_limit: 主防御的"深入上限"，单位是球台坐标（1 单位 ≈ 0.928mm）。
-
-        传 None = 不限制（等于原来的主动追球行为）。
-        见模块常量 DEFAULT_DEFENSE_FORWARD_LIMIT 的物理对照表。
-
-        reachable_bounds: (left, right, top, bottom) —— 球槌**真能到**的范围（游戏坐标），
+    def __init__(self, reachable_bounds: tuple | None = None):
+        """reachable_bounds: (left, right, top, bottom) —— 球槌**真能到**的范围（游戏坐标），
         来自 `plc.reachable_bounds`。用来判断"这颗停住的球还回不回收得动"。
         """
         self.state = RallyState.WAITING
-        self.defense_forward_limit = defense_forward_limit
         self.reachable_bounds = reachable_bounds
         # ★ 遮挡保持用的记忆（见 update 里的说明）
         self._last_target = None
@@ -202,12 +179,7 @@ class RallyController:
                         # 死球（冰壶在自己半场停住）必须上去回收，否则回合停住 —— 不设上限。
                         reason = "machine-half puck stopped: retrieve"
                     elif machine_half:
-                        # 主防御：冰壶还在运动时，限制机械臂离开防守线往前的幅度。
-                        # 原来这一支会一路跟到冰壶所在的深度（实机日志里 target y
-                        # 到过 239/262/289），离开防线之后正前方就空了。
-                        if self.defense_forward_limit is not None:
-                            target_y = min(target_y, AI_HOME_Y + self.defense_forward_limit)
-                        reason = "machine-half puck moving: limited pursuit"
+                        reason = "machine-half puck moving: pursue"
                     else:
                         reason = "human-half puck: defend/prepare"
                     if unreachable:

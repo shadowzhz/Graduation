@@ -17,7 +17,7 @@ from air_hockey.camera import CameraConfig, CameraManager
 def build_parser():
     parser = argparse.ArgumentParser(description="测试纯摄像头采集 FPS，不启动 GUI 和检测")
     parser.add_argument("--benchmark", action="store_true", help="运行 FPS 基准测试")
-    parser.add_argument("--device", default=None, help="Linux 摄像头路径或 Windows 摄像头编号，例如 0")
+    parser.add_argument("--device", default=None, help="摄像头路径，例如 /dev/video0；不给则依次尝试 /dev/video*")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=200.0, dest="requested_fps")
@@ -57,11 +57,7 @@ def run_benchmark(args):
     try:
         camera.start(timeout=3.0)
         info = camera.info
-        requested_mode = (
-            f"{config.width}x{config.height} @ {config.requested_fps:g} FPS，MJPG"
-            if sys.platform == "win32"
-            else f"{config.width}x{config.height} @ {config.requested_fps:g} FPS"
-        )
+        requested_mode = f"{config.width}x{config.height} @ {config.requested_fps:g} FPS"
         print(
             f"基准测试开始：设备={info.device if info else config.device}，"
             f"后端={info.backend if info else '未知'}，"

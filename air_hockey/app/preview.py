@@ -32,7 +32,7 @@ STATE_STYLE = {
 
 
 def _family(available, *names):
-    """取第一个装了的字体（Windows 现场与 Linux 开发机字体不同）。"""
+    """取第一个装了的字体，都没有就用 Tk 默认字体。"""
     return next((name for name in names if name in available), "TkDefaultFont")
 
 

@@ -75,39 +75,11 @@ def test_stopped_machine_half_puck_is_retrieved():
         assert decision.target == (420, min(y, core.RINK_CENTER_Y - core.MALLET_RADIUS))
 
 
-def test_moving_machine_half_puck_pursuit_is_capped_by_depth_limit():
-    """主防御：冰壶在自己半场还在运动时，追击深度被 defense_forward_limit 截住。
-
-    注意 Y 仍然会动 —— 这是"把 Y 钉死在防守线上"那一版的回归点，
-    完全固定 Y 会让轴看起来像不动。
-    """
-    controller = RallyController(defense_forward_limit=90.0)
-    decision = tick(controller, observation(1, x=420, y=250, vy=-200))
+def test_moving_machine_half_puck_pursuit_matches_ai_target():
+    """机器半场运动中的冰壶：x/y 都跟 AI 目标走，不限制离开防守线的深度。"""
+    decision = tick(RallyController(), observation(1, x=420, y=250, vy=-200))
     assert decision.state == RallyState.ATTACKING
-    assert decision.target == (420.0, READY_POSITION[1] + 90.0)
-
-
-def test_zero_forward_limit_pins_to_defense_line():
-    """上限为 0 时等价于钉死在防守线上（Y 完全不动）。"""
-    controller = RallyController(defense_forward_limit=0.0)
-    decision = tick(controller, observation(1, x=420, y=250, vy=-200))
-    assert decision.target == (420.0, READY_POSITION[1])
-
-
-def test_unlimited_pursuit_matches_ai_target():
-    """不设上限时等于原来的主动追球行为。"""
-    decision = tick(RallyController(defense_forward_limit=None),
-                    observation(1, x=420, y=250, vy=-200))
     assert decision.target == (420.0, 250.0)
-
-
-def test_depth_limit_does_not_block_dead_ball_retrieve():
-    """冰壶停在自己半场（死球）必须能回收 —— 深度上限不能让它够不着。"""
-    for limit in (0.0, 90.0, None):
-        controller = RallyController(defense_forward_limit=limit)
-        decision = tick(controller, observation(1, x=420, y=320, vy=0))
-        assert decision.state == RallyState.ATTACKING
-        assert decision.target == (420.0, 320.0), f"limit={limit} 挡住了回收"
 
 
 def test_human_half_unknown_velocity_prepares_defense_immediately():

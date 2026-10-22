@@ -20,7 +20,7 @@
 实时链路使用 `CurlingState` / `PredictionState` / `PlcTarget` 与实际轴位置反馈闭环，PLC 只接收目标位置：
 
 ```text
-CameraManager（Linux / Jetson: GStreamer appsink；Windows: OpenCV DirectShow）
+CameraManager（Jetson / Linux: GStreamer appsink）
   │  Frame(raw BGR)
   ▼
 StoneDetector            HSV/Lab 阈值 + 轮廓几何 + 动态 ROI
@@ -103,8 +103,7 @@ Camera -> VisionRuntime
 
 统一通过根目录 [main.py](file:///run/media/shadowemperor/游戏/Ubuntu/Project/Python/Graduation/main.py) 启动：
 
-Windows 使用已经能运行 PLC 软件的同一个 Python 环境；若它缺视觉依赖，安装 `numpy` 和 `opencv-python`（`python -m pip install numpy opencv-python`），不要为此更换已有可用的 `python-snap7` 版本。
-默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。相机采集按系统选择：Linux / Jetson 用 V4L2 GStreamer（Jetson 有 NVIDIA 元件时硬解码，普通 Linux 软件解码）；Windows 用 OpenCV DirectShow，默认摄像头编号为 `0`，可用 `--camera-device 1` 切换。Windows 请求 MJPG、1280×720 和配置帧率（默认 200 FPS）；启动状态报告实际尺寸、驱动报告帧率和格式，实测采集速度以帧计数为准。200 FPS 是否可达、视野是否完整取决于相机支持的模式。先确认完整球台都在画面内；视野变化后，即使尺寸仍为 1280×720，也必须重新做相机内参和球台标定，验证完成前不要接 PLC。
+默认视觉模式须先在目标摄像头/分辨率下生成 `calibration/camera_calibration.npz`（内参）及 `calibration/table_homography.npz`（球台四角）。文件缺失/格式错误会报错，不会静默使用无畸变或线性 ROI。仅排查采集、不使用标定时可显式同时加 `--disable-undistort --disable-homography`；`--sim` 不使用相机标定。相机采集用 V4L2 GStreamer（Jetson 有 NVIDIA 元件时硬解码，普通 Linux 软件解码），请求 MJPEG、1280×720 和配置帧率（默认 200 FPS）；不给 `--camera-device` 时依次尝试 `/dev/video*`。启动状态报告实际尺寸、驱动报告帧率和格式，实测采集速度以帧计数为准。200 FPS 是否可达、视野是否完整取决于相机支持的模式。先确认完整球台都在画面内；视野变化后，即使尺寸仍为 1280×720，也必须重新做相机内参和球台标定，验证完成前不要接 PLC。
 
 ```bash
 python3 air_hockey/tools/calibrate_camera.py --cols 10 --rows 7 --square-size 25 --output calibration/camera_calibration.npz
@@ -117,10 +116,6 @@ python3 main.py --sim                 # 虚拟仿真对战（也可写作 --game
 python3 main.py --record run.json     # 记录运行数据（统一 JSON 日志）
 python3 main.py --plc 192.168.0.64 --plc-rate 30  # 仅适用已配置对应 DB1/DB18 的 S7-1500T
 python3 main.py --sim --plc 192.168.0.64          # 仿真游戏/实机轴反馈联动
-# Windows PowerShell：先验证相机画面；PLC 运行时用已安装 Snap7 的同一 Python 环境
-python main.py --camera-device 0
-# 确认完整球台都在预览中，并在当前相机画面下完成标定后，才连接 PLC
-python main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30
 ```
 
 仿真游戏现支持 `--plc-rate`（默认 30 Hz，与视觉模式一致）；例如 `python3 main.py --sim --plc 192.168.0.64 --plc-rate 40`。它只改变上位机请求通信周期，不改变 PLC 轴的速度、加速度或 AI 决策间隔。游戏默认「普通」难度每 85 ms 刷新 AI 目标，「困难」每 35 ms 刷新；若游戏目标变化快而实机位置跟随慢，先核对屏幕「目标/实际」与 PLC 运动参数。频率过高可能导致读写赶不上周期、反馈失效；应在现场安全条件下测量往返耗时和位置反馈后再调整，不要将软件调频当作机械安全改造。
@@ -166,7 +161,7 @@ python3 -u main.py --camera-device /dev/video2 --plc 192.168.0.64 --dry-run --re
 python3 -u main.py --camera-device /dev/video2 --plc 192.168.0.64 --record play.json
 ```
 
-Windows 将 `python3` 改为 `python`，相机用 `--camera-device 0`。标定和轴位置方向必须正确；实机机械速度/加速度仍由 PLC 配置，软件不设置或保证其值。每次记录使用未用过的文件名；`plc_request` 是意图不是执行确认，meta 的 control 为 `direct_play`，并标明 `dry_run/live/no_plc`。
+标定和轴位置方向必须正确；实机机械速度/加速度仍由 PLC 配置，软件不设置或保证其值。每次记录使用未用过的文件名；`plc_request` 是意图不是执行确认，meta 的 control 为 `direct_play`，并标明 `dry_run/live/no_plc`。
 
 记录器启动时拒绝已存在的最终 JSON 文件并报 `FileExistsError`，避免重用文件名覆盖旧实验。同次运行的快照更新、关闭及崩溃日志恢复保持原有行为。
 
@@ -174,9 +169,9 @@ GUI/控制台显示当前动作、track_valid、球速度、目标、球槌实�
 
 下发方式（只有终点模式，斜坡模式已删除）：只下发 AI 的终点，BufferMode 固定 5（混合），舍入间距 `TransitionParameter[1]` 写 -1（由 TO 按 TIA「最大舍入间距」取最大值），速度/加速度完全由 TIA 运动机构设置决定。`MC_MoveLinearAbsolute` 只有 BufferMode 1/2/5、没有"中止当前作业"（西门子 S7-1500T Kinematics 手册参数表），新终点总是排在当前作业后面混合进去，所以轴忙时新终点离上次终点不足 10mm（`interface.ENDPOINT_RESEND_MM`）就不发。若报跟随误差 801，要把 TIA 运动机构的加速度/减速度降到轴能力以内。
 
-运动中报警撤销授权时，工作线程只打印一条 `运动撤销快照`，包含前后使能/就绪/轴故障/busy 状态、当前运动学错误码、原始机械位置、最后已发送的物理目标及 BufferMode。801 表示参与运动系统的轴未就绪，具体原因仍需结合这条快照和 TIA 诊断；不会自动复位或重新授权。人工 E 重新授权会清除本地已发送目标的死区缓存，避免把报警中断的目标当作已完成；报警清除本身不重发目标。Windows 现场可用 `python -u main.py --camera-device 0 --plc 192.168.0.64 --plc-rate 30 2>&1 | Tee-Object -FilePath play_console.log` 保留控制台；故障时提供这条快照而不是仅截取“禁止运动”。
+运动中报警撤销授权时，工作线程只打印一条 `运动撤销快照`，包含前后使能/就绪/轴故障/busy 状态、当前运动学错误码、原始机械位置、最后已发送的物理目标及 BufferMode。801 表示参与运动系统的轴未就绪，具体原因仍需结合这条快照和 TIA 诊断；不会自动复位或重新授权。人工 E 重新授权会清除本地已发送目标的死区缓存，避免把报警中断的目标当作已完成；报警清除本身不重发目标。现场可用 `python3 -u main.py --plc 192.168.0.64 2>&1 | tee play_console.log` 保留控制台；故障时提供这条快照而不是仅截取“禁止运动”。
 
-PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在 Windows 或实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
+PLC 模式需要 `python-snap7`，不再强制降级到 1.3；已有可工作的现场环境应保留。已用本地 S7 服务验证 1.3、2.0.2、3.0.0、3.2.1 的连接、心跳、反馈、人工使能及运动下发，尚未在实机复测。1.x/2.x 使用对应的 Snap7 原生库；3.x 是纯 Python 实现，需要 Python 3.10 及以上。Python 3.8 使用 1.3 时仍需 `pkg_resources`：`python3 -m pip install "python-snap7==1.3" "setuptools<81"`。离线测试不需要 Snap7。导入或连接失败会输出具体错误。按位寻址采用 [S7 WriteArea / S7WLBit 协议](https://snap7.sourceforge.net/sharp7.html)，不回退整字节读改写；旧版 3.0 的单 BIT 长度编码在发送前修正，应答仍须成功才接受连接。
 
 常用参数：`--camera-device`、`--preview-fps`、`--calibration`、`--table-calibration`、`--disable-undistort`、`--disable-homography`、`--roi`、`--lower/--upper`、`--record`、`--plc`、`--plc-rate`。冰壶 HSV 默认阈值为 `--lower 170 100 80 --upper 10 255 255`，会同时覆盖红色在 HSV 色调 0 和 179 两端的范围；灯光、曝光或壶颜色不同需用实拍图重新调。
 
@@ -186,7 +181,7 @@ Jetson 的 Python 3.8 运行时需使用已包含延迟类型注解修复的最�
 
 Jetson 上若看到 `unknown type GstFraction`，需更新到通过 `Gst.Structure.get_fraction("framerate")` 读取协商帧率的版本。`/dev/video*` 中可能有非采集设备；用 `v4l2-ctl --device=/dev/video0 --list-formats-ext` 核对 MJPEG 分辨率/帧率，再用 `python3 air_hockey/tools/probe_camera.py --device /dev/video0 --benchmark --duration 10` 单独诊断该采集节点。
 
-采集诊断：`python3 air_hockey/tools/probe_camera.py --benchmark --duration 10` 显示实际图像尺寸、驱动报告 FPS、实测采集 FPS 和采集耗时；Linux GStreamer 另提供 appsink 转换计时，Windows DirectShow 的解码/颜色处理计入 `read()`。`python3 air_hockey/tools/probe_gstreamer_transfer.py` 只用于 Linux GStreamer 管道；独立管道的 FPS 不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/驱动报告 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的后端读取完成时刻，Gst PTS（仅 GStreamer 提供）是未映射的管道时钟域原值，不能声称曝光到显示或 PLC 端到端延迟。本机无 Jetson；Windows 相机分支尚未接实机测量。
+采集诊断：`python3 air_hockey/tools/probe_camera.py --benchmark --duration 10` 显示实际图像尺寸、驱动报告 FPS、实测采集 FPS、采集耗时和 appsink 转换计时。`python3 air_hockey/tools/probe_gstreamer_transfer.py` 单独测 GStreamer 管道；独立管道的 FPS 不是应用采集 FPS。`main.py --headless --benchmark-seconds 30 --perf-json benchmark.json` 报告视觉链路分段耗时；请求/驱动报告 FPS、实测采集 FPS、处理 FPS 与各阶段耗时不可混称。`Frame.timestamp` 是 host `perf_counter` 的后端读取完成时刻，Gst PTS 是未映射的管道时钟域原值，不能声称曝光到显示或 PLC 端到端延迟。
 
 预览链路先将原始帧缩到 640 像素宽，再按相同比例绘制 ROI、观测、轨迹和 AI 目标；`render()` 全分辨率输出仍保持原有行为。预览按稀疏采样的全画面亮度做缓慢校正，以减轻整幅画面的明暗闪烁；只修改显示图像，不改检测、追踪或 PLC 输入，局部条纹仍需稳定照明。本机 1280×720 合成画面、各预热 3 次后各测 50 次的单次对比：预览编码耗时 p50 从约 1.97 ms 降为约 0.96 ms；这不是 Jetson 或真实相机的性能结论。GStreamer 后端仍保留 cv2 的 BGRx→BGR 转换，不在缺少 Jetson 实测时改动硬件协商管道。
 
@@ -230,9 +225,9 @@ python3 tests/run_tests.py                          # 全量自动化测试
 
 `plc_request` 记录本帧经 AI 半场限幅的目标（场地逻辑坐标），并非 PLC 接收或电机到位确认；`version=3` 不兼容旧的冰壶状态/比分载荷记录解析。
 
-Linux 和 Windows 上，设置路径后逐帧写入 `<path>.journal` 并 flush 到系统缓存（进程崩溃不丢帧），`fsync` 限频为至多每 0.5 秒一次（`sync_interval`，断电最多丢最后 0.5 秒；设 0 恢复逐帧 fsync），内存不随帧数增长；正常关闭时流式生成上述版本 3 JSON，再删除日志。导出失败保留日志且允许重试关闭。输出 JSON 与日志会短暂共存，磁盘须留出导出空间；完整预测也会增加每帧日志大小。只有显式调用 `to_dict()` / `to_json()` 才把全部帧读入内存，未设置路径的有限长度离线记录仍使用内存。
+设置路径后逐帧写入 `<path>.journal` 并 flush 到系统缓存（进程崩溃不丢帧），`fsync` 限频为至多每 0.5 秒一次（`sync_interval`，断电最多丢最后 0.5 秒；设 0 恢复逐帧 fsync），内存不随帧数增长；正常关闭时流式生成上述版本 3 JSON，再删除日志。导出失败保留日志且允许重试关闭。输出 JSON 与日志会短暂共存，磁盘须留出导出空间；完整预测也会增加每帧日志大小。只有显式调用 `to_dict()` / `to_json()` 才把全部帧读入内存，未设置路径的有限长度离线记录仍使用内存。
 
-文件锁使用系统标准库：Linux 用 `fcntl.flock`，Windows 用 [msvcrt.locking](https://docs.python.org/3/library/msvcrt.html#msvcrt.locking)，不需要安装 `fcntl`。Windows 快照复用持锁句柄，恢复后先关闭文件再删除日志。Linux 另同步目录；Windows 标准库不能 `fsync` 目录，不承诺突然断电后的目录项持久性。Windows DirectShow 分支在本机通过模拟摄像头的回归测试，但未在 Windows 相机或 PLC 实机验证；Jetson 实时采集仍需 Linux/NVIDIA GStreamer 环境。
+文件锁用标准库 `fcntl.flock`，快照复用持锁句柄；导出后同步目录，保证断电后目录项也落盘。
 
 异常退出后，先确认旧进程已退出，再恢复；仅丢弃最后一个未完成行，完整行损坏会报错并保留日志。正在运行的日志由文件锁保护，同路径的新记录器也拒绝覆盖未恢复日志：
 
@@ -297,7 +292,7 @@ Graduation/
 ## 🎯 课题研究进展与展望
 
 ### 已完成工作
-* [x] Linux / Jetson GStreamer 与 Windows DirectShow 相机采集后端（尚未做 Windows / Jetson 实机测量）
+* [x] Jetson / Linux GStreamer 相机采集后端（尚未做 Jetson 实机测量）
 * [x] 颜色 + 几何约束检测算法与动态局部 ROI 加速
 * [x] 原始像素单目标常速追踪与漏检维持
 * [x] **卡尔曼滤波状态估计层**（常量速度模型 + 机动检测，抑制视觉抖动且快速跟上击球/弹墙）

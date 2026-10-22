@@ -1,7 +1,7 @@
 """PC → PLC → 轴 的分段延迟统计，用于现场排查"反应慢"。
 
 PLCLink 的工作线程在每个周期调用 on_status / on_send，主线程定期调用 report()
-取一行汇总并清零窗口。所有位置都是物理坐标（mm），时间是 time.perf_counter()（Windows 上 monotonic 只有 15.6ms 分辨率）。
+取一行汇总并清零窗口。所有位置都是物理坐标（mm），时间是 time.perf_counter()。
 
 各段含义（按信号流向）：
   S7 读 / S7 写      一次状态读取、一次运动下发占用的 S7 往返时间

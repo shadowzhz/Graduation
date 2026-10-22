@@ -8,11 +8,12 @@
 
 ## 2. 核心文件与改动位置
 - `air_hockey/control/interface.py`：`_prepare_move` 只做坐标换算、轴忙时终点变化 < 10mm 不发（`ENDPOINT_RESEND_MM`）、3mm 死区。命令余量是 `control/limits.py` 的 `MotionLimits(margin_mm)`。
-- `air_hockey/ai.py`：冲门判断抽成 `_goal_guard_decision`（Y 守防守线 140，X 提前堵截）。冰壶已越过球槌、还在冲门时也走这里，守线改到"球前方一个身位"，不再交给死球回收规划器去绕。
+- `air_hockey/ai.py`：冲门判断 `_goal_guard_decision`（Y 守防守线 140，X 提前堵截）。10-22 精简：删"越过球槌后在球前方一个身位堵截"（仿真 200 个越过球槌的球，进自家门 31 -> 6）、删近门保护开关 `GUARD_OWN_GOAL_NEAR_LINE`、删 `--defense-forward-limit`（旧启动命令带它会报错）。"人半场来球守穿线点"保留：仿真难度的 prediction 系数靠它。
 - `air_hockey/app/rally.py`：连续物理导引与状态平滑防抖。
 
 ## 3. 测试与验证状态
-- `python3 tests/run_tests.py`：350 项全过；Python 3.8（Jetson 同版本）也 350 项全过。
+- `python3 tests/run_tests.py`：343 项全过（10-22 精简 AI 删 3 个、删 Windows 支持删 4 个 DirectShow 用例）。
+- 10-22 只在 Jetson 上开发：删 `camera/opencv_backend.py`、`recorder.py` 的 msvcrt 分支、`--camera-slow`（`CameraConfig.fourcc` 只给 DirectShow 用，GStreamer 管道本来就固定 MJPEG）。旧命令带 `--camera-slow` 会报错。
 - 10-22 Jetson 检查：`physics.py` 缺 `from __future__ import annotations`、`preview.py` 用了 3.9 的 `removeprefix`，3.8 下直接崩，已修。全幅检测降采样（`detector.py`）会让贴下限的冰壶被滤掉、重新捕获时位置跳 1px，已改为半径补偿 + 候选回原分辨率精测（耗时 1.8ms -> 0.7ms 仍保留）。
 
 ## 4. 本轮修正（代码审查后）

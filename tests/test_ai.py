@@ -125,29 +125,11 @@ def test_moving_behind_puck_is_bypassed_and_outgoing_puck_ends_recovery():
     assert ai.choose_target(state).stalled_stone_phase == "idle"
 
 
-def test_recovery_does_not_strike_toward_goal_below_safe_back_line():
-    """近门保护：冰壶离自家球门太近时不要对齐去推它（否则可能踢进自家门）。
-
-    2026-10-13 现场要求"全部追球"，所以默认把 GUARD_OWN_GOAL_NEAR_LINE 关掉了。
-    两种状态都测：保护开着必须侧移避让，关掉时才允许对齐出击。
-    """
-    from air_hockey import ai as ai_module
-
+def test_recovery_aligns_to_puck_near_own_goal():
+    """现场要求"全部追球"：冰壶离自家球门很近时也对齐 X 去回收。"""
     state = make_state(300, 70, ai_y=91)
     state.ai_x = 353
     state.stalled_stone_phase = "positioning"
-
-    original = ai_module.GUARD_OWN_GOAL_NEAR_LINE
-    try:
-        ai_module.GUARD_OWN_GOAL_NEAR_LINE = True
-        decision = AirHockeyAI().choose_target(state)
-        assert decision.target_y == state.ai_y
-        assert abs(decision.target_x - state.stone.x) > layout.STONE_RADIUS + layout.MALLET_RADIUS
-    finally:
-        ai_module.GUARD_OWN_GOAL_NEAR_LINE = original
-
-    # 默认关闭 = 全部追：允许把 X 对齐到冰壶
-    assert ai_module.GUARD_OWN_GOAL_NEAR_LINE is False
     decision = AirHockeyAI().choose_target(state)
     assert abs(decision.target_x - state.stone.x) <= layout.STONE_RADIUS + layout.MALLET_RADIUS
 

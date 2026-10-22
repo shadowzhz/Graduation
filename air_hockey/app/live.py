@@ -166,13 +166,7 @@ class LiveSession:
                 "fatal": None,
             }
 
-        self.camera = CameraManager(CameraConfig(
-            device=args.camera_device,
-            # 默认在 open 阶段就把格式协商成 MJPG（Windows 上不这样做会停在 YUY2 10 FPS）。
-            # 2026-10-20 现场：漏了这个开关时采集只有 9.9 FPS，两种格式下冰壶像素半径相同（约 31px），
-            # 视野一致，所以改为默认开启；--camera-slow 退回旧行为。
-            fourcc=None if args.camera_slow else "MJPG",
-        ))
+        self.camera = CameraManager(CameraConfig(device=args.camera_device))
         try:
             self.camera.start()
             if args.record:
@@ -191,7 +185,7 @@ class LiveSession:
             raise SystemExit(f"实时运行启动失败：{exc}") from exc
 
         self.plc_adapter = PlcControlAdapter()
-        self.rally = RallyController(defense_forward_limit=args.defense_forward_limit)
+        self.rally = RallyController()
         if args.plc:
             self.plc = start_plc(args, self.runtime, self.rally)
             if self.window is not None and not args.dry_run:
@@ -378,7 +372,7 @@ class LiveSession:
         if capture.current_fps and capture.current_fps < 30.0:
             print(f"[stats] [!] 相机采集只有 {capture.current_fps:.1f} FPS：目标每 "
                   f"{1000.0 / capture.current_fps:.0f} ms 才更新一次，反应必然慢。"
-                  "检查像素格式是否为 MJPG（启动行会打印协商格式），不要加 --camera-slow")
+                  "检查相机是否协商到 MJPEG（启动行会打印协商格式）")
         print_latency_report(self.decision_ages, plc)
 
     # ------------------------------------------------------------------
