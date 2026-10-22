@@ -10,6 +10,11 @@ from ..game_state import CurlingState
 from .preprocess import crop_roi, external_contours, morphology, threshold
 from .types import Detection, ROI
 
+# 全幅搜索降采样：像素数超过这个值才启用（小 ROI 不受影响）
+SEARCH_DOWNSCALE_AREA = 250_000
+SEARCH_DOWNSCALE_SCALE = 0.5
+SEARCH_DOWNSCALE_INTERP = cv2.INTER_NEAREST   # 最近邻：缩放开销最小，阈值不受影响
+
 # 冰壶检测器：对外返回统一 CurlingState（raw 像素坐标 + 置信度），找不到返回 None
 class StoneDetector:
     def __init__(self, roi=None, color_space="hsv", lower=(0, 40, 30), upper=(180, 255, 255),
@@ -80,13 +85,23 @@ class StoneDetector:
         if cropped.size == 0:
             return []
 
+        # ★ 丢检时会退回全幅 ROI，阈值+形态学+轮廓是这时掉帧率的主因。
+        #   大区域先降采样搜索，坐标/面积/半径按 scale 换算回原分辨率；
+        #   小 ROI（正常追踪）面积远达不到阈值，走原路径，行为完全不变。
+        scale = 1.0
+        if cropped.shape[0] * cropped.shape[1] > SEARCH_DOWNSCALE_AREA:
+            scale = SEARCH_DOWNSCALE_SCALE
+            cropped = cv2.resize(cropped, None, fx=scale, fy=scale,
+                                 interpolation=SEARCH_DOWNSCALE_INTERP)
+
         mask = threshold(cropped, self.lower, self.upper, self.color_space)             # 颜色筛选
-        mask = morphology(mask, self.morphology_kernel, self.morphology_iterations)     # 形态学处理
+        kernel = self.morphology_kernel if scale >= 1.0 else max(3, int(round(self.morphology_kernel * scale)))
+        mask = morphology(mask, kernel, self.morphology_iterations)                     # 形态学处理
 
         raw = []
         for contour in external_contours(mask):
             area = float(cv2.contourArea(contour))                              # 计算这个轮廓有多大
-            if area < self.min_area or area > self.max_area:                    # 面积过滤
+            if area < self.min_area * scale * scale or area > self.max_area * scale * scale:
                 continue
             perimeter = float(cv2.arcLength(contour, True))                     # 计算轮廓周长
             if perimeter <= 0.0:                                                # 周长检查
@@ -95,14 +110,14 @@ class StoneDetector:
             if circularity < self.min_circularity:                              # 圆形度过滤
                 continue
             (center_x, center_y), radius = cv2.minEnclosingCircle(contour)      # 最小外接圆
-            if radius < self.min_radius or radius > self.max_radius:            # 外接圆半径过滤
+            if radius < self.min_radius * scale or radius > self.max_radius * scale:
                 continue
 
             detection = Detection(
-                center_x=float(center_x + offset_x),
-                center_y=float(center_y + offset_y),
-                radius=float(radius),
-                area=area,
+                center_x=float(center_x / scale + offset_x),
+                center_y=float(center_y / scale + offset_y),
+                radius=float(radius / scale),
+                area=float(area / (scale * scale)),
                 timestamp=frame.timestamp,              # 时间戳，用于计算轨迹预测
                 circularity=float(circularity),
             )

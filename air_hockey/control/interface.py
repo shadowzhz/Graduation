@@ -22,6 +22,7 @@ from .protocol import (
     COMM_READ_START, COMM_SEQ_ACK_OFFSET, COMM_SEQ_OFFSET,
     COMM_TRANSITION_OFFSET, COMM_X_ERRID_OFFSET, COMM_X_ERR_BIT,
     COMM_Y_ERRID_OFFSET, COMM_Y_ERR_BIT, COMM_Y_ERR_OFFSET, DB_COMM, DB_MOTION,
+    CYLINDER_BYTE, CYLINDER_START_BIT,
     GROUP_COMM_LOST_LATCH_BIT, GROUP_CTRL_BYTE, GROUP_RESET_BIT, GROUP_STOP_BIT,
     HOMING_BYTE, MOTION_BLOCK_SIZE, MOTION_BLOCK_START, MOTION_BUSY_BYTE, MOTION_CMD_BYTE,
     MOTION_STATUS_BYTE, STATUS_READ_SIZE, STATUS_READ_START, TRIGGER_BYTE,
@@ -148,18 +149,44 @@ class PLCInterface:
     def _read_db_blocks(self, specs):
         if protocol.Areas is not None and not self._multi_read_failed:
             try:
-                items = [{"area": protocol.Areas.DB, "db_number": db, "start": start, "size": size}
-                         for db, start, size in specs]
-                result, data = self._client.read_multi_vars(items)
-                if result == 0 and data is not None and len(data) == len(specs):
-                    blocks = [bytearray(block) for block in data]
-                    if all(len(block) == spec[2] for block, spec in zip(blocks, specs)):
-                        return blocks
-                raise RuntimeError(f"read_multi_vars result={result}")
+                return self._read_multi_vars(specs)
             except Exception as exc:
                 self._multi_read_failed = True
                 print(f"[PLC] 多变量读取不可用，回退逐块读取: {exc}")
         return [self._client.db_read(db, start, size) for db, start, size in specs]
+
+    def _read_multi_vars(self, specs):
+        """一次请求读多个区域。
+
+        python-snap7 1.x 的 read_multi_vars 要的是 S7DataItem 的 ctypes 数组，
+        旧代码传 dict 列表会被 byref() 拒绝，于是退化成逐块读（两次往返 ≈ 9 ms）。
+        这里直接调底层 Cli_ReadMultiVars，把 2 次往返压成 1 次。
+        """
+        library = getattr(self._client, "_library", None)
+        pointer = getattr(self._client, "_pointer", None)
+        if library is None or pointer is None:
+            raise RuntimeError("snap7 native handle unavailable")
+        from snap7.types import S7AreaDB, S7DataItem, S7WLByte
+
+        count = len(specs)
+        items = (S7DataItem * count)()
+        buffers = []
+        for index, (db, start, size) in enumerate(specs):
+            buffer = (ctypes.c_ubyte * size)()
+            buffers.append(buffer)
+            items[index].Area = S7AreaDB
+            items[index].WordLen = S7WLByte
+            items[index].DBNumber = db
+            items[index].Start = start
+            items[index].Amount = size
+            items[index].pData = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+        result = library.Cli_ReadMultiVars(pointer, items, count)
+        if result != 0:
+            raise RuntimeError(self._client.error_text(result))
+        for index, buffer in enumerate(buffers):
+            if items[index].Result != 0:
+                raise RuntimeError(f"item {index} failed: {items[index].Result}")
+        return [bytearray(bytes(buffer)) for buffer in buffers]
 
     def _read_status_blocks(self):
         """读 DB1 + DB18，兼容 DB18 的三种长度（58 / 62 / 66）。
@@ -258,6 +285,11 @@ class PLCInterface:
         except Exception:
             self._connected = False
             return False
+
+    def set_cylinder(self, on):
+        """DB1.190.0 气缸启动：开关量，状态由界面持有（PLC 无回读）。"""
+        self._write_bool(DB_MOTION, CYLINDER_BYTE, CYLINDER_START_BIT, bool(on))
+        return True
 
     def game_to_physical(self, x, y):
         return game_to_physical(self.zone, self.limits, x, y, self.clamp_stats)

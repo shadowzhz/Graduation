@@ -99,6 +99,7 @@ class VisionWindow:
                         highlightthickness=1, highlightbackground=LINE)
         side.pack(side="left", fill="both", expand=True, padx=(12, 0))
         side.pack_propagate(False)
+        self._side = side
         # 侧栏会被底栏撑宽：换行宽度跟着实际宽度走，长故障信息少占几行
         side.bind("<Configure>", lambda event: [label.configure(wraplength=event.width - 40)
                                                 for label in (self._reason, self._plc_message)])
@@ -182,6 +183,13 @@ class VisionWindow:
         self._button(both, "使能 · E", link.enable_axes, primary=True)
         self._button(both, "回零 · H", link.home_axes)
         self._button(both, "复位 · C", link.axes_reset)
+        # 底栏三组轴按钮已占满 1024 宽屏幕，气缸放侧栏避免被裁
+        # DB1.190.0 是开关量：按一次置 1，再按一次清 0，按钮文字跟随状态
+        self._cylinder_on = False
+        air = tk.Frame(self._side, bg=PANEL)
+        air.pack(fill="x", pady=(8, 0))
+        tk.Label(air, text="气缸", font=self.font_heading, fg=FG, bg=PANEL).pack(side="left")
+        self._cylinder_button = self._button(air, "关 · K", self._toggle_cylinder, primary=True)
         for axis in ("x", "y"):
             name = axis.upper()
             group = self._group(self._bar, f"{name} 轴")
@@ -190,13 +198,25 @@ class VisionWindow:
             self._button(group, f"回零 · {name}", lambda a=axis: self._home_axis(a))
             self._button(group, "复位", lambda a=axis: self._reset_axis(a))
         for key, command in (("e", link.enable_axes), ("h", link.home_axes),
-                             ("c", link.axes_reset)):
+                             ("c", link.axes_reset), ("k", self._toggle_cylinder)):
             self.root.bind(key, lambda _event, callback=command: callback())
         # ★ 大小写区分：小写 = 单轴使能/撤销，大写(Shift) = 单轴回零
         self.root.bind("x", lambda _event: self._toggle_axis("x"))
         self.root.bind("y", lambda _event: self._toggle_axis("y"))
         self.root.bind("X", lambda _event: self._home_axis("x"))
         self.root.bind("Y", lambda _event: self._home_axis("y"))
+
+    def _toggle_cylinder(self):
+        """DB1.190.0 开关：翻转→下发→更新按钮文字；下发失败则回退。"""
+        link = getattr(self, "_plc", None)
+        if link is None:
+            return
+        wanted = not self._cylinder_on
+        if not link.set_cylinder(wanted):
+            return
+        self._cylinder_on = wanted
+        button = self._cylinder_button
+        button.configure(text=("开 · K" if wanted else "关 · K"))
 
     def _toggle_axis(self, axis):
         """单轴使能 / 撤销。切换后立刻刷新按钮文字。"""
