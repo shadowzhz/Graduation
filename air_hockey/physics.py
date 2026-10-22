@@ -1,5 +1,7 @@
 """冰壶的几何辅助函数、运动和碰撞规则。"""
 
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass, field
 

@@ -110,13 +110,15 @@ class StoneDetector:
             if circularity < self.min_circularity:                              # 圆形度过滤
                 continue
             (center_x, center_y), radius = cv2.minEnclosingCircle(contour)      # 最小外接圆
-            if radius < self.min_radius * scale or radius > self.max_radius * scale:
+            # 轮廓点在像素中心：降采样后每边少算 (1/scale-1)/2 个原图像素，不补会把贴下限的冰壶滤掉
+            radius = radius / scale + (1.0 / scale - 1.0) / 2.0
+            if radius < self.min_radius or radius > self.max_radius:            # 外接圆半径过滤
                 continue
 
             detection = Detection(
                 center_x=float(center_x / scale + offset_x),
                 center_y=float(center_y / scale + offset_y),
-                radius=float(radius / scale),
+                radius=float(radius),
                 area=float(area / (scale * scale)),
                 timestamp=frame.timestamp,              # 时间戳，用于计算轨迹预测
                 circularity=float(circularity),
@@ -127,7 +129,20 @@ class StoneDetector:
         if not raw:
             return []
         raw.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [CurlingState.from_detection(item[2]) for item in raw]
+        candidates = [CurlingState.from_detection(item[2]) for item in raw]
+        if scale < 1.0:
+            # 降采样只负责粗找；每个候选在原分辨率小窗里重测，否则重新捕获那一帧与下一帧
+            # （动态 ROI 走原分辨率）之间位置差可达 1px，200fps 下就是一次假速度
+            refined = []
+            for c in candidates:
+                half = min(int(c.radius * 2) + 8, 240)  # 窗口面积 < SEARCH_DOWNSCALE_AREA，保证不再降采样
+                window = ROI(int(c.x) - half, int(c.y) - half, 2 * half, 2 * half)
+                found = self.detect_candidates(frame, dynamic_roi=window)
+                if found:
+                    refined.append(found[0])
+            refined.sort(key=lambda c: (c.confidence, c.radius), reverse=True)
+            candidates = refined
+        return candidates
 
     def detect(self, frame, dynamic_roi=None):
         """跑一遍检测管线，返回得分最高候选对应的 CurlingState，找不到返回 None。"""

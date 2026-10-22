@@ -306,7 +306,10 @@ class VisionWindow:
         self._armed.configure(fg=OK if armed else MUTED)
         self._safe.configure(fg=OK if safe else BAD)
         # plc_status_text 的格式是 " | PLC armed=.. safe=.. | 说明"，说明里自己也可能带 " | "
-        message = text.split(" | ", 2)[-1].removeprefix("PLC ").replace(" | ", " / ")
+        message = text.split(" | ", 2)[-1]
+        if message.startswith("PLC "):  # Jetson 是 Python 3.8，没有 str.removeprefix
+            message = message[4:]
+        message = message.replace(" | ", " / ")
         self._plc_message.configure(text=message, fg=FG if safe else BAD)
 
     def _close(self):

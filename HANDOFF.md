@@ -12,7 +12,8 @@
 - `air_hockey/app/rally.py`：连续物理导引与状态平滑防抖。
 
 ## 3. 测试与验证状态
-- 全量自动化测试套件 `python3 tests/run_tests.py`：**350 项全部通过，0 失败**（删斜坡模式时去掉了 6 个只测斜坡的用例）。
+- `python3 tests/run_tests.py`：350 项全过；Python 3.8（Jetson 同版本）也 350 项全过。
+- 10-22 Jetson 检查：`physics.py` 缺 `from __future__ import annotations`、`preview.py` 用了 3.9 的 `removeprefix`，3.8 下直接崩，已修。全幅检测降采样（`detector.py`）会让贴下限的冰壶被滤掉、重新捕获时位置跳 1px，已改为半径补偿 + 候选回原分辨率精测（耗时 1.8ms -> 0.7ms 仍保留）。
 
 ## 4. 本轮修正（代码审查后）
 - 卡尔曼机动检测：击球/弹墙后速度约 50ms 收敛（原约 400ms），`vision_runtime.REALTIME_MANEUVER_GATE`。
