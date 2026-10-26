@@ -187,3 +187,4 @@ def physical_to_game(zone, x, y):
     left, right, top, bottom = zone
     return (left + (x - TABLE_X_MIN) * (right - left) / (TABLE_X_MAX - TABLE_X_MIN),
             top + (y - TABLE_Y_MIN) * (bottom - top) / (TABLE_Y_MAX - TABLE_Y_MIN))
+# PROBE
