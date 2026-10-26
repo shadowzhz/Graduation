@@ -18,23 +18,22 @@ from .protocol import (
     AXIS_ENABLE_BITS, AXIS_HOME_BITS, AXIS_NAMES, AXIS_RESET_BITS, COMM_AXES_READY_BIT,
     COMM_BYTE, COMM_HEARTBEAT_BIT, COMM_KIN_ERROR_OFFSET, COMM_KIN_REACTION_OFFSET,
     COMM_LINK_LOST_BIT, COMM_MC_ERRID_OFFSET, COMM_MC_ERR_BIT, COMM_MC_ERR_OFFSET,
-    COMM_MC_REMAINING_OFFSET, COMM_OB1_TIME_OFFSET, COMM_PLC_HEARTBEAT_BIT, COMM_READ_SIZES,
+    COMM_MC_REMAINING_OFFSET, COMM_PLC_HEARTBEAT_BIT, COMM_READ_SIZE,
     COMM_READ_START, COMM_SEQ_ACK_OFFSET, COMM_SEQ_OFFSET,
-    COMM_TRANSITION_OFFSET, COMM_X_ERRID_OFFSET, COMM_X_ERR_BIT,
+    COMM_X_ERRID_OFFSET, COMM_X_ERR_BIT,
     COMM_Y_ERRID_OFFSET, COMM_Y_ERR_BIT, COMM_Y_ERR_OFFSET, DB_COMM, DB_MOTION,
     CYLINDER_BYTE, CYLINDER_START_BIT,
     GROUP_COMM_LOST_LATCH_BIT, GROUP_CTRL_BYTE, GROUP_RESET_BIT, GROUP_STOP_BIT,
-    HOMING_BYTE, MOTION_BLOCK_SIZE, MOTION_BLOCK_START, MOTION_BUSY_BYTE, MOTION_CMD_BYTE,
+    HOMING_BYTE, MOTION_BLOCK_START, MOTION_BUSY_BYTE, MOTION_CMD_BYTE,
     MOTION_STATUS_BYTE, STATUS_READ_SIZE, STATUS_READ_START, TRIGGER_BYTE,
-    TRIGGER_LINEAR_BIT,
+    TRIGGER_LINEAR_BIT, X_POS_OFFSET, Y_POS_OFFSET,
 )
 
 DEAD_ZONE_MM = 3.0
 
 # 只下发 AI 的终点，不切中间点。
-# MC_MoveLinearAbsolute 没有"中止当前作业"的 BufferMode（只有 1/2/5，见西门子 S7-1500T
-# Kinematics 手册 MC_MoveLinearAbsolute 参数表），每个新终点都会排进作业队列。所以轴忙时
-# 新终点离上次下发的终点不够远就不发，避免 AI 目标的小抖动把队列塞满。
+# PLC 是 X/Y 各一个 MC_MoveAbsolute，新序号到来时同一实例重新触发 = 中止当前定位、改去新终点。
+# 轴忙时新终点离上次下发的终点不够远就不发，避免 AI 目标的小抖动让轴反复中止重启。
 # ponytail: 10mm 是估计值；实机若反应迟钝就调小，若又出现一顿一顿就调大。
 ENDPOINT_RESEND_MM = 10.0
 
@@ -62,21 +61,10 @@ class PLCInterface:
         # 第一条指令被当成旧指令丢掉。
         self.sequence = int(time.time()) % 1000000 + 1
         self.last_send_state = "unknown"
-        self.last_buffer_mode = None
-        # 必须初始化：它原本只在 send_linear_move 里、且从**第二次**下发才开始赋值
-        # （第一次下发时 _last_phys_x 还是 None，那个分支不成立）。
-        # 读它的诊断代码会在第一次下发时抛 AttributeError。
+        # 第一次下发时 _last_phys_x 还是 None，诊断代码照样要能读到它。
         self.last_send_dist_mm = 0.0
-        # 舍入间距（TransitionParameter[1]）固定写 -1 到 DB1.DBD150。
-        # transition_enabled 会在写入失败（DB 里没这个变量）时自动关掉，
-        # 之后退回由 TO「最大舍入间距」决定混合距离 —— 不会影响运动本身。
-        self.transition_enabled = True
-        self._last_transition = None
-        self.last_transition_mm = None
         self.last_error = ""
         self._multi_read_failed = False
-        # DB18 当前用哪种长度读（66 / 62 / 58），见 COMM_READ_SIZES
-        self._comm_size = None
 
     @property
     def connected(self):
@@ -189,25 +177,12 @@ class PLCInterface:
         return [bytearray(bytes(buffer)) for buffer in buffers]
 
     def _read_status_blocks(self):
-        """读 DB1 + DB18，兼容 DB18 的三种长度（58 / 62 / 66）。
-
-        从新的往旧的试，读到哪个能用就记住哪个 —— 现场加减 DB18 字段时
-        不该把整个连接判死（那会表现成"PLC 未连接"，很难查）。
-        """
-        sizes = list(COMM_READ_SIZES)
-        if self._comm_size in sizes:                 # 先用上次成功的长度
-            sizes.remove(self._comm_size)
-            sizes.insert(0, self._comm_size)
-        for size in sizes:
-            try:
-                db1, db18 = self._read_db_blocks(
-                    ((DB_MOTION, STATUS_READ_START, STATUS_READ_SIZE),
-                     (DB_COMM, COMM_READ_START, size)))
-            except Exception:
-                continue
-            self._comm_size = size
-            return db1, db18
-        return None, None
+        try:
+            return self._read_db_blocks(
+                ((DB_MOTION, STATUS_READ_START, STATUS_READ_SIZE),
+                 (DB_COMM, COMM_READ_START, COMM_READ_SIZE)))
+        except Exception:
+            return None, None
 
     def clear_trigger(self):
         self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, False)
@@ -287,7 +262,7 @@ class PLCInterface:
             return False
 
     def set_cylinder(self, on):
-        """DB1.190.0 气缸启动：开关量，状态由界面持有（PLC 无回读）。"""
+        """DB1.118.0 气缸启动：开关量，状态由界面持有（PLC 无回读）。"""
         self._write_bool(DB_MOTION, CYLINDER_BYTE, CYLINDER_START_BIT, bool(on))
         return True
 
@@ -301,9 +276,9 @@ class PLCInterface:
         return physical_to_game(self.zone, x, y)
 
     def _prepare_move(self, game_x, game_y):
-        """坐标换算 + 死区：只下发 AI 终点，BufferMode 固定 5。
+        """坐标换算 + 死区：只下发 AI 终点。
 
-        返回 None（不发）或 (物理x, 物理y, mode, 步距)。步距在**第一次**下发时是 None。
+        返回 None（不发）或 (物理x, 物理y, 步距)。步距在**第一次**下发时是 None。
         """
         try:
             phys_x, phys_y = self.game_to_physical(game_x, game_y)
@@ -326,11 +301,8 @@ class PLCInterface:
                 origin_x, origin_y = self.game_to_physical_raw(actual[0], actual[1])
             except (ValueError, OverflowError):
                 origin_x = origin_y = None
-        # ★★★ TO_Kinematics 的 BufferMode 只有 1/2/5，和轴版不同（**没有 0 = 中止**）：
-        #     1 = 附加运动（走完停稳才执行新作业）  2/5 = 混合
-        # 现场踩过：照抄轴版发 0 是非法值，作业被拒绝。统一用 5：新作业与当前运动混合，不停稳。
         if origin_x is None:
-            return phys_x, phys_y, 5, None
+            return phys_x, phys_y, None
         distance = max(abs(phys_x - origin_x), abs(phys_y - origin_y))
         # 同点：轴也已到位就跳过；空闲但未到位时重发，执行中的同点已在上面跳过。
         if distance < DEAD_ZONE_MM:
@@ -345,46 +317,18 @@ class PLCInterface:
                 self.last_send_state = "deadzone"
                 return None
             self.last_send_state = "deadzone-resend"
-        return phys_x, phys_y, 5, distance
+        return phys_x, phys_y, distance
 
-    def _write_payload(self, phys_x, phys_y, buffer_mode):
-        data = bytearray(MOTION_BLOCK_SIZE)
-        # The machine's TO_Kinematics uses components 1=X, 3=Y, NOT [X,Y,0,0].
-        struct.pack_into(">ddddi", data, 0, phys_x, 0.0, phys_y, 0.0, buffer_mode)
-        self._client.db_write(DB_MOTION, MOTION_BLOCK_START, data)
+    def _write_payload(self, phys_x, phys_y):
+        # ponytail: 工程档案没导出 Position 的数组下标，Y 同时写 [2]、[3]；TIA 里确认后去掉多余那个。
+        self._client.db_write(DB_MOTION, MOTION_BLOCK_START,
+                              struct.pack(">ffff", phys_x, phys_y, phys_y, 0.0))
 
-    def _commit_move(self, phys_x, phys_y, buffer_mode, distance):
+    def _commit_move(self, phys_x, phys_y, distance):
         self._last_phys_x, self._last_phys_y = phys_x, phys_y
-        self.last_buffer_mode = buffer_mode
         if distance is not None:
             self.last_send_dist_mm = distance
         self.last_send_state = "sent"
-
-    def _write_transition(self):
-        """写 TransitionParameter[1]（舍入间距）= -1：由 TO 取"最大可能的舍入间距"
-        （受 TIA「最大舍入间距」设置限制），新终点一来就尽早拐向它，不必先走到旧终点附近。
-
-        值不变就不写，所以实际上只写第一次。
-        """
-        if not self.transition_enabled:
-            return
-        value = -1.0
-        # 变化不大就不写 —— 省一次往返，也避免 PLC 读到中间态。
-        if (self._last_transition is not None
-                and abs(value - self._last_transition) < 0.2):
-            return
-        try:
-            self._client.db_write(DB_MOTION, COMM_TRANSITION_OFFSET,
-                                  struct.pack(">d", value))
-        except Exception as exc:
-            self.transition_enabled = False
-            self.last_error = (
-                f"PLC 写 TransitionParameter[1] 失败（DB1.DBD{COMM_TRANSITION_OFFSET}）"
-                f"：{exc} —— 已停用该写入；混合距离改回由 TO「最大舍入间距」决定")
-            print(f"[PLC] {self.last_error}")
-            return
-        self._last_transition = value
-        self.last_transition_mm = value
 
     def send_linear_move(self, game_x, game_y):
         """序号握手：写目标块，再写递增的序号 —— PLC 比较序号后执行。
@@ -398,15 +342,13 @@ class PLCInterface:
         prepared = self._prepare_move(game_x, game_y)
         if prepared is None:
             return self.last_send_state != "invalid"
-        phys_x, phys_y, buffer_mode, distance = prepared
+        phys_x, phys_y, distance = prepared
         try:
-            self._write_payload(phys_x, phys_y, buffer_mode)
-            # ★ 精磨距离必须在触发/序号之前写好 —— PLC 看到新序号时两个值都要是新的。
-            self._write_transition()
+            self._write_payload(phys_x, phys_y)
             candidate = (self.sequence + 1) & 0x7FFFFFFF
             self._client.db_write(DB_MOTION, COMM_SEQ_OFFSET, struct.pack(">i", candidate))
             self.sequence = candidate
-            self._commit_move(phys_x, phys_y, buffer_mode, distance)
+            self._commit_move(phys_x, phys_y, distance)
             return True
         except Exception:
             self._connected = False
@@ -441,14 +383,14 @@ class PLCInterface:
 
             return {
                 "x_en": bool(status & 0x04), "y_en": bool(status & 0x08),
-                "x_pos": struct.unpack_from(">d", db1, 2)[0],
-                "y_pos": struct.unpack_from(">d", db1, 10)[0],
+                "x_pos": struct.unpack_from(">f", db1, X_POS_OFFSET)[0],
+                "y_pos": struct.unpack_from(">f", db1, Y_POS_OFFSET)[0],
                 "x_err": bool(comm & (1 << COMM_X_ERR_BIT)),
                 "y_err": bool(db18[COMM_Y_ERR_OFFSET] & (1 << COMM_Y_ERR_BIT)),
                 # ★ 轴自己的故障码（一直没读）
                 "x_errid": _word(COMM_X_ERRID_OFFSET),
                 "y_errid": _word(COMM_Y_ERRID_OFFSET),
-                # MC_MoveLinearAbsolute 的 Error / ErrorId（现场新接的）
+                # 运动指令的 Error / ErrorId（DB18.34.3 / 36，1211C 程序暂未接线，恒为 0）
                 "mc_error": _bit(COMM_MC_ERR_OFFSET, COMM_MC_ERR_BIT),
                 "mc_errid": _word(COMM_MC_ERRID_OFFSET),
                 "busy": bool(db1[MOTION_BUSY_BYTE] & 1),
@@ -457,24 +399,16 @@ class PLCInterface:
                 "axes_ready": bool(comm & (1 << COMM_AXES_READY_BIT)),
                 "group_stop": bool(group & (1 << GROUP_STOP_BIT)),
                 "comm_lost_latch": bool(group & (1 << GROUP_COMM_LOST_LATCH_BIT)),
-                # ★ ErrorDetail.Number 在 TO 里是 **UDInt**（DB12.Static.ErrorDetail.Number），
-                # 程序用 MOVE 送进 %DB18.DBW56（Word，只保留低 16 位）。
-                # 必须按**无符号**读 —— 按有符号读的话，16#8001 这类码会变成 -32767，
-                # 和 TIA 里看到的对不上，故障就成了谜。
+                # ErrorDetail.Number：按**无符号**读，16#8001 这类码才和 TIA 显示一致。
                 "kinematics_error": struct.unpack_from(">H", db18, COMM_KIN_ERROR_OFFSET)[0],
                 # ErrorDetail.Reaction（DInt，有符号）—— 读不到就是 None（DB18 短）
                 "kin_reaction": (struct.unpack_from(">i", db18, COMM_KIN_REACTION_OFFSET)[0]
                                  if COMM_KIN_REACTION_OFFSET + 4 <= len(db18) else None),
-                # PLC 已处理到哪个序号（它写在 DB1.64）。和 Python 的序号一比，
-                # 就知道"PLC 落后几条指令" —— 这是判断它跟不跟得上的直接指标。
+                # PLC 已处理到的序号（DB1.94 上次序号），和本地序号一比就是"落后几条"。
                 "seq_ack": (struct.unpack_from(">i", db1, COMM_SEQ_ACK_OFFSET)[0]
                             if COMM_SEQ_ACK_OFFSET + 4 <= len(db1) else None),
-                # ---- 诊断补充字段（PLC 没加就是 None，界面显示"未读到"）----
-                # ★ 当前运动还差多远（接的是 MC.RemainingDistance）
+                # 当前运动还差多远（DB18.46，1211C 程序暂未接线）
                 "mc_remaining": _lreal(COMM_MC_REMAINING_OFFSET),
-                # ★ OB1 循环时间：infoData 是 LTime（64 位有符号，单位纳秒）
-                "ob1_ns": (struct.unpack_from(">q", db18, COMM_OB1_TIME_OFFSET)[0]
-                           if COMM_OB1_TIME_OFFSET + 8 <= len(db18) else None),
             }
         except Exception:
             self._connected = False

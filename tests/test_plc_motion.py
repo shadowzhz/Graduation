@@ -1,4 +1,4 @@
-"""S7 运动学运动目标与断故障互锁的全内存传输测试；不触达实机。"""
+"""S7-1200 两轴绝对定位目标与断故障互锁的全内存传输测试；不触达实机。"""
 
 import struct
 import time
@@ -30,9 +30,10 @@ def memory_binding():
 
 class MemoryS7:
     def __init__(self):
-        self.db = {1: bytearray(200), 18: bytearray(64)}
+        # 长度与 1211kongqi 工程一致：读超过 DB 实际长度在真 PLC 上会失败
+        self.db = {1: bytearray(120), 18: bytearray(54)}
         self.db[1][1] = 0x0C  # enabled；home Done 脉冲已经结束
-        self.db[1][56] = 0x02  # 其他调用者的圆弧启动位
+        self.db[1][protocol.TRIGGER_BYTE] = 0x02  # 其他调用者的圆弧启动位
         self.db[18][0] = 0x08  # 轴已就绪
         self.moves = []
         self.connected = False
@@ -43,7 +44,6 @@ class MemoryS7:
         self.before_bit = None
         self.fail_bit = None
         self.fail_payload = False
-        self.fail_transition = False
         self.fail_sequence = False
         self.echo = True
 
@@ -81,6 +81,8 @@ class MemoryS7:
         self.connected = False
 
     def db_read(self, db, start, size):
+        if start + size > len(self.db[db]):
+            raise RuntimeError("address out of range")
         return bytearray(self.db[db][start:start + size])
 
     def db_write(self, db, start, data):
@@ -92,21 +94,13 @@ class MemoryS7:
             if self.fail_sequence:
                 raise RuntimeError("sequence write failed")
             self.db[db][start:start + len(data)] = data
-            # 模拟 PLC 把已处理的序号回写到 DB1.64（诊断用"落后几条"）
+            # 模拟 PLC 把已处理的序号记到上次序号（诊断用"落后几条"）
             self.db[1][protocol.COMM_SEQ_ACK_OFFSET:protocol.COMM_SEQ_ACK_OFFSET + 4] = data
             assert self.pending_payload is not None
             self.moves.append(self.pending_payload)
             self.pending_payload = None
             return
-        if (db, start, len(data)) == (1, protocol.COMM_TRANSITION_OFFSET, 8):
-            # ★ 精磨距离（TransitionParameter[1]，DB1.DBD150）：随步距自适应写回。
-            #   它不触发运动，只是给 PLC 一个"混合起点"的值，所以单独记一类操作。
-            self.operations.append(("transition", db, start, data))
-            if self.fail_transition:
-                raise RuntimeError("transition write failed")
-            self.db[db][start:start + len(data)] = data
-            return
-        assert (db, start, len(data)) == (1, 20, 36)
+        assert (db, start, len(data)) == (1, protocol.MOTION_BLOCK_START, 16)
         self.operations.append(("payload", db, start, data))
         if self.fail_payload:
             raise RuntimeError("payload write failed")
@@ -188,27 +182,25 @@ def until(predicate, seconds=2.0):
     return predicate()
 
 
+def f32(value):
+    return struct.unpack(">f", struct.pack(">f", value))[0]
+
+
 @memory_binding()
-def test_measured_kinematics_component_order_and_circular_bit_survive():
+def test_target_block_layout_and_circular_bit_survive():
     plc = MemoryPLC()
     try:
         assert plc.connect()
         plc.zone = (core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_CENTER_Y)
         assert plc.send_linear_move(core.RINK_RIGHT, core.RINK_CENTER_Y)
         move = plc.transport.moves[-1]
-        # 用符号常量而不是写死数值：这个断言的本意是验证**分量顺序**
-        # （X, 0, Y, 0 —— 实机 TO_Kinematics 用的是分量 1 和 3），
-        # 而不是验证行程的具体毫米数。写死数值会在改行程时误报。
-        # 上限是命令包络（limits.command_*），比机械行程内缩 margin_mm。
-        assert struct.unpack_from(">ddddi", move) == (
-            DEFAULT_LIMITS.command_x_max, 0.0, DEFAULT_LIMITS.command_y_max, 0.0, 5)
-        assert len(move) == 36
-        assert plc.transport.operations[-3:] == [
-            ("payload", 1, 20, move),
-            # 终点模式：舍入间距写 -1 = 由 TO 取最大可能值
-            ("transition", 1, protocol.COMM_TRANSITION_OFFSET, struct.pack(">d", -1.0)),
+        # XY轴直线绝对 Array[1..4] of Real：[1]=X，[2] 和 [3] 都写 Y（PLC 用哪个下标未导出）
+        x, y = f32(DEFAULT_LIMITS.command_x_max), f32(DEFAULT_LIMITS.command_y_max)
+        assert struct.unpack(">ffff", move) == (x, y, y, 0.0)
+        assert plc.transport.operations[-2:] == [
+            ("payload", 1, protocol.MOTION_BLOCK_START, move),
             ("sequence", 1, protocol.COMM_SEQ_OFFSET, struct.pack(">i", plc.sequence))]
-        assert plc.transport.db[1][56] == 0x02  # 圆弧启动位不被碰
+        assert plc.transport.db[1][protocol.TRIGGER_BYTE] == 0x02  # 圆弧启动位不被碰
         assert plc.transport.db[1][0] == 0  # 不能覆盖使能与复位控制位
     finally:
         plc.disconnect()
@@ -238,23 +230,20 @@ def test_reset_tracking_reissues_same_target_without_reporting_failure():
 
 
 @memory_binding()
-def test_atomic_trigger_preserves_deadzone_clipping_and_buffer_modes():
+def test_atomic_trigger_preserves_deadzone_and_clipping():
     client = MemoryPLC()
     try:
         assert client.connect()
-        # ★ buffer_mode 只发 5（混合）：TO_Kinematics 只认 1/2/5，1 会停稳，
-        #   轴版的 0（立即中止）在运动机构版里是**非法值**，作业会被拒绝。
-        for x, expected_mode in ((0.0, 5), (2.0, None), (8.0, 5), (25.0, 5)):
+        for x, sent in ((0.0, True), (2.0, False), (8.0, True), (25.0, True)):
             game = client.physical_to_game(x, 0.0)
             before = len(client.transport.moves)
             client.clear_trigger()
             assert client.send_linear_move(*game)
-            if expected_mode is None:
+            if not sent:
                 assert client.last_send_state == "deadzone"
                 assert len(client.transport.moves) == before
             else:
                 assert len(client.transport.moves) == before + 1
-                assert struct.unpack_from(">i", client.transport.moves[-1], 32)[0] == expected_mode
         client.clear_trigger()
         before = len(client.transport.moves)
         before_operations = len(client.transport.operations)
@@ -289,16 +278,15 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
             client.clear_trigger()
             assert client.send_linear_move(*game_point)
             move = client.transport.moves[-1]
-            assert struct.unpack_from(">dddd", move) == (physical_point[0], 0.0, physical_point[1], 0.0)
+            assert struct.unpack(">ff", move[:8]) == (f32(physical_point[0]), f32(physical_point[1]))
 
         client.reset_tracking()
         client.clear_trigger()
         assert client.send_linear_move(left - COORD_EPSILON / 2,
                                        top - COORD_EPSILON / 2)
         move = client.transport.moves[-1]
-        assert struct.unpack_from(">dddd", move) == (
-            DEFAULT_LIMITS.command_x_min, 0.0, DEFAULT_LIMITS.command_y_min, 0.0,
-        )
+        assert struct.unpack(">ff", move[:8]) == (
+            f32(DEFAULT_LIMITS.command_x_min), f32(DEFAULT_LIMITS.command_y_min))
 
         before = len(client.transport.moves)
         client.clear_trigger()
@@ -340,7 +328,8 @@ def test_real_motion_requires_manual_arm_and_revokes_on_801_alarm():
         assert client.transport.db[1][1] & 0x30 == 0
 
         link.drain_messages()
-        client.transport.db[18][56:58] = (801).to_bytes(2, "big", signed=True)
+        kin = protocol.COMM_KIN_ERROR_OFFSET
+        client.transport.db[18][kin:kin + 2] = (801).to_bytes(2, "big", signed=True)
         assert until(lambda: not link.armed and link.feedback.kinematics_error == 801)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count > cycles)
@@ -351,7 +340,7 @@ def test_real_motion_requires_manual_arm_and_revokes_on_801_alarm():
         assert until(lambda: link.cycle_count >= cycles + 3)
         assert len(client.transport.moves) == before
         assert link.drain_messages() == []
-        client.transport.db[18][56:58] = b"\x00\x00"
+        client.transport.db[18][kin:kin + 2] = b"\x00\x00"
         assert until(lambda: link.feedback.kinematics_error == 0)
         link.set_target(450, 180)
         cycles = link.cycle_count
@@ -401,8 +390,8 @@ def test_home_and_reset_pulses_preserve_plc_changes_to_neighbor_bits():
     client.connect()
 
     def plc_updates_neighbors(db, offset, bit, value):
-        masks = {(18, 0): 0x14, (1, 56): 0x82, (1, 0): 0x08,
-                 (1, 1): 0x30, (1, 140): 0x14}
+        masks = {(18, 0): 0x14, (1, protocol.TRIGGER_BYTE): 0x82, (1, 0): 0x08,
+                 (1, 1): 0x30, (1, protocol.GROUP_CTRL_BYTE): 0x14}
         client.transport.db[db][offset] |= masks[(db, offset)]
 
     client.transport.before_bit = plc_updates_neighbors
@@ -411,7 +400,7 @@ def test_home_and_reset_pulses_preserve_plc_changes_to_neighbor_bits():
         assert client.transport.db[18][0] & 0x14 == 0x14
         client.clear_trigger()
         assert client.send_linear_move(300, 180)
-        assert client.transport.db[1][56] & 0x82 == 0x82
+        assert client.transport.db[1][protocol.TRIGGER_BYTE] & 0x82 == 0x82
         assert client.enable_axes()
         assert client.disable_axes()
         assert client.transport.db[1][0] & 0x08
@@ -421,8 +410,8 @@ def test_home_and_reset_pulses_preserve_plc_changes_to_neighbor_bits():
         assert client.axes_reset()
         assert client.transport.db[1][0] & 0x08
         assert client.transport.db[1][0] & 0x30 == 0
-        assert client.transport.db[1][140] & 0x14 == 0x14
-        assert client.transport.db[1][140] & 0x08 == 0
+        assert client.transport.db[1][protocol.GROUP_CTRL_BYTE] & 0x14 == 0x14
+        assert client.transport.db[1][protocol.GROUP_CTRL_BYTE] & 0x08 == 0
     finally:
         client.disconnect()
 
@@ -480,8 +469,8 @@ def test_every_safety_interlock_revokes_and_never_auto_rearms():
     cases = ((18, 0, 0x10, True, "x_err"),
              (18, 4, 0x01, True, "y_err"),
              (18, 0, 0x04, True, "comm_lost"),
-             (1, 140, 0x10, True, "comm_lost_latch"),
-             (1, 140, 0x04, True, "group_stop"),
+             (1, protocol.GROUP_CTRL_BYTE, 0x10, True, "comm_lost_latch"),
+             (1, protocol.GROUP_CTRL_BYTE, 0x04, True, "group_stop"),
              (18, 0, 0x08, False, "axes_ready"),
              (1, 1, 0x04, False, "x_en"),
              (1, 1, 0x08, False, "y_en"))
@@ -569,7 +558,7 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
         try:
             assert client.connect()
             assert client.send_linear_move(300, 180)
-            previous = (client._last_phys_x, client._last_phys_y, client.last_buffer_mode, client.sequence)
+            previous = (client._last_phys_x, client._last_phys_y, client.sequence)
             before = len(client.transport.moves)
             start = len(client.transport.operations)
             client.transport.fail_payload = failure == "payload"
@@ -578,11 +567,9 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
             assert not client.connected and client.last_send_state == "disconnected"
             assert len(client.transport.moves) == before
             # 序号没写成功就不能推进，否则下一条会跳号
-            assert (client._last_phys_x, client._last_phys_y,
-                    client.last_buffer_mode, client.sequence) == previous
+            assert (client._last_phys_x, client._last_phys_y, client.sequence) == previous
             operations = client.transport.operations[start:]
-            # 每次下发按顺序写：目标块 →（精磨距离）→ 序号。
-            #   终点模式的精磨距离固定 -1，第一次下发已写过，这次不再重写。
+            # 每次下发按顺序写：目标块 → 序号。
             #   · payload 失败在第 1 步 → 只有 1 次操作
             #   · 序号失败 → 目标块已写出去，但没有多出一次运动
             assert len(operations) == (1 if failure == "payload" else 2)
@@ -592,7 +579,7 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
 
 @memory_binding()
 def test_native_bit_failure_fails_connection_and_pulses_closed():
-    for bit in ((18, 0, 0, False), (1, 56, 0, False)):
+    for bit in ((18, 0, 0, False), (1, protocol.TRIGGER_BYTE, 0, False)):
         client = MemoryPLC()
         try:
             client.transport.fail_bit = bit
@@ -604,7 +591,7 @@ def test_native_bit_failure_fails_connection_and_pulses_closed():
     for command, bit in (("enable_axes", (1, 0, 7, True)),
                          ("disable_axes", (1, 0, 7, False)),
                          ("home_axes", (1, 1, 1, False)),
-                         ("axes_reset", (1, 140, 3, False))):
+                         ("axes_reset", (1, protocol.GROUP_CTRL_BYTE, 3, False))):
         client = MemoryPLC()
         try:
             assert client.connect()
@@ -619,7 +606,7 @@ def test_native_bit_failure_fails_connection_and_pulses_closed():
 def test_production_connection_probes_native_bits_before_accepting_motion():
     factory = protocol.snap7.client.Client
     try:
-        for failure in (None, (18, 0, 0, False), (1, 56, 0, False)):
+        for failure in (None, (18, 0, 0, False), (1, protocol.TRIGGER_BYTE, 0, False)):
             transport = MemoryS7()
             transport.fail_bit = failure
             protocol.snap7.client.Client = lambda: transport
@@ -630,7 +617,7 @@ def test_production_connection_probes_native_bits_before_accepting_motion():
                 assert transport.moves == []
                 if failure is None:
                     assert transport.operations == [
-                        ("bit", 18, 0, 0, False), ("bit", 1, 56, 0, False)]
+                        ("bit", 18, 0, 0, False), ("bit", 1, protocol.TRIGGER_BYTE, 0, False)]
                 else:
                     assert not client.send_linear_move(300, 180)
             finally:
@@ -653,10 +640,10 @@ def test_connection_and_motion_preserve_other_bits_with_modern_clients():
                 assert client.enable_axes()
                 assert transport.db[1][0] == 0xCD
                 assert client.send_linear_move(300, 180)
-                assert transport.db[1][56] == 0x02
+                assert transport.db[1][protocol.TRIGGER_BYTE] == 0x02
                 assert client.disable_axes()
                 assert transport.db[1][0] == 0x0D
-                assert struct.unpack_from(">d", transport.moves[0])[0] == client.game_to_physical(300, 180)[0]
+                assert struct.unpack_from(">f", transport.moves[0])[0] == f32(client.game_to_physical(300, 180)[0])
             finally:
                 client.disconnect()
         transport = factory()
@@ -694,7 +681,7 @@ def test_native_motion_error_invalidates_worker_feedback_and_arm():
             assert not client.connected and not link.armed
             assert not link.feedback.valid and link._target is None
             assert client.transport.moves == []
-            assert client._last_phys_x is None and client.last_buffer_mode is None
+            assert client._last_phys_x is None
         finally:
             client.disconnect()
 
@@ -733,16 +720,14 @@ def test_sequence_does_not_advance_on_deadzone_skip():
         #   （若一开始就放在目标上，新逻辑会正确地判定"已经到位、不用发"。）
         #   必须在 enable 之前写好，否则和工作线程的周期抢时序（测试会抖）。
         px, py = client.game_to_physical(250, 150)
-        struct.pack_into(">d", client.transport.db[1], 2, px)
-        struct.pack_into(">d", client.transport.db[1], 10, py)
+        struct.pack_into(">ff", client.transport.db[1], protocol.X_POS_OFFSET, px, py)
         assert link.enable_axes() and until(lambda: link.armed)
         assert link.set_target(300, 180)
         assert until(lambda: len(client.transport.moves) >= 1)
         # ★ 轴走到目标处：写进去之后要**等反馈确认**，否则下一句可能在
         #   工作线程读到新位置之前就判定了（会偶发失败）。
         px, py = client.game_to_physical(300, 180)
-        struct.pack_into(">d", client.transport.db[1], 2, px)
-        struct.pack_into(">d", client.transport.db[1], 10, py)
+        struct.pack_into(">ff", client.transport.db[1], protocol.X_POS_OFFSET, px, py)
         assert until(lambda: abs(link.feedback.x - 300.0) < 1.0
                      and abs(link.feedback.y - 180.0) < 1.0)
         sent = struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_OFFSET)[0]
@@ -775,8 +760,7 @@ def test_target_is_resent_when_axis_never_arrived():
         moves = len(client.transport.moves)
         # PLC 空闲，轴的实际位置离目标很远（模拟"根本没走到"），而目标不再变化
         far_x, far_y = client.game_to_physical(300, 320)
-        struct.pack_into(">d", client.transport.db[1], 2, far_x)
-        struct.pack_into(">d", client.transport.db[1], 10, far_y)
+        struct.pack_into(">ff", client.transport.db[1], protocol.X_POS_OFFSET, far_x, far_y)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count >= cycles + 4)
         # 空闲但未到位时必须继续下发，不能因为"目标没变"就一条都不发
@@ -876,7 +860,7 @@ def test_single_axis_disable_clears_only_that_axis_and_disarms():
 
 
 @memory_binding()
-def test_diagnostics_runs_without_client_local_and_reports_transition():
+def test_diagnostics_runs_without_client_local():
     """★ 回归：diagnostics() 里把 client 当局部变量用过 → NameError。
 
     后果比看上去严重：它是在**每个 [stats] 行**上崩，现场表现成
@@ -887,39 +871,13 @@ def test_diagnostics_runs_without_client_local_and_reports_transition():
     link.start()
     try:
         assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
-        # 离线、还没下发过：不能崩，且要如实说"未发"
-        text = link.diagnostics()
-        assert "精磨 未发" in text, text
-
+        link.diagnostics()
         assert link.enable_axes() and until(lambda: link.armed)
         assert link.set_target(300, 180)
         assert until(lambda: len(client.transport.moves) >= 1)
-        text = link.diagnostics()
-        # 下发过之后必须报出舍入间距：终点模式固定 -1（TO 最大）
-        assert "精磨 TO最大" in text and "关（" not in text, text
-        assert client.last_transition_mm == -1.0
+        assert "步距中位" in link.diagnostics()
     finally:
         assert link.stop(timeout=2.0)
-
-
-@memory_binding()
-def test_transition_write_failure_keeps_motion_connected():
-    client = MemoryPLC()
-    try:
-        assert client.connect()
-        client.actual_game = (300, 140)
-        client.transport.fail_transition = True
-        assert client.send_linear_move(350, 220)
-        assert client.send_linear_move(400, 250)
-        assert struct.unpack_from(">i", client.transport.db[1], protocol.COMM_SEQ_ACK_OFFSET)[0] == client.sequence
-        assert client.connected and client.transport.connected
-        assert not client.transition_enabled
-        assert client.last_error
-        assert client.last_send_state == "sent"
-        assert len(client.transport.moves) == 2
-        assert sum(operation[0] == "transition" for operation in client.transport.operations) == 1
-    finally:
-        client.disconnect()
 
 
 @memory_binding()
@@ -928,7 +886,7 @@ def test_position_inside_physical_limits_can_arm_outside_command_margin():
     link = None
     try:
         client = MemoryPLC()
-        struct.pack_into(">dd", client.transport.db[1], 2, 0, -100)
+        struct.pack_into(">ff", client.transport.db[1], protocol.X_POS_OFFSET, 0, -100)
         link = PLCLink("memory", period=0.03,
                        client_factory=lambda *args: client, limits=limits)
         link.start()
@@ -937,7 +895,7 @@ def test_position_inside_physical_limits_can_arm_outside_command_margin():
         assert link.enable_axes() and until(lambda: link.armed)
         assert link.set_target(300, 180)
         assert until(lambda: client.last_send_state == "sent")
-        px, _, py, _, _ = struct.unpack(">ddddi", client.transport.moves[-1])
+        px, py = struct.unpack(">ff", client.transport.moves[-1][:8])
         assert limits.command_x_min <= px <= limits.command_x_max
         assert limits.command_y_min <= py <= limits.command_y_max
         assert link.armed
@@ -960,14 +918,14 @@ def test_position_past_travel_does_not_trip_software_limit():
         try:
             assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
             assert link.enable_axes() and until(lambda: link.armed)
-            struct.pack_into(">dd", client.transport.db[1], 2, x, y)
+            struct.pack_into(">ff", client.transport.db[1], protocol.X_POS_OFFSET, x, y)
             cycles = link.cycle_count
             assert until(lambda: link.cycle_count >= cycles + 3)
             assert link.armed
             # 从越界位置往回走：指令不比当前位置更往外
             assert link.set_target(300, 180)
             assert until(lambda: client.last_send_state == "sent")
-            px, _, py, _, _ = struct.unpack(">ddddi", client.transport.moves[-1])
+            px, py = struct.unpack(">ff", client.transport.moves[-1][:8])
             assert min(DEFAULT_LIMITS.command_x_min, x) <= px <= max(DEFAULT_LIMITS.command_x_max, x)
             assert min(DEFAULT_LIMITS.command_y_min, y) <= py <= max(DEFAULT_LIMITS.command_y_max, y)
         finally:

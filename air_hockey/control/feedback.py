@@ -24,7 +24,7 @@ class PLCFeedback:
     #   TIA 里看到的那个具体代码；None = 该字段读不到（DB18 还是旧长度）。
     x_errid: Optional[int] = None
     y_errid: Optional[int] = None
-    # MC_MoveLinearAbsolute 的 Error / ErrorId（现场接到 DB18.58.3 / DB18.60）
+    # 运动指令的 Error / ErrorId（DB18.34.3 / DB18.36）
     mc_error: Optional[bool] = None
     mc_errid: Optional[int] = None
     busy: bool = False
@@ -38,17 +38,11 @@ class PLCFeedback:
     # Number 说"报了什么"，Reaction 说"因此做了什么" —— 后者决定
     # 这到底是一个原因，还是别的原因（比如使能被撤）导致的结果。
     kin_reaction: Optional[int] = None
-    # 序号握手：PLC 已处理到的序号（DB1.64）。和本地下发序号一比就是"落后几条"。
+    # 序号握手：PLC 已处理到的序号（DB1.94）。和本地下发序号一比就是"落后几条"。
     # None = 没读到（PLC 还没加这个字段）。
     seq_ack: Optional[int] = None
     # ---- 诊断补充（PLC 加了多少就显示多少；None = 未读到）----
     mc_remaining: Optional[float] = None   # ★ 当前运动还差多远（MC.RemainingDistance）
-    ob1_ns: Optional[int] = None           # ★ OB1 循环时间（纳秒，来自 RT_INFO）
-
-    @property
-    def ob1_ms(self):
-        """OB1 循环时间换算成毫秒（RT_INFO 给的是纳秒）。"""
-        return None if self.ob1_ns is None else self.ob1_ns / 1e6
 
     @property
     def axis_fault(self):

@@ -7,7 +7,6 @@ PLCLink 的工作线程在每个周期调用 on_status / on_send，主线程定�
   S7 读 / S7 写      一次状态读取、一次运动下发占用的 S7 往返时间
   目标等待下发        视觉线程 set_target 到工作线程真正下发之间的等待（≤ 一个周期）
   序号确认            写入序号到读回 PLC 的 seq_ack ≥ 该序号（分辨率 = 一个周期）
-  OB1                PLC 主循环时间（RT_INFO），序号逻辑每个 OB1 才看一次
   起步等待            轴静止时下发远处新指令，到轴真正开始移动的时间
   轴落后指令          轴实际位置离最新已下发指令点 > MATCH_MM 的周期占比
   差距 / 时间滞后     轴离最新指令点多远；轴现在所在的位置是多久以前下发的
@@ -27,7 +26,7 @@ START_GAP_MM = 10.0         # 轴静止时，新指令离轴多远才算一次"�
 START_MOVED_MM = 3.0        # 轴移动多少算"已经起步"
 STILL_SPEED_MM_S = 20.0     # 低于此速度算静止
 
-_KEYS = ("read_ms", "send_ms", "target_age_ms", "ack_ms", "ob1_ms", "start_ms",
+_KEYS = ("read_ms", "send_ms", "target_age_ms", "ack_ms", "start_ms",
          "gap_mm", "lag_ms", "act_speed", "cmd_speed", "remaining_mm")
 
 
@@ -90,13 +89,11 @@ class LatencyProbe:
                     self._start = (now, ax, ay)
 
     def on_status(self, now, read_ms, actual, *, armed, busy=False, seq_ack=None,
-                  remaining=None, ob1_ms=None):
+                  remaining=None):
         """一次状态读取：actual 为轴实际物理位置 (x, y)。"""
         with self._lock:
             w = self._w
             w["read_ms"].append(read_ms)
-            if ob1_ms is not None:
-                w["ob1_ms"].append(ob1_ms)
             if seq_ack is not None:
                 ack = seq_ack & 0x7FFFFFFF
                 while self._pending_seq and _seq_reached(self._pending_seq[0][0], ack):
@@ -156,7 +153,6 @@ class LatencyProbe:
             f"S7 读 {p('read_ms', 0.5, fmt='{:.1f}')} 写 {p('send_ms', 0.5, fmt='{:.1f}')}",
             f"目标等待下发 p50 {p('target_age_ms', 0.5)} p95 {p('target_age_ms', 0.95)}",
             f"序号确认 p50 {p('ack_ms', 0.5)} p95 {p('ack_ms', 0.95)}",
-            f"OB1 p50 {p('ob1_ms', 0.5, fmt='{:.1f}')} max {p('ob1_ms', 1.0, fmt='{:.1f}')}",
             f"起步等待 p50 {p('start_ms', 0.5)} p95 {p('start_ms', 0.95)}（{len(w['start_ms'])} 次）",
         ]
         if armed:
@@ -176,7 +172,7 @@ class LatencyProbe:
             hints.append(f"S7 通讯占了周期的 {100.0 * io / period_ms:.0f}%：实际下发频率上不去")
         ack = _percentile(w["ack_ms"], 0.5)
         if ack is not None and ack > 2.5 * period_ms:
-            hints.append("PLC 取新序号慢（超过 2 个周期）：查 OB1 时间和 PLC 侧序号/Execute 逻辑")
+            hints.append("PLC 取新序号慢（超过 2 个周期）：查 PLC 扫描时间和 FC1 序号/Execute 逻辑")
         start = _percentile(w["start_ms"], 0.5)
         if start is not None and start > 150.0:
             hints.append("轴起步等待长：指令到了 PLC 但轴迟迟不动（TO 作业排队/触发逻辑）")

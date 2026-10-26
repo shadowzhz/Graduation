@@ -834,7 +834,7 @@ class AirHockeyGame:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--plc", metavar="IP", help="连接 S7-1500 PLC，例如 192.168.0.1")
+    parser.add_argument("--plc", metavar="IP", help="连接 S7-1200 PLC，例如 192.168.0.1")
     parser.add_argument("--plc-rate", type=float, default=30.0, help="PLC 通信周期频率（Hz，默认 30）")
     args = parser.parse_args()
     if args.plc and (not math.isfinite(args.plc_rate) or args.plc_rate <= 0.0):

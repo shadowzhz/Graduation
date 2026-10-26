@@ -184,7 +184,7 @@ class VisionWindow:
         self._button(both, "回零 · H", link.home_axes)
         self._button(both, "复位 · C", link.axes_reset)
         # 底栏三组轴按钮已占满 1024 宽屏幕，气缸放侧栏避免被裁
-        # DB1.190.0 是开关量：按一次置 1，再按一次清 0，按钮文字跟随状态
+        # DB1.118.0 是开关量：按一次置 1，再按一次清 0，按钮文字跟随状态
         self._cylinder_on = False
         air = tk.Frame(self._side, bg=PANEL)
         air.pack(fill="x", pady=(8, 0))
@@ -207,7 +207,7 @@ class VisionWindow:
         self.root.bind("Y", lambda _event: self._home_axis("y"))
 
     def _toggle_cylinder(self):
-        """DB1.190.0 开关：翻转→下发→更新按钮文字；下发失败则回退。"""
+        """DB1.118.0 开关：翻转→下发→更新按钮文字；下发失败则回退。"""
         link = getattr(self, "_plc", None)
         if link is None:
             return

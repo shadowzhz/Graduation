@@ -94,8 +94,8 @@ def plc_status_text(plc, feedback, now):
     elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
         # ★ 三个来源的错误码全部打出来，不要再靠猜：
         #   轴自己的码（DB18.2 / DB18.6）
-        #   运动指令 MC_MoveLinearAbsolute 的码（DB18.58.3 / DB18.60）
-        #   运动学的 ErrorDetail.Number（DB18.56，就是那个 801）
+        #   运动指令的码（DB18.34.3 / DB18.36）
+        #   ErrorDetail.Number（DB18.32）
         which = ("X" if feedback.x_err else "") + ("Y" if feedback.y_err else "")
         parts = [f"轴故障位={which or '无'}", feedback.fault_detail()]
         if feedback.group_stop:

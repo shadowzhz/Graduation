@@ -18,7 +18,7 @@ def _run(axis_delay, cycles=150, step_mm=12.0, ack_cycles=1, start_delay=0.0):
         actual_x = lagged[-1] if lagged else 0.0
         ack = sequence - ack_cycles + 1 if k >= ack_cycles else None
         probe.on_status(now, 2.0, (actual_x, 0.0), armed=True, busy=True,
-                        seq_ack=ack, remaining=5.0, ob1_ms=12.0)
+                        seq_ack=ack, remaining=5.0)
         x = step_mm * (k + 1)
         sequence += 1
         probe.on_send(now + 0.001, 3.0, 0.010, x, 0.0, seq=sequence)

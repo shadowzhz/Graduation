@@ -154,21 +154,10 @@ class PLCLink:
         text = (f"周期 {cycles / elapsed:5.1f}Hz | 下发 {counters['sent'] / elapsed:5.1f}Hz | "
                 f"死区跳过 {counters['deadzone']} | 执行中同点跳过 {counters['pending']}")
         text += f" | 步距中位 {median:.1f}mm p95 {p95:.1f}mm"
-        # ★ 舍入间距（TransitionParameter[1]）：固定 -1 = TO 最大。
-        #   如果这里一直显示 "关"，说明写 DB1.DBD150 失败了 —— 那时混合距离
-        #   退回由 TO「最大舍入间距」决定。
         # ★ 这里必须用 self._client —— diagnostics() 里没有名为 client 的局部变量。
         #   （踩过：写成 client 会 NameError，而且是在每个 [stats] 行上崩，表现为
         #     "实时处理失败"，看起来像整个视觉管线坏了。）
         client = self._client
-        trans = getattr(client, "last_transition_mm", None)
-        if getattr(client, "transition_enabled", False):
-            if trans is None:
-                text += " | 精磨 未发"
-            else:
-                text += " | 精磨 TO最大" if trans < 0 else f" | 精磨 {trans:.1f}mm"
-        else:
-            text += " | 精磨 关（DB1.DBD150 写失败）"
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
         # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到行程边缘。
@@ -356,7 +345,7 @@ class PLCLink:
         return self._queue_disarmed_command("轴复位", self._client.axes_reset)
 
     def set_cylinder(self, on):
-        """开关气缸启动（DB1.190.0）。不改变轴授权/目标状态。"""
+        """开关气缸启动（DB1.118.0）。不改变轴授权/目标状态。"""
         return self._run_on_worker("气缸" + ("开" if on else "关"),
                                    lambda: self._client.set_cylinder(on))
 
@@ -479,7 +468,6 @@ class PLCLink:
                 kin_reaction=status["kin_reaction"],
                 seq_ack=status["seq_ack"],
                 mc_remaining=status["mc_remaining"],
-                ob1_ns=status["ob1_ns"],
             )
             return self._feedback
 
@@ -547,7 +535,7 @@ class PLCLink:
                 status_done, (status_done - cycle_start) * 1000.0,
                 (float(status["x_pos"]), float(status["y_pos"])), armed=armed_now,
                 busy=feedback.busy, seq_ack=feedback.seq_ack,
-                remaining=feedback.mc_remaining, ob1_ms=feedback.ob1_ms)
+                remaining=feedback.mc_remaining)
         except Exception:
             pass
         if revoked:
@@ -580,7 +568,6 @@ class PLCLink:
                 f"prev_err=({previous.x_err},{previous.y_err}) prev_busy={previous.busy} "
                 f"intent={interrupted_target} "
                 f"last_sent=({getattr(client, '_last_phys_x', None)},{getattr(client, '_last_phys_y', None)}) "
-                f"mode={getattr(client, 'last_buffer_mode', None)} "
                 f"step_mm={getattr(client, 'last_send_dist_mm', None)}"
             )
         # Network I/O is never under the lock. Cancellation of an already executing
