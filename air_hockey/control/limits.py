@@ -28,7 +28,7 @@ from air_hockey import core_config
 # 2026-10-20 现场已装硬件限位开关，代码不再维护一层"软限位"（原 PHYSICAL_* =
 # X -180..215 / Y -125..185、再内缩 40mm 的命令包络，以及越过软限位就撤销授权的检测）。
 # 现在只把命令夹到机械行程内缩 MotionLimits.margin_mm，避免主动去碰限位开关。
-TRAVEL_X_MIN, TRAVEL_X_MAX = -192.0, 224.0
+TRAVEL_X_MIN, TRAVEL_X_MAX = -190.0, 222.0
 TRAVEL_Y_MIN, TRAVEL_Y_MAX = -129.0, 187.0
 TABLE_X_MIN, TABLE_X_MAX = -224.5, 255.5
 TABLE_Y_MIN, TABLE_Y_MAX = -198.5, 241.5
@@ -43,7 +43,7 @@ DEFAULT_ZONE = (
 # 命令余量：下发目标离机械行程端点（限位开关）再往内收这么多毫米。
 # 2026-10-21 现场要求让球槌尽量走满机械行程，改为 2（原 5）：全速冲到边上更容易碰到限位开关停轴，
 # 频繁碰到就用 --motion-margin-mm 加回来。
-DEFAULT_MOTION_MARGIN_MM = 2.0
+DEFAULT_MOTION_MARGIN_MM = 5.0
 # X / Y 轴两端在 margin_mm 之外再多收（2026-10-27 现场要求；Y 上端报过 16#8002 软限位）。
 X_EXTRA_MARGIN_MM = 6.0
 Y_EXTRA_MARGIN_MM = 10.0

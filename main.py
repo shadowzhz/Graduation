@@ -58,7 +58,7 @@ def build_parser():
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
                              "不然轴总是慢一拍、球走了才追到。设 0 关闭提前量。"
                              "这不是 PLC 轴速度设置，需要在现场实测后调准")
-    parser.add_argument("--motion-margin-mm", type=float, default=2.0, metavar="MM",
+    parser.add_argument("--motion-margin-mm", type=float, default=5.0, metavar="MM",
                         help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
                              "默认 2（冲到边上可能碰限位开关停轴，频繁发生就调大）。机械行程 X -192..224 / Y -129..187，"
                              "包络 = 行程内缩它。程序不另设软件行程保护")
