@@ -44,8 +44,9 @@ DEFAULT_ZONE = (
 # 2026-10-21 现场要求让球槌尽量走满机械行程，改为 2（原 5）：全速冲到边上更容易碰到限位开关停轴，
 # 频繁碰到就用 --motion-margin-mm 加回来。
 DEFAULT_MOTION_MARGIN_MM = 2.0
-# X 轴两端在 margin_mm 之外再多收 3mm（2026-10-27 现场要求）。
+# X / Y 轴两端在 margin_mm 之外再多收（2026-10-27 现场要求；Y 上端报过 16#8002 软限位）。
 X_EXTRA_MARGIN_MM = 3.0
+Y_EXTRA_MARGIN_MM = 5.0
 
 
 # ============================================================================
@@ -55,8 +56,8 @@ X_EXTRA_MARGIN_MM = 3.0
 #      中的表示」。注意运动学里 x=X 轴、z=Y 轴，见 _write_payload 注释）
 #          X -192 .. 224        Y -129 .. 187
 #      行程两端是硬件限位开关（2026-10-20 起代码不再另设软限位）。
-#   ② 代码命令包络 = TRAVEL_* 再内缩 MotionLimits.margin_mm（默认 2mm），X 再多收 X_EXTRA_MARGIN_MM
-#          X -187 .. 219        Y -127 .. 185
+#   ② 代码命令包络 = TRAVEL_* 再内缩 MotionLimits.margin_mm（默认 2mm），X/Y 再多收 *_EXTRA_MARGIN_MM
+#          X -187 .. 219        Y -122 .. 180
 #   速度 / 加减速完全由 TIA「运动机构运动」的设置决定，代码只下发终点。
 
 
@@ -75,7 +76,7 @@ class MotionLimits:
         if self.margin_mm < 0.0:
             raise ValueError("motion margin must be >= 0")
 
-    # 命令夹取的上/下限（= TRAVEL_* 再内缩 margin_mm；X 再多收 X_EXTRA_MARGIN_MM）
+    # 命令夹取的上/下限（= TRAVEL_* 再内缩 margin_mm 和各轴 *_EXTRA_MARGIN_MM）
     @property
     def command_x_min(self):
         return TRAVEL_X_MIN + self.margin_mm + X_EXTRA_MARGIN_MM
@@ -86,11 +87,11 @@ class MotionLimits:
 
     @property
     def command_y_min(self):
-        return TRAVEL_Y_MIN + self.margin_mm
+        return TRAVEL_Y_MIN + self.margin_mm + Y_EXTRA_MARGIN_MM
 
     @property
     def command_y_max(self):
-        return TRAVEL_Y_MAX - self.margin_mm
+        return TRAVEL_Y_MAX - self.margin_mm - Y_EXTRA_MARGIN_MM
 
     def clamp_command(self, px, py):
         """把机器坐标夹进命令包络。"""
