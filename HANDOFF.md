@@ -8,7 +8,7 @@
 
 ## 2. 核心文件
 - `air_hockey/control/protocol.py`：DB1/DB18 偏移（1211C 版）。
-- `air_hockey/control/interface.py`：`_prepare_move` 坐标换算 + 3mm 死区；`_write_payload` 写 4 个 Real；位置按 Real 读 DB1.2/6。命令余量在 `control/limits.py`。
+- `air_hockey/control/interface.py`：`_prepare_move` 坐标换算 + 3mm 死区；`_write_payload` 写 4 个 Real；位置按 Real 读 DB1.2/6。命令余量在 `control/limits.py`：两轴内缩 2mm，X 再多收 3mm（`X_EXTRA_MARGIN_MM`），命令范围 X -187..219 / Y -127..185。
 - `air_hockey/ai.py`：冲门判断 `_goal_guard_decision`、提前量 `_lead_target`、迎击 `_strike_through`。
 - `air_hockey/app/rally.py`：连续物理导引、二次追打放手规则与防抖。
 
