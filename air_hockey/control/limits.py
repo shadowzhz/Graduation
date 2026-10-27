@@ -46,7 +46,7 @@ DEFAULT_ZONE = (
 DEFAULT_MOTION_MARGIN_MM = 2.0
 # X / Y 轴两端在 margin_mm 之外再多收（2026-10-27 现场要求；Y 上端报过 16#8002 软限位）。
 X_EXTRA_MARGIN_MM = 6.0
-Y_EXTRA_MARGIN_MM = 5.0
+Y_EXTRA_MARGIN_MM = 10.0
 
 
 # ============================================================================
