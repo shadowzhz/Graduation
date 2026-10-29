@@ -2,8 +2,11 @@
 
 import numpy as np
 
+from air_hockey.app.rally import RallyDecision, RallyState
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
+from air_hockey.game_state import CurlingState
+from air_hockey.prediction import PredictionState
 from air_hockey.vision.types import Detection
 from air_hockey.app.preview import DISPLAY_WIDTH, PreviewBrightness, encode_preview_ppm
 from air_hockey.app.renderer import COLOR_PUCK, COLOR_TABLE, COLOR_TARGET
@@ -40,8 +43,13 @@ def test_encode_preview_ppm_draws_in_scaled_raw_pixel_coordinates():
     result = make_result(42.0)
     result.frame.image[:] = (10, 20, 30)
     result.detection = Detection(center_x=500.0, center_y=300.0, radius=25.0, area=1960.0, timestamp=1.0)
-    result.ai_target = (1000.0, 400.0)
-    result.trajectory = [(1050.0, 500.0), (1150.0, 600.0)]
+    result.rally = RallyDecision(
+        state=RallyState.ATTACKING, target=(1000.0, 400.0), reason="", direction="incoming",
+        mallet_position=(300.0, 100.0), mallet_source="software",
+    )
+    result.prediction = PredictionState(
+        [(1050.0, 500.0), (1150.0, 600.0)], (1150.0, 600.0), 1.0, CurlingState(1050.0, 500.0)
+    )
 
     width, height, maxval, pixels = split_ppm(encode_preview_ppm(result, TABLE_ROI, MockGeometry()))
     rgb = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
@@ -50,7 +58,7 @@ def test_encode_preview_ppm_draws_in_scaled_raw_pixel_coordinates():
     assert tuple(rgb[330, 500]) == (30, 20, 10)  # BGR 输入被转换为 RGB，不在标注区
     assert tuple(rgb[120, 175]) == rgb_of(COLOR_TABLE)  # 球台 ROI 左边框缩放到一半
     assert tuple(rgb[150, 250]) == rgb_of(COLOR_PUCK)  # 冰壶观测中心
-    assert tuple(rgb[200, 500]) == rgb_of(COLOR_TARGET)  # table->raw 后的 AI 十字中心
+    assert tuple(rgb[200, 500]) == rgb_of(COLOR_TARGET)  # table->raw 后的目标十字中心
     assert tuple(rgb[275, 550]) != (30, 20, 10)  # 预测轨迹连线
     assert np.all(result.frame.image == (10, 20, 30))  # 绘制不污染处理帧
 

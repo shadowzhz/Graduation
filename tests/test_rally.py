@@ -10,6 +10,7 @@ import numpy as np
 from air_hockey import core_config as core
 from air_hockey.ai import AirHockeyAI
 from air_hockey.app.rally import (
+    MIDLINE_HYSTERESIS,
     OCCLUSION_HOLD_SECONDS,
     OCCLUSION_KEEP_RADIUS,
     READY_POSITION,
@@ -26,7 +27,7 @@ from air_hockey.game_state import CurlingState, GameState
 from air_hockey.app.live import submit_rally_target
 
 
-def observation(t, *, x=420.0, y=500.0, vx=0.0, vy=-300.0, hard=True,
+def observation(t, *, x=420.0, y=704.0, vx=0.0, vy=-300.0, hard=True,
                 confirmed=True, identity=1, mallet=READY_POSITION):
     stone = CurlingState(x, y, vx, vy, timestamp=t)
     prediction = TrajectoryPredictor().predict(stone)
@@ -83,7 +84,7 @@ def test_moving_machine_half_puck_pursuit_matches_ai_target():
 
 
 def test_human_half_unknown_velocity_prepares_defense_immediately():
-    result = observation(1, x=420, y=500, vy=0)
+    result = observation(1, x=420, y=704, vy=0)
     decision = tick(RallyController(), result)
     assert decision.state == RallyState.DEFENDING
     assert decision.target == (420, READY_POSITION[1])
@@ -105,7 +106,7 @@ def test_stationary_human_half_puck_does_not_flip_state_every_frame():
     states, targets = set(), set()
     for i in range(80):
         vy = 0.5 if i % 2 == 0 else -0.5      # 模拟卡尔曼估计在 0 附近抖动
-        result = observation(1 + i * 0.01, x=338, y=536, vx=0.0, vy=vy, mallet=current)
+        result = observation(1 + i * 0.01, x=338, y=756, vx=0.0, vy=vy, mallet=current)
         decision = tick(controller, result, mallet=current)
         states.add(decision.state)
         targets.add(decision.target)
@@ -117,9 +118,9 @@ def test_stationary_human_half_puck_does_not_flip_state_every_frame():
 def test_incoming_can_interrupt_recovery_without_ready_busy_or_rearm_wait():
     controller = RallyController()
     current = (480, 300)
-    outgoing = observation(1, x=400, y=500, vy=200, mallet=current)
+    outgoing = observation(1, x=400, y=704, vy=200, mallet=current)
     assert tick(controller, outgoing, mallet=current).state == RallyState.RECOVERING
-    incoming = observation(1.1, x=100, y=500, vy=-300, mallet=current)
+    incoming = observation(1.1, x=100, y=704, vy=-300, mallet=current)
     feedback = PLCFeedback(stamp=1.1, valid=True, x=current[0], y=current[1], busy=True)
     decision = tick(controller, incoming, feedback)
     assert decision.state == RallyState.DEFENDING
@@ -148,12 +149,12 @@ def test_returned_human_half_puck_requests_ready_on_same_observation():
     controller = RallyController()
     tick(controller, observation(1, y=250, vy=0))
     current = (420, 250)
-    result = observation(1.1, x=420, y=430, vy=200, mallet=current)
+    result = observation(1.1, x=420, y=602, vy=200, mallet=current)
     decision = tick(controller, result, mallet=current)
     assert decision.state == RallyState.RECOVERING and decision.target == READY_POSITION
-    again = observation(1.2, x=420, y=460, vy=200)
+    again = observation(1.2, x=420, y=646, vy=200)
     assert tick(controller, again).state == RallyState.WAITING
-    assert tick(controller, observation(1.3, x=100, y=500, vy=-300)).state == RallyState.DEFENDING
+    assert tick(controller, observation(1.3, x=100, y=704, vy=-300)).state == RallyState.DEFENDING
 
 
 def test_missing_puck_returns_ready_without_timeout():
@@ -193,7 +194,7 @@ def test_missing_or_nonfinite_ai_target_cannot_be_sent():
 
 
 def test_active_target_needs_no_prediction_timing_or_reachability_gate():
-    result = observation(1, x=480, y=500, vy=-1000)
+    result = observation(1, x=480, y=704, vy=-1000)
     result.prediction = None
     decision = tick(RallyController(), result, mallet=(100, 300))
     assert decision.state == RallyState.DEFENDING
@@ -367,24 +368,25 @@ def test_midline_hysteresis_and_velocity_deadband_prevent_chatter():
     controller = RallyController()
 
     # 1. 冰壶从中线切入机器半场立即进入进攻态
-    dec1 = tick(controller, observation(1.0, x=300, y=379.0, vy=0))
+    mid, band = core.RINK_CENTER_Y, MIDLINE_HYSTERESIS
+    dec1 = tick(controller, observation(1.0, x=300, y=mid - 1.0, vy=0))
     assert dec1.state == RallyState.ATTACKING
 
-    # 2. 冰壶在 380~392 之间微弱漂移，状态必须锁死在进攻态，严禁跳回 DEFENDING
-    for y in (381.0, 385.0, 391.0):
+    # 2. 冰壶在中线 ~ 中线+迟滞带之间微弱漂移，状态必须锁死在进攻态，严禁跳回 DEFENDING
+    for y in (mid + 1.0, mid + band * 0.5, mid + band - 1.0):
         dec = tick(controller, observation(1.1, x=300, y=y, vy=0))
         assert dec.state == RallyState.ATTACKING, f"y={y} 应保持 ATTACKING"
 
-    # 3. 冰壶退过 392 之后，才平滑切回 DEFENDING
-    dec_def = tick(controller, observation(1.3, x=300, y=395.0, vy=0))
+    # 3. 冰壶退过迟滞带之后，才平滑切回 DEFENDING
+    dec_def = tick(controller, observation(1.3, x=300, y=mid + band + 3.0, vy=0))
     assert dec_def.state == RallyState.DEFENDING
 
     # 4. 在人类半场，冰壶速度在零点附近波动（vy=10）不应误判为 outgoing 放弃防守
-    dec_slow = tick(controller, observation(1.4, x=450, y=500.0, vy=10.0))
+    dec_slow = tick(controller, observation(1.4, x=450, y=704.0, vy=10.0))
     assert dec_slow.state == RallyState.DEFENDING
 
-    # 5. 只有明确向玩家球门飞去（vy > 20）才触发回位 READY
-    dec_out = tick(controller, observation(1.5, x=450, y=500.0, vy=100.0))
+    # 5. 只有明确向玩家球门飞去（vy > OUTGOING_VEL_THRESHOLD）才触发回位 READY
+    dec_out = tick(controller, observation(1.5, x=450, y=704.0, vy=100.0))
     assert dec_out.state in (RallyState.RECOVERING, RallyState.WAITING) and dec_out.target == READY_POSITION
 
 

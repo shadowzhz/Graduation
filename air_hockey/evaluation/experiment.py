@@ -87,21 +87,6 @@ class ExperimentReport:
     motion_event_errors: dict[str, ErrorStats] = field(default_factory=dict)
     estimator_comparison: dict[str, "ExperimentReport"] = field(default_factory=dict)
 
-    @property
-    def endpoint_error(self) -> ErrorStats:
-        """Compatibility alias for end-to-end error from the estimated state."""
-        return self.estimated_endpoint_error
-
-    @property
-    def mean_error(self) -> float:
-        """Compatibility alias for estimated endpoint mean, not an overall metric."""
-        return self.estimated_endpoint_error.mean
-
-    @property
-    def max_error(self) -> float:
-        """Compatibility alias for estimated endpoint maximum, not an overall metric."""
-        return self.estimated_endpoint_error.maximum
-
     def to_dict(self) -> dict:
         payload = {
             "config": self.config.to_dict(),
@@ -289,11 +274,3 @@ class Experiment:
                 cv_report.estimator_comparison[model] = self._report(model_config, runs_by_model[model])
             return cv_report
         return self._report(self.config, runs_by_model[self.config.estimator_model])
-
-
-def run_experiment(
-    config: Optional[ExperimentConfig] = None,
-    simulator_factory: Optional[Callable[[int], MotionSimulator]] = None,
-) -> ExperimentReport:
-    """便捷入口：运行一次多组实验。"""
-    return Experiment(config=config, simulator_factory=simulator_factory).run()

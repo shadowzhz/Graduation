@@ -76,19 +76,6 @@ class CurlingState:
         )
 
     @classmethod
-    def from_track(cls, track) -> "CurlingState":
-        """由 Tracker 轨迹构建统一状态。"""
-        return cls(
-            x=float(track.center_x),
-            y=float(track.center_y),
-            vx=float(track.vx),
-            vy=float(track.vy),
-            timestamp=float(track.last_timestamp),
-            confidence=float(getattr(track, "confidence", 0.0)),
-            radius=float(track.radius),
-        )
-
-    @classmethod
     def from_any(cls, source: Any, y: float | None = None, vx: float | None = None, vy: float | None = None) -> "CurlingState":
         """把裸坐标、CurlingState 或任意带 x/y/vx/vy 的运动实体统一成 CurlingState。
 
@@ -132,16 +119,6 @@ class StoneState(CurlingState):
 
     tracking_state: TrackingState = TrackingState.UNKNOWN
 
-    @classmethod
-    def from_tracker(cls, track) -> "StoneState":
-        # state 可能是枚举也可能是裸值，统一转成 TrackingState
-        try:
-            tracking_state = TrackingState(str(getattr(track.state, "value", track.state)))
-        except ValueError:
-            tracking_state = TrackingState.UNKNOWN
-        state = CurlingState.from_track(track)
-        return state.to_stone_state(tracking_state)
-
 
 @dataclass
 class GameState:
@@ -159,21 +136,3 @@ class GameState:
     stalled_stone_phase: str
     reaction_timer: float
     difficulty: Any
-
-    @classmethod
-    def from_vision(cls, stone) -> "GameState":
-        """只有视觉结果、还没接 AI 时的快照，AI 字段给中性初值。"""
-        return cls(
-            ai_x=0.0,
-            ai_y=0.0,
-            ai_home_y=0.0,
-            target_x=0.0,
-            target_y=0.0,
-            stone=stone,
-            awaiting_serve=False,
-            current_server="none",
-            serve_phase="idle",
-            stalled_stone_phase="idle",
-            reaction_timer=0.0,
-            difficulty=None,
-        )

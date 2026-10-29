@@ -25,9 +25,6 @@ from ..vision.types import Detection, ROI, Track
 if TYPE_CHECKING:
     from .rally import RallyDecision
 
-DETECTION_INTERVAL = 1
-MAX_DETECTION_GAP = 0.08
-AI_HOME_Y = core.RINK_TOP + (core.RINK_CENTER_Y - core.RINK_TOP) * 0.28
 # 实时估计器的机动检测门限（2 自由度 NIS）。击球/弹墙后速度在约 50ms 内收敛，
 # 原常速模型需约 400ms；静止时噪声与原来相同。离线评估不受影响。
 REALTIME_MANEUVER_GATE = 20.0
@@ -40,29 +37,12 @@ MAX_PUCK_AREA_PX = math.pi * 50.0 ** 2
 TRACK_REPLACEMENT_HITS = 2
 
 
-@dataclass
-class TrajectoryDebug:
-    """轨迹调试信息：当前坐标、速度方向、预测终点。"""
-
-    position: tuple[float, float]
-    direction: tuple[float, float]
-    predicted_endpoint: tuple[float, float]
-
-
 def _track_usable(track) -> bool:
-    """轨道是否可用于下游决策（**含漏检宽限期内**）。
+    """轨道是否可用于下游决策，漏检宽限期内也算。
 
-    ★ 为什么不能用 `track.state == TrackState.ACTIVE`：
-    追踪器在**漏检第一帧**就把 state 置成 LOST（见 tracker._handle_missing_detection），
-    而"真正丢弃"（`_track = None`）要等 missed_frames 超过 max_missed_frames。
-    也就是说 `state` 不是"还有没有球"的判据，`track is not None` 才是。
-
-    现场后果：用 state 判断会让下游**每两帧翻一次** —— rally 在
-    DEFENDING/ATTACKING 与 RECOVERING(READY) 之间反复横跳，机械臂刚起步
-    就被叫回 (300,140)，**永远接不到球**。
-
-    宽限期内的位置是 Kalman 按模型外推的（管线里 detection is None 走 predict），
-    不是新鲜观测，但对"球还在往哪走"的判断依然有效。
+    不能用 `state == ACTIVE` 判断：追踪器漏检第一帧就把 state 置成 LOST，要等 missed_frames
+    超过 max_missed_frames 才真正丢弃轨道。按 state 判断会让 rally 每两帧在追球和回 READY 之间横跳。
+    宽限期内的位置是 Kalman 外推的，但对"球往哪走"的判断仍然有效。
     """
     return track is not None and track.state != TrackState.TENTATIVE
 
@@ -119,7 +99,7 @@ class VisionResult:
     """单帧视觉与 AI 处理的完整结果快照。
 
     curling_state 是唯一权威状态（Kalman 输出升级为带 tracking_state 的 StoneState）；
-    stone_state 作为只读别名保留，不再单独保存第二份等价状态。
+    预测轨迹/终点在 prediction 里，AI 目标在 ai_decision 里，rally 由实时回合在之后填入。
     """
 
     frame: Frame
@@ -128,17 +108,9 @@ class VisionResult:
     track_confirmed: bool = False
     curling_state: Optional[CurlingState] = None
     prediction: Optional[PredictionState] = None
-    trajectory: Optional[list[tuple[float, float]]] = None
-    trajectory_debug: Optional[TrajectoryDebug] = None
-    ai_target: Optional[tuple[float, float]] = None
     fps: float = 0.0
     ai_decision: Optional[AIDecision] = None
     rally: Optional[RallyDecision] = None
-
-    @property
-    def stone_state(self) -> Optional[CurlingState]:
-        """兼容别名：与 curling_state 指向同一对象。"""
-        return self.curling_state
 
 
 class VisionRuntime:
@@ -156,7 +128,6 @@ class VisionRuntime:
         calibration_file: str = "calibration/camera_calibration.npz",
         table_calibration_file: str = "calibration/table_homography.npz",
         disable_undistort: bool = False,
-        detection_interval: int = DETECTION_INTERVAL,
         detector: Optional[StoneDetector] = None,
         tracker: Optional[StoneTracker] = None,
         kalman: Optional[KalmanFilter] = None,
@@ -167,7 +138,6 @@ class VisionRuntime:
         profile: bool = False,
     ) -> None:
         self.table_roi = tuple(table_roi)
-        self.detection_interval = int(detection_interval)
         self.profile = profile
 
         self.detector = detector or StoneDetector(
@@ -181,11 +151,9 @@ class VisionRuntime:
             min_circularity=0.55,
         )
         self.tracker = tracker or StoneTracker(
-            # ★ 宽限期：漏检这么多帧之内仍然算"有球"（位置由 Kalman 外推）。
-            # 原来 ×4（≈24ms@165fps）太短 —— 球被球槌挡住、或被撞飞的瞬间
-            # 很容易连丢好几帧，轨道一断 rally 就切回 READY、机械臂被叫回去，
-            # 表现就是"接不到球"。×8 ≈ 48ms 更实际。
-            max_missed_frames=self.detection_interval * 8, min_confirmed_hits=1,
+            # 宽限期：漏检 8 帧内仍算"有球"（位置由 Kalman 外推）。球被球槌挡住或刚被撞飞时
+            # 常连丢几帧，宽限太短轨道一断 rally 就把球槌叫回 READY。
+            max_missed_frames=8, min_confirmed_hits=1,
             replacement_hits=TRACK_REPLACEMENT_HITS,
         )
         # 带墙反弹的模型：冰壶撞侧墙那一帧估计器自己就把速度反过来。常速模型会继续"穿墙"外推 2~3 帧，
@@ -193,11 +161,8 @@ class VisionRuntime:
         # 前提是球台标定的墙位置准确；标定错时模型碰不到真墙，弹墙仍靠机动检测。
         self.kalman = kalman or KalmanFilter(maneuver_gate=REALTIME_MANEUVER_GATE, motion_model="collision_aware")
         self.predictor = predictor or TrajectoryPredictor()
-        self._reuse_prediction_for_ai = ai is None
-        # mallet_speed 给了才会做"提前量"（球槌响应延迟补偿）；None 时行为与原来一致。
-        self.mallet_speed = float(mallet_speed) if mallet_speed else None
-        self.ai = (AirHockeyAI(predictor=self.predictor, mallet_speed=self.mallet_speed)
-                   if ai is None else ai)
+        # mallet_speed 给了才会做"提前量"（球槌响应延迟补偿）
+        self.ai = ai or AirHockeyAI(predictor=self.predictor, mallet_speed=mallet_speed)
         # Real hardware follows each observation without simulation reaction or aim noise.
         self._ai_difficulty = replace(
             core.DIFFICULTIES["普通"], aim_error=0.0, prediction=1.0,
@@ -218,7 +183,6 @@ class VisionRuntime:
             self.camera_geometry = self.vision_pipeline.geometry
 
         self.last_timestamp = None
-        self._last_detection_timestamp = None
         self._kalman_track_id = None
         self.frame_index = 0
         self.display_fps = 0.0
@@ -228,13 +192,12 @@ class VisionRuntime:
         self.last_predict_ms: Optional[float] = None
         self.last_ai_ms: Optional[float] = None
 
-        self.ai_home_y = AI_HOME_Y
+        self.ai_home_y = core.AI_HOME_Y
         self.target = [core.RINK_CENTER_X, self.ai_home_y]
         self.reaction_timer = 0.0
         self.stalled_phase = "idle"
         self.ai_current_pos = [core.RINK_CENTER_X, self.ai_home_y]
         self._ai_feedback_position = None
-        self.prediction_errors = 0
 
     def set_ai_feedback(self, feedback) -> None:
         """只接受新鲜的轴位置；反馈丢失时不把旧位置当作实机当前位置。"""
@@ -244,6 +207,14 @@ class VisionRuntime:
         age = time.perf_counter() - feedback.stamp
         if 0.0 <= age <= 0.25 and all(math.isfinite(value) for value in (feedback.x, feedback.y)):
             self._ai_feedback_position = (feedback.x, feedback.y)
+
+    def _reset_ai_memory(self) -> None:
+        """换球 / 丢轨时清掉 AI 针对上一颗球的记忆（回收阶段、冲门迟滞、反应计时）。"""
+        self.stalled_phase = "idle"
+        self.reaction_timer = 0.0
+        reset = getattr(self.ai, "reset", None)  # 自定义 AI 不一定实现
+        if callable(reset):
+            reset()
 
     def _detect(self, frame, dynamic_roi=None):
         # 自定义检测器继续遵循原 detect 契约。
@@ -280,46 +251,24 @@ class VisionRuntime:
             instant = 1.0 / raw_dt
             self.display_fps = instant if self.display_fps == 0.0 else self.display_fps * 0.9 + instant * 0.1
 
-        detection = None
         t_detect_start = time.perf_counter()
-
-        if (self._last_detection_timestamp is None
-                or self.frame_index % self.detection_interval == 0
-                or now - self._last_detection_timestamp >= MAX_DETECTION_GAP):
-            dynamic_roi = None
-            box_size = 140
-
-            if _track_usable(self.tracker.track):
-                pred_pos = self.tracker.predict_position(processed_frame.timestamp)
-                img_h, img_w = processed_frame.image.shape[:2]
-                dynamic_roi = _compute_dynamic_roi(
-                    self.tracker.track,
-                    pred_pos,
-                    img_w,
-                    img_h,
-                    base_box_size=box_size,
-                )
-
-            detection = self._detect(processed_frame, dynamic_roi=dynamic_roi)
-            if detection is None and dynamic_roi is not None:
-                detection = self._detect(processed_frame)
-            self._last_detection_timestamp = now
-            detected_ms = (time.perf_counter() - t_detect_start) * 1000
-            self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
-            if self.profile:
-                self.last_detect_ms = detected_ms
-            tracks = self.tracker.update(detection)
-        else:
-            tracks = self.tracker.predict(processed_frame.timestamp)
-
+        dynamic_roi = None
+        if _track_usable(self.tracker.track):
+            img_h, img_w = processed_frame.image.shape[:2]
+            dynamic_roi = _compute_dynamic_roi(
+                self.tracker.track, self.tracker.predict_position(now), img_w, img_h)
+        detection = self._detect(processed_frame, dynamic_roi=dynamic_roi)
+        if detection is None and dynamic_roi is not None:
+            detection = self._detect(processed_frame)
+        detected_ms = (time.perf_counter() - t_detect_start) * 1000
+        self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
+        if self.profile:
+            self.last_detect_ms = detected_ms
+        tracks = self.tracker.update(detection)
         track = tracks[0] if tracks else None
 
-        stone = None
         curling = None
         prediction_state = None
-        table_trajectory = None
-        trajectory_debug = None
-        ai_target = None
         decision = None
 
         if self._ai_feedback_position is not None:
@@ -328,15 +277,11 @@ class VisionRuntime:
         if track is not None:
             if self._kalman_track_id is not None and self._kalman_track_id != track.track_id:
                 self.kalman.reset()
-                self.stalled_phase = "idle"
-                self.reaction_timer = 0.0
+                self._reset_ai_memory()
             self._kalman_track_id = track.track_id
-            # 统一单向坐标流: raw pixel -> undistorted pixel -> rink/table coordinate
-            undist_x, undist_y = self.camera_geometry.raw_to_undistorted(track.center_x, track.center_y)
-            table_x, table_y = self.camera_geometry.undistorted_to_table(undist_x, undist_y)
+            table_x, table_y = self.camera_geometry.raw_to_table(track.center_x, track.center_y)
 
-            # 状态估计层：KalmanFilter 平滑位置/速度，输出统一的 CurlingState
-            # 有检测则用观测校正，检测间隔帧则按模型外推
+            # 有检测则用观测校正，漏检帧按模型外推。
             # 检测被跟踪器当成"待确认的新目标"时，track 还是旧轨迹，不能拿旧观测再更新一次
             if detection is not None and track.missed_frames == 0:
                 estimated = self.kalman.update(
@@ -353,13 +298,10 @@ class VisionRuntime:
                     radius=track.radius,
                 )
 
-            # 唯一权威状态：StoneState 只是给 CurlingState 补上追踪状态，
-            # 预测与 AI 共用同一个对象，避免同帧重复构造两份等价状态。
+            # 预测与 AI 共用这一个状态对象
             tracking_state = TrackingState.LOST if track.state == TrackState.LOST else TrackingState.ACTIVE
             curling = estimated.to_stone_state(tracking_state)
-            stone = curling
 
-            # 预测数据层：业务层只与 PredictionState 交互，不再直接传递裸点列表
             predict_start = time.perf_counter() if self.profile else 0.0
             try:
                 prediction_state = self.predictor.predict(curling)
@@ -367,18 +309,10 @@ class VisionRuntime:
             except (RuntimeError, ValueError):
                 # 预测失败（步数预算耗尽 / 非有限状态）不能打死实时线程。
                 # 结果里如实记为"无预测"，AI 退化为按当前位置防守（单点轨迹）。
-                self.prediction_errors += 1
                 prediction_state = None
                 ai_prediction = PredictionState([curling.position], curling.position, 0.0, curling)
             if self.profile:
                 self.last_predict_ms = (time.perf_counter() - predict_start) * 1000
-            if prediction_state is not None:
-                table_trajectory = prediction_state.trajectory
-                trajectory_debug = TrajectoryDebug(
-                    position=curling.position,
-                    direction=curling.direction,
-                    predicted_endpoint=prediction_state.endpoint,
-                )
 
             state = GameState(
                 ai_x=self.ai_current_pos[0],
@@ -386,7 +320,7 @@ class VisionRuntime:
                 ai_home_y=self.ai_home_y,
                 target_x=self.target[0],
                 target_y=self.target[1],
-                stone=stone,
+                stone=curling,
                 awaiting_serve=False,
                 current_server="player",
                 serve_phase="idle",
@@ -396,25 +330,18 @@ class VisionRuntime:
             )
 
             ai_start = time.perf_counter() if self.profile else 0.0
-            if self._reuse_prediction_for_ai:
-                decision = self.ai.update(state, dt, prediction=ai_prediction)
-            else:
-                decision = self.ai.update(state, dt)
+            decision = self.ai.update(state, dt, prediction=ai_prediction)
             if self.profile:
                 self.last_ai_ms = (time.perf_counter() - ai_start) * 1000
             self.target[0], self.target[1] = decision.target_x, decision.target_y
             self.reaction_timer = decision.reaction_timer
             self.stalled_phase = decision.stalled_stone_phase
-
-            ai_target = (decision.target_x, decision.target_y)
         else:
             # 轨迹丢失时清空估计器，避免下一个冰壶被旧状态污染
             self.kalman.reset()
             self._kalman_track_id = None
-            self.stalled_phase = "idle"
-            self.reaction_timer = 0.0
+            self._reset_ai_memory()
             self.target[:] = (core.RINK_CENTER_X, self.ai_home_y)
-            ai_target = tuple(self.target)
 
         if self._ai_feedback_position is None:
             smooth_alpha = min(1.0, dt * 12.0)
@@ -430,9 +357,6 @@ class VisionRuntime:
             track_confirmed=_track_usable(track),
             curling_state=curling,
             prediction=prediction_state,
-            trajectory=table_trajectory,
-            trajectory_debug=trajectory_debug,
-            ai_target=ai_target,
             fps=self.display_fps,
             ai_decision=decision,
         )

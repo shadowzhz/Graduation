@@ -158,7 +158,7 @@ def test_soft_radius_scoring_not_hard_discarded():
 
 def test_vision_runtime_two_frames_multi_target_association():
     """验证 VisionRuntime 处理两帧合成图时，第二帧即便出现更大远端干扰球，仍稳定关联旧球轨迹。"""
-    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
 
     # Frame 1: 原球在 (500, 300)
     img1 = np.zeros((720, 1280, 3), dtype=np.uint8)

@@ -322,7 +322,6 @@ def test_maneuver_gate_tracks_strike_quickly_without_adding_jitter():
     # 原常速模型 50ms 后只有真值的一小部分；机动检测后接近 -800
     assert baseline_vy > -200.0
     assert -900.0 < gated_vy < -650.0
-    assert gated.maneuver_count >= 1
     # 静止期没有误触发，抖动与原模型一致
     assert abs(gated_still - baseline_still) < 1e-9
 

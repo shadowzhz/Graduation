@@ -15,7 +15,6 @@ from pathlib import Path
 
 from ..camera import CameraConfig, CameraManager
 from ..control import MotionLimits, PLCLink, PlcControlAdapter
-from ..control.adapter import PlcTarget
 from ..control.limits import TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN
 from ..control.link import TARGET_MAX_AGE
 from ..recording import RuntimeRecorder
@@ -23,7 +22,7 @@ from .perf import LatencySamples, build_perf_report, print_latency_report
 from .preview import PreviewBrightness, VisionWindow, encode_preview_ppm
 from .rally import READY_POSITION, RallyController, RallyState
 from .renderer import format_status
-from .vision_runtime import MAX_DETECTION_GAP, VisionRuntime
+from .vision_runtime import VisionRuntime
 
 STATS_INTERVAL = 5.0        # 统计间隔
 
@@ -39,8 +38,7 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False):
             plc.clear_target()
         return None
     try:
-        request = adapter.build_target(PlcTarget(*rally.target, result.frame.timestamp),
-                                       timestamp=result.frame.timestamp)
+        request = adapter.build_target(*rally.target, result.frame.timestamp)
     except ValueError:
         if plc is not None:
             plc.clear_target()
@@ -54,26 +52,20 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False):
     return request
 
 
-def motion_limits_from_args(args):
-    """--motion-margin-mm → 命令包络。"""
-    return MotionLimits(margin_mm=args.motion_margin_mm)
-
-
 def start_plc(args, runtime, rally):
     """按命令行参数配置并启动 PLCLink，打印行程包络。"""
-    limits = motion_limits_from_args(args)
+    limits = MotionLimits(margin_mm=args.motion_margin_mm)
     print(f"[PLC] 命令余量 {limits.margin_mm:.0f}mm → "
           f"X {limits.command_x_min:.0f}..{limits.command_x_max:.0f} "
           f"Y {limits.command_y_min:.0f}..{limits.command_y_max:.0f}"
           f"（机械行程 {TRAVEL_X_MIN:.0f}..{TRAVEL_X_MAX:.0f} / "
           f"{TRAVEL_Y_MIN:.0f}..{TRAVEL_Y_MAX:.0f}，两端为限位开关）")
     plc = PLCLink(args.plc, period=1.0 / args.plc_rate, limits=limits)
-    # ★ 把轴的**实际可达范围**交给 AI：它据此限制"可覆盖范围"
-    #   （recovery_bounds），免得老是瞄到轴到不了的边角。
+    # 把轴的实际可达范围交给 AI，免得它瞄轴到不了的边角
     runtime.ai.recovery_bounds = plc.reachable_bounds
     # 回收按相同命令范围判断能否接触；不可达时清目标，不能直穿冰壶回位。
     rally.reachable_bounds = plc.reachable_bounds
-    print("[PLC] 终点模式：只下发 AI 终点；速度/加速度由 TIA 运动机构设置决定")
+    print("[PLC] 终点模式：只下发 AI 终点；速度/加速度由 MC_MoveAbsolute 的 Velocity 和 TIA 工艺对象设置决定")
     print("[PLC] 行程保护：命令夹在机械行程内缩余量之内；越界由硬件限位开关负责")
     plc.start()
     return plc
@@ -92,10 +84,7 @@ def plc_status_text(plc, feedback, now):
     elif feedback.comm_lost_latch:
         text += " | PLC 通信丢失锁存：请现场检查并复位"
     elif feedback.kinematics_error or feedback.axis_fault or feedback.group_stop:
-        # ★ 三个来源的错误码全部打出来，不要再靠猜：
-        #   轴自己的码（DB18.2 / DB18.6）
-        #   运动指令的码（DB18.34.3 / DB18.36）
-        #   ErrorDetail.Number（DB18.32）
+        # 三个来源的错误码全部打出来：轴自己的码、运动指令的码、ErrorDetail.Number
         which = ("X" if feedback.x_err else "") + ("Y" if feedback.y_err else "")
         parts = [f"轴故障位={which or '无'}", feedback.fault_detail()]
         if feedback.group_stop:
@@ -148,8 +137,7 @@ class LiveSession:
             calibration_file=args.calibration,
             table_calibration_file=self.table_calibration_file,
             disable_undistort=args.disable_undistort,
-            # 球槌速度估计，用来做"提前量"（补偿轴的反应延迟）。
-            # 0 或负数 = 不做提前量，等于原来"直接瞄冰壶当前位置"的行为。
+            # 球槌速度估计，用来做"提前量"（补偿轴的反应延迟）；0 或负数 = 直接瞄冰壶当前位置
             mallet_speed=args.mallet_speed if args.mallet_speed > 0 else None,
             profile=self.samples is not None,
         )
@@ -205,8 +193,7 @@ class LiveSession:
                 f"@ {info.negotiated_fps:g} FPS ({info.source_format} -> {info.output_format}); "
                 "实际采集速度以帧计数为准"
             )
-        print(f"视觉管线：最新帧 + 每 {self.runtime.detection_interval} 帧检测；"
-              f"距上次检测超过 {MAX_DETECTION_GAP * 1000:g} ms 时在下一可用帧补检测，其余帧使用 tracker 预测")
+        print("视觉管线：每帧对最新帧做检测")
         print(f"Direct play: READY={READY_POSITION}; 检测到就防守/击球，不等二次确认；"
               f"{'DRY-RUN：仅观察，不发送运动/使能/回零/复位' if args.dry_run else '轴运动仍需人工 E 授权'}")
         print("机器半场主动击球/回收，真人半场准备防守；无 PLC 时球槌为 software fallback。")

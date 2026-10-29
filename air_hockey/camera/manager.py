@@ -177,9 +177,6 @@ class CameraManager:
     def get_stats(self):
         return self._stats.snapshot()
 
-    def wait_for_frame(self, timeout=None):
-        return self.frame_buffer.wait_for_frame(timeout)
-
     def stop(self) -> None:
         with self._lifecycle_lock:
             self._stop_locked()

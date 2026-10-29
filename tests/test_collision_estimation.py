@@ -142,8 +142,9 @@ def test_wall_prediction_covariance_matches_finite_difference():
     assert np.linalg.eigvalsh(estimator._P).min() >= -1e-10
 
 
-def test_seed_51_wall_direction_recovers_on_contact_without_truth_input():
-    simulator = MotionSimulator.random(seed=51, position_noise=0.0)
+def test_seed_30_wall_direction_recovers_on_contact_without_truth_input():
+    # 2026-10-29 随机初速改为 300~600 后，原 seed 51 不再撞左墙；seed 30 是同类场景（撞左墙反向）
+    simulator = MotionSimulator.random(seed=30, position_noise=0.0)
     results = simulator.simulate_estimators(("friction", "collision_aware"), predict_step=55)
     collision, friction = results["collision_aware"], results["friction"]
     bounce = next(index for index in range(1, len(collision.true_velocity_trajectory))

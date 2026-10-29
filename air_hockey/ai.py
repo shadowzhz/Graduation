@@ -17,8 +17,11 @@ AI_SERVE_SETUP_GAP = 6.0
 # 相差约 160 单位（≈210mm），判据若只是单个阈值，速度估计的噪声就会让 Y 目标在两者
 # 之间来回跳（仿真：±15 速度噪声下 1.2s 内跳 37 次），实机表现为前后急刹、反复折返。
 # 进入要求明确冲门，退出要求明确减速或明确偏离球门，中间保持上一次的判断。
-FAST_SHOT_ENTER_VY = -60.0
-FAST_SHOT_EXIT_VY = -20.0
+# （2026-10-29 场地 Y 方向改为各向同性单位，原 -60 / -20 按 ×1.449 换算，毫米含义不变。）
+FAST_SHOT_ENTER_VY = -87.0
+FAST_SHOT_EXIT_VY = -29.0
+# 非冲门来球的判据（同上换算，原 -25）
+INCOMING_VY = -36.0
 FAST_SHOT_ENTER_MARGIN = core.STONE_RADIUS
 FAST_SHOT_EXIT_MARGIN = core.STONE_RADIUS * 3.0
 # 迎击：终点模式下球槌开到目标就停住，球只是撞上一个静止的球槌弹回去。
@@ -42,21 +45,25 @@ class AirHockeyAI:
     def __init__(self, predictor=None, mallet_speed=None, recovery_bounds=None) -> None:
         self.predictor = predictor or TrajectoryPredictor()
         self._random = random.Random()
-        # 球槌速度估计（球台单位/秒）。给了才做"提前量"：目标瞄冰壶再走 lead_time
-        # 之后的位置，而不是它现在的位置。不给（None）= 保持原行为，仿真不受影响。
+        # 球槌速度估计（球台单位/秒）；给了才做"提前量"，None 时直接瞄冰壶当前位置
         self.mallet_speed = float(mallet_speed) if mallet_speed else None
-        # ★ "死球回收"模式的粘性开关。见 choose_target 里静止球那一支：
-        #   门控必须是粘性的，否则绕到球后面时（离球约 75 单位 > 门限）会被
-        #   踢回"固定瞄球位置"，球槌再被拉回球边，来回震荡永远推不到球。
+        # 死球回收的粘性开关：绕到球后面时已离球超出门限，不粘住会被拉回球边来回震荡
         self._retrieving = False
-        # 回收阶段：GameState.stalled_stone_phase 在实机 live 下没有任何人推进它，
-        # 永远是 "idle"，导致停滞球规划器永远进不了 "striking" —— 球槌绕到球后面
-        # 又退回侧移，无限循环。所以由 AI 自己算，且只前进不后退。
+        # 回收走到第几步（只前进不后退）。实机没人推进 GameState.stalled_stone_phase，由 AI 自己算
         self._retrieve_step = 0
-        # 可覆盖范围（left, right, top, bottom，游戏坐标）：由 main.py 从 PLC 的
-        # 实际行程灌进来（plc.reachable_bounds）。None = 不额外限制。
+        # 可覆盖范围（left, right, top, bottom，游戏坐标），来自 plc.reachable_bounds；None = 不额外限制
         self.recovery_bounds = recovery_bounds
         # 冲门快球"守门线"模式（带迟滞，见 FAST_SHOT_* 常量）
+        self._goal_guard = False
+
+    def reset(self) -> None:
+        """清掉跨帧的粘性状态（换了一颗球 / 轨迹丢失时由调用方调用）。
+
+        死球回收和冲门迟滞都是"针对这颗球"的记忆；不清的话，上一颗球回收到 striking
+        之后，新放的一颗静止球会直接从 striking 开始，跳过侧移/绕后/对齐斜着去推。
+        """
+        self._retrieving = False
+        self._retrieve_step = 0
         self._goal_guard = False
 
     def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
@@ -77,28 +84,17 @@ class AirHockeyAI:
         error = self._random.uniform(-difficulty.aim_error, difficulty.aim_error)
         safe_left = core.RINK_LEFT + core.MALLET_RADIUS
         safe_right = core.RINK_RIGHT - core.MALLET_RADIUS
-        # 允许退到防守线后方：下限放到"球槌边缘正好贴到后墙"。
-        # 原来下限是 state.ai_home_y，物理上从防守线(-33.2mm)往后到 -120mm
-        # 那 87mm 的轴行程一直用不到。2026-10-13 现场要求"全部追"，改为放开。
+        # 下限放到球槌边缘贴后墙，防守线后方的行程也能用
         safe_top = core.RINK_TOP + core.MALLET_RADIUS
         safe_bottom = core.RINK_CENTER_Y - core.MALLET_RADIUS
-        # ★★★ 机器真实可达范围（recovery_bounds，来自 PLC 的命令包络）必须在**这里**
-        #     就收窄 safe_*，一次覆盖**所有**决策分支。
-        #
-        # 现场症状（2026-10 实机日志）：`目标被夹取 Y 31%` / `Y 43%` —— 三到四成的
-        # 目标落在轴够不到的地方，PLC 在下发时默默夹到包络边缘。后果是机械臂长期
-        # **顶在包络边缘**，任何过冲都会顶进包络外那段余量（当时还有软限位越界检测，
-        # 一触发就撤销使能，一局就跑不下去；现在越界交给硬件限位开关）。
-        #
-        # ⚠️ 原来这段只在下面"回收停滞球"那一支里做（_choose_stalled_stone_target
-        #    之前），所以**防守/追击/拦截全部没受约束** —— 那才是夹取率高的原因。
-        #    bounds 只该收窄、不该放宽，所以用 max/min 而不是直接赋值。
+        # 机器真实可达范围在这里统一收窄、覆盖所有分支：否则 AI 会瞄轴够不到的点，
+        # 下发时被夹到包络边缘，机械臂长期顶在边上。只收窄不放宽。
         if self.recovery_bounds is not None:
             left, right, top, bottom = self.recovery_bounds
             safe_left, safe_right = max(safe_left, left), min(safe_right, right)
             safe_top, safe_bottom = max(safe_top, top), min(safe_bottom, bottom)
         stone_speed = math.hypot(state.stone.vx, state.stone.vy)
-        # ★ 球一旦动起来（或离开中线区）就退出"死球回收"模式。
+        # 球一旦动起来就退出死球回收
         if stone_speed > core.STONE_STOP_SPEED:
             self._retrieving = False
             self._retrieve_step = 0
@@ -109,33 +105,15 @@ class AirHockeyAI:
         stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
         if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
             self._goal_guard = False
-            # （safe_* 已经在上面按 recovery_bounds 收窄过了，这里不用再收一次）
             return self._choose_stalled_stone_target(state, safe_left, safe_right, safe_top, safe_bottom)
         stalled_stone_phase = "idle"
 
         stone_in_attack_zone = state.stone.y <= difficulty.attack_line
         if stone_speed <= core.STONE_STOP_SPEED and stone_near_center:
             self._goal_guard = False
-            # ★★★ 关键：目标"冰壶圆心"物理上做不到 —— 球槌和冰壶都是实体，
-            # 不可能占同一个圆心。轴开到旁边（约 5 单位）就被死区停住，
-            # 于是"顶着球不动"：日志里同一颗球在 (96,238) 附近被回收了 7 轮
-            # （track 225→231）都没挪窝，每轮都是 到位 → 遮挡保持 1s 超时 →
-            # 退回 READY → 再去 → 再到位 ……
-            #
-            # 修法分两步，不能一刀切：
-            #   · 球槌还没到球边上 → 保持原来的"固定瞄球位置"（防抖动，有测试守着）
-            #   · 球槌已经在球边上、球还是不动 → 说明这一支推不动它，
-            #     改用停滞球规划器：侧移绕过 → 绕到球后面 → 对齐 → 从后往前推。
-            #
-            # 还要确认"推得动"：击球点是 stone.y + MALLET_RADIUS（球后面一个
-            # 球槌半径），它必须还在球槌的行程里（≤ safe_bottom）。否则像停在
-            # 中线上的球，推的位置在 349 之外、轴根本到不了，切规划器只是徒劳。
-            #
-            # ★ 门控必须是粘性的（self._retrieving）：绕到球后面时球槌离球约
-            #   75 单位，已经超出 reach，若只看距离就会被踢回"固定瞄球位置"，
-            #   球槌又被拉回球边 → sidestepping/positioning/idle 三态震荡，
-            #   永远到不了击球点（模拟 14 步实测）。所以一旦进入回收就一直用
-            #   规划器，直到球真的动起来（下面统一清标志）。
+            # 球心本身到不了（两个实体不能重叠，轴停在旁边被死区卡住就顶着球不动）。
+            # 球槌还没到球边：照旧瞄球心；已在球边而球不动：改用停滞球规划器绕到后面推。
+            # 击球点 stone.y + MALLET_RADIUS 必须在行程内才推得动；进入回收后保持粘性直到球动起来。
             reach = (core.STONE_RADIUS + core.MALLET_RADIUS) * 1.6
             can_push = state.stone.y + core.MALLET_RADIUS <= safe_bottom
             if not can_push:
@@ -144,22 +122,14 @@ class AirHockeyAI:
             elif self._retrieving or math.hypot(state.ai_x - state.stone.x,
                                                 state.ai_y - state.stone.y) <= reach:
                 self._retrieving = True
-                # ★★ 阶段由谁决定（合并两个分支时定的规则）：
-                #   · 状态里已经有非 idle 的阶段（仿真、以及将来 live 真的去推进它）
-                #     → **以状态为准**，尊重上游的状态机
-                #   · 状态是 "idle"（实机 live 的情况：vision_runtime 没人推进这个
-                #     字段）→ 由 AI 自己算，否则规划器永远进不了 "striking"，
-                #     球槌绕到球后面又退回侧移，无限循环
+                # 状态里已有非 idle 阶段（仿真）就以状态为准，否则（实机）由 AI 自己推进
                 phase = self._retrieve_phase(state)
                 if state.stalled_stone_phase != "idle":
                     phase = state.stalled_stone_phase
                 return self._choose_stalled_stone_target(
                     replace(state, stalled_stone_phase=phase),
                     safe_left, safe_right, safe_top, safe_bottom)
-            # ⚠️ 这里**故意瞄球心** —— 击球本来就是"朝球撞过去"，压上去是预期的。
-            #   （曾经想在这里改成"停在接触圆上"以防压住球，结果 10 个测试挂了：
-            #    击球、首次进攻、回收判定全都依赖"朝球心去"。防护必须做在
-            #    **只有"停在球边待命"那一种情形**上，不能一刀切。）
+            # 这里故意瞄球心：击球就是朝球撞过去
             return AIDecision(
                 clamp(state.stone.x + error, safe_left, safe_right),
                 clamp(state.stone.y, safe_top, safe_bottom),
@@ -175,9 +145,7 @@ class AirHockeyAI:
         if guard is not None:
             return guard
 
-        # 冰壶在自己前方且进了攻击区才主动追。
-        # 这里原来直接瞄冰壶当前位置 → 球动了轴才追，永远慢一拍；
-        # 现在过一遍 _lead_target 加上球槌响应延迟的提前量。
+        # 冰壶在自己前方且进了攻击区才主动追；_lead_target 补上球槌响应延迟的提前量
         if stone_in_attack_zone and not stone_behind_ai:
             lead_x, lead_y = self._lead_target(state, state.stone.x, state.stone.y)
             strike_x, strike_y = self._strike_through(state, lead_x + error, lead_y)
@@ -187,12 +155,11 @@ class AirHockeyAI:
                 stalled_stone_phase,
             )
 
-        if state.stone.vy < -25.0:
+        if state.stone.vy < INCOMING_VY:
             # 冲门快球之外的来球（含先撞墙再进门的）：预判它从防守线哪个 X 穿过。
             # 仿真难度的 prediction 系数靠这一支区分强弱，不能并进冲门快球那一支。
             predicted_x = self._predict_stone_x(state, state.ai_home_y, prediction)
-            blended_x = core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
-            target_x = clamp(blended_x + error, safe_left, safe_right)
+            target_x = clamp(self._blend_with_center(predicted_x, difficulty) + error, safe_left, safe_right)
         elif difficulty.attack_line >= core.RINK_CENTER_Y:
             # 实时首帧速度尚未知，先按当前位置对齐防守；仿真难度不变。
             lead_x, _lead_y = self._lead_target(state, state.stone.x, state.stone.y)
@@ -218,9 +185,14 @@ class AirHockeyAI:
         if not core.GOAL_LEFT - margin <= predicted_x <= core.GOAL_RIGHT + margin:
             return None
         self._goal_guard = True
-        blended_x = core.RINK_CENTER_X * (1.0 - state.difficulty.prediction) + predicted_x * state.difficulty.prediction
+        blended_x = self._blend_with_center(predicted_x, state.difficulty)
         strike_x, strike_y = self._strike_through(state, blended_x + error, guard_y)
         return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom), "idle")
+
+    @staticmethod
+    def _blend_with_center(predicted_x, difficulty):
+        """按难度的 prediction 系数，在场地中线和预测穿线点之间取值。"""
+        return core.RINK_CENTER_X * (1.0 - difficulty.prediction) + predicted_x * difficulty.prediction
 
     @staticmethod
     def _strike_through(state: GameState, target_x: float, target_y: float):
@@ -244,17 +216,20 @@ class AirHockeyAI:
         """AI 开球时，就位了才切到击球阶段。"""
         if not (state.awaiting_serve and state.current_server == "ai" and state.serve_phase == "positioning"):
             return state.serve_phase
-        setup_y = core.RINK_CENTER_Y - core.MALLET_RADIUS - core.STONE_RADIUS - AI_SERVE_SETUP_GAP
         arrival_tolerance = max(2.0, state.difficulty.ai_speed * dt)
-        if math.hypot(state.ai_x - core.RINK_CENTER_X, state.ai_y - setup_y) <= arrival_tolerance:
+        if math.hypot(state.ai_x - core.RINK_CENTER_X, state.ai_y - self._serve_setup_y()) <= arrival_tolerance:
             return "striking"
         return state.serve_phase
 
     @staticmethod
-    def _choose_serve_target(state: GameState) -> AIDecision:
+    def _serve_setup_y() -> float:
+        """AI 开球时球槌的站位：中线后方隔一个冰壶。"""
+        return core.RINK_CENTER_Y - core.MALLET_RADIUS - core.STONE_RADIUS - AI_SERVE_SETUP_GAP
+
+    def _choose_serve_target(self, state: GameState) -> AIDecision:
         if state.current_server == "ai":
             if state.serve_phase == "positioning":
-                target_y = core.RINK_CENTER_Y - core.MALLET_RADIUS - core.STONE_RADIUS - AI_SERVE_SETUP_GAP
+                target_y = self._serve_setup_y()
             else:
                 target_y = core.RINK_CENTER_Y
         else:
@@ -263,17 +238,14 @@ class AirHockeyAI:
 
     def _choose_stalled_stone_target(self, state, safe_left, safe_right, safe_top, safe_bottom) -> AIDecision:
         """先侧移、后退、对齐，避免穿过身后的冰壶造成乌龙球。"""
-        minimum_distance = core.STONE_RADIUS + core.MALLET_RADIUS
-        clearance = minimum_distance + 8.0
-        tolerance = max(3.0, minimum_distance * 0.1)
+        clearance, tolerance, staging_y = self._retrieve_geometry(state.stone.y)
+        staging_y = clamp(staging_y, safe_top, safe_bottom)
         # 侧移途中沿用已经选择的方向，不因球心在球槌左右抖动而反复换边。
         side_x = state.target_x if state.stalled_stone_phase == "sidestepping" else state.ai_x
         side = 1.0 if side_x >= state.stone.x else -1.0
         if not safe_left <= state.stone.x + side * clearance <= safe_right:
             side = -side
         staging_x = clamp(state.stone.x + side * clearance, safe_left, safe_right)
-        back_line = core.RINK_TOP + core.MALLET_RADIUS + core.GOAL_POST_RADIUS + 8.0
-        staging_y = clamp(max(back_line, state.stone.y - clearance), safe_top, safe_bottom)
         striking_x = clamp(state.stone.x, safe_left, safe_right)
         striking = state.stalled_stone_phase == "striking" and state.stone.y >= state.ai_y
         if not striking and state.ai_y > staging_y + tolerance:
@@ -296,19 +268,20 @@ class AirHockeyAI:
 
     RETRIEVE_PHASES = ("sidestepping", "positioning", "aligning", "striking")
 
-    def _retrieve_phase(self, state) -> str:
-        """按球槌当前所在位置判断回收走到哪一步，且**只前进不后退**。
-
-        停滞球规划器靠 state.stalled_stone_phase == "striking" 才肯给出
-        "从后往前推"的目标；实机下那个字段永远是 "idle"，所以这里自己算。
-
-        只前进很关键：开始推球时球槌会越过 staging 线，若按位置重算就会退回
-        "sidestepping"，于是又绕一圈 —— 模拟里就是这样无限循环的。
-        """
-        clearance = core.STONE_RADIUS + core.MALLET_RADIUS + 8.0
+    @staticmethod
+    def _retrieve_geometry(stone_y):
+        """回收用的 (侧移间距, 到位容差, 未夹取的绕后站位 y)。"""
+        contact = core.STONE_RADIUS + core.MALLET_RADIUS
+        clearance = contact + 8.0
         back_line = core.RINK_TOP + core.MALLET_RADIUS + core.GOAL_POST_RADIUS + 8.0
-        staging_y = max(back_line, state.stone.y - clearance)
-        tolerance = max(3.0, (core.STONE_RADIUS + core.MALLET_RADIUS) * 0.1)
+        return clearance, max(3.0, contact * 0.1), max(back_line, stone_y - clearance)
+
+    def _retrieve_phase(self, state) -> str:
+        """按球槌当前位置判断回收走到哪一步，只前进不后退。
+
+        推球时球槌会越过绕后站位线，若按位置重算就会退回侧移、又绕一圈。
+        """
+        clearance, tolerance, staging_y = self._retrieve_geometry(state.stone.y)
         behind = state.ai_y <= staging_y + tolerance
         aligned = abs(state.ai_x - state.stone.x) <= tolerance
         if behind and aligned:
@@ -328,17 +301,11 @@ class AirHockeyAI:
     def _lead_target(self, state: GameState, lead_x: float, lead_y: float):
         """把目标从"冰壶现在的位置"提前到"球槌来得及赶到的、冰壶将要经过的位置"。
 
-        做法：按真实物理（摩擦、撞墙反弹）逐微步推演冰壶，取第一个满足
+        按真实物理（摩擦、撞墙反弹）逐微步推演冰壶，取第一个满足
             |冰壶(t) − 球槌| ≤ mallet_speed · t
-        的点，也就是球槌以 mallet_speed 直线赶过去能先到的最早拦截点。
-        MAX_LEAD_TIME 内都赶不上时，瞄冰壶在 MAX_LEAD_TIME 时会到的位置 —— 依然在它的
-        真实路径上、在它前方。
-
-        ⚠️ 不能在追不上时退回瞄"冰壶现在的位置"：实时链路里冰壶进入机器半场、又不是正对
-        球门时，旧写法就这样把球槌从防守线上正确的拦截点叫走，往前冲 200 多单位后一路追在
-        球后面（几乎接不到球）。也不能用"反复迭代 距离/速度"：冰壶比球槌快时会发散到角落。
-
-        没有球槌速度模型时原样返回 —— 仿真与不传该参数时行为不变。
+        的点；MAX_LEAD_TIME 内都赶不上时，瞄冰壶在 MAX_LEAD_TIME 时的位置（仍在它前方的路径上）。
+        追不上时不能退回瞄冰壶当前位置（会把球槌从拦截点叫走、一路追在球后面），
+        也不能反复迭代"距离/速度"（冰壶比球槌快时会发散）。没有球槌速度模型时原样返回。
         """
         if self.mallet_speed is None or self.mallet_speed <= 0.0:
             return lead_x, lead_y

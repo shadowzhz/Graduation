@@ -4,7 +4,7 @@
 - CurlingState 的 position/velocity/timestamp/confidence 语义与方向属性
 - Detector 输出统一为 CurlingState
 - Predictor 输入 CurlingState、输出预测终点
-- VisionRuntime 暴露 CurlingState 与轨迹调试信息（当前坐标/速度方向/预测终点）
+- VisionRuntime 暴露 CurlingState 与基于它的预测结果
 """
 
 from pathlib import Path
@@ -12,7 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from air_hockey.app.vision_runtime import TrajectoryDebug, VisionRuntime
+from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.physics import StoneMotion
 from air_hockey.prediction import TrajectoryPredictor
@@ -90,13 +90,6 @@ def test_detector_returns_curling_state():
     assert result.confidence > 0.0
 
 
-def test_predict_endpoint_matches_trajectory_tail():
-    predictor = TrajectoryPredictor()
-    state = CurlingState(x=300.0, y=400.0, vx=200.0, vy=-100.0)
-    endpoint = predictor.predict_endpoint(state)
-    assert endpoint == predictor.predict(state)[-1]
-
-
 def test_predict_accepts_curling_state_like_motion():
     predictor = TrajectoryPredictor()
     x, y, vx, vy = 280.0, 480.0, 150.0, -220.0
@@ -120,7 +113,7 @@ class _MockDetector:
         return None
 
 
-def test_vision_runtime_exposes_curling_state_and_debug():
+def test_vision_runtime_exposes_curling_state_and_prediction():
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     detector = _MockDetector(
         [
@@ -139,7 +132,5 @@ def test_vision_runtime_exposes_curling_state_and_debug():
 
     assert isinstance(result.curling_state, CurlingState)
     assert result.curling_state.confidence == 0.7
-    assert isinstance(result.trajectory_debug, TrajectoryDebug)
-    assert result.trajectory_debug.position == result.curling_state.position
-    assert result.trajectory_debug.direction == result.curling_state.direction
-    assert result.trajectory_debug.predicted_endpoint == result.trajectory[-1]
+    assert result.prediction.source_state is result.curling_state
+    assert result.prediction.endpoint == result.prediction.trajectory[-1]

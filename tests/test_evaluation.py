@@ -20,7 +20,6 @@ from air_hockey.evaluation import (
     endpoint_error,
     evaluate_result,
     position_errors,
-    run_experiment,
     velocity_errors,
 )
 from air_hockey.prediction import PredictionState
@@ -100,8 +99,7 @@ def test_evaluate_result_metrics_match_manual_calculation():
     assert abs(result.filtered_error.mean - (0.5 + 0.5 + 0.0) / 3) < 1e-9
     assert result.filtered_error.maximum == 0.5
 
-    assert abs(result.endpoint_error - math.hypot(1.0, 1.0)) < 1e-9
-    assert result.estimated_endpoint_error == result.endpoint_error
+    assert abs(result.estimated_endpoint_error - math.hypot(1.0, 1.0)) < 1e-9
     assert result.oracle_endpoint_error is None
 
 
@@ -135,7 +133,6 @@ def test_experiment_supports_multiple_runs_and_aggregates():
     assert len(report.runs) == 3
     assert report.observation_error.count == 3 * (config.steps + 1)
     assert report.filtered_error.count == 3 * (config.steps + 1)
-    assert report.endpoint_error.count == 3
     assert report.estimated_endpoint_error.count == 3
     assert report.oracle_endpoint_error.count == 3
     assert report.velocity_error.count == 3 * (config.steps + 1)
@@ -147,7 +144,7 @@ def test_experiment_supports_multiple_runs_and_aggregates():
 
 
 def test_experiment_report_to_json_and_console_summary():
-    report = run_experiment(ExperimentConfig(runs=2, seed=1, predict_step=10, steps=120))
+    report = Experiment(ExperimentConfig(runs=2, seed=1, predict_step=10, steps=120)).run()
 
     payload = json.loads(report.to_json())
     assert set(payload.keys()) == {"config", "summary", "runs"}

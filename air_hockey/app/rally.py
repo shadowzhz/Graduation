@@ -1,8 +1,7 @@
-"""纯连续物理导引控制器。
+"""实时回合控制：把 AI 目标转成下发目标，处理放手、遮挡保持和回收不了的死球。
 
-架空离散状态机的模式切换，目标由连续物理导引函数直接生成。
-RallyState（WAITING / DEFENDING / ATTACKING / RECOVERING）纯粹作为显示与诊断的状态观察器标签，
-彻底杜绝模式切换对运动目标的离散截断与机械顿挫。
+目标坐标直接取 AI 的连续决策，不按状态改写；RallyState（WAITING / DEFENDING /
+ATTACKING / RECOVERING）主要用于显示与诊断。
 """
 
 from __future__ import annotations
@@ -14,12 +13,11 @@ from typing import TYPE_CHECKING
 
 from .. import core_config as core
 from ..control.link import TARGET_MAX_AGE
-from .vision_runtime import AI_HOME_Y
 
 if TYPE_CHECKING:
     from .vision_runtime import VisionResult
 
-READY_POSITION = (core.RINK_CENTER_X, AI_HOME_Y)
+READY_POSITION = (core.RINK_CENTER_X, core.AI_HOME_Y)
 ARRIVAL_TOLERANCE = core.STONE_RADIUS
 
 
@@ -42,23 +40,20 @@ class RallyDecision:
     held_target: bool = False
 
 
-# ★ 遮挡保持：球槌压到球上时，球被球槌挡住 → 检测消失 → 轨道丢弃 →
-# track_confirmed=False → rally 切 RECOVERING、目标回 READY → 球槌退开 →
-# 球又可见 → 再去 → 再次遮挡 …… 现场日志里连续循环好几轮。
-#
-# 判据故意放宽：**只要刚追击过、且球槌还在那个目标附近，就当是它自己挡的**。
-# 现场实测把半径/窗口收紧时会"只保持一帧就放弃"，所以取宽值；
-# 真正兜底的是窗口上限（超时一定会回 READY），不会永远抱着一个陈旧目标。
+# 遮挡保持：球槌压到球上时球被挡住，检测消失、轨道在宽限期后被丢弃；这时若回 READY，
+# 球槌一退开球又出现，就会"逼近 → 遮挡 → 回位"循环。所以刚追过、且球槌还在最后目标附近时，
+# 保持原目标让它把这一下做完。判据故意放宽（收紧时实测只保持一帧就放弃），超时一定回 READY。
 OCCLUSION_HOLD_SECONDS = 1.0       # 刚丢多久之内算"可能只是被挡"
-OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡的"（球台单位，约 139mm）
+OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡的"（球台单位，约 136mm）
 
 # 迟滞与防抖参数：消除状态机在分界线和速度零点附近的高频横跳
-MIDLINE_HYSTERESIS = 12.0          # 中线迟滞带（球台单位，约 11mm），进攻态需退至 392 才解除
-OUTGOING_VEL_THRESHOLD = 20.0      # 人类半场离开球门的速度阈值，低于此值不提前放弃防守
+# （2026-10-29 场地 Y 方向改为各向同性单位，下面纯 Y 的量按 ×1.449 换算，毫米含义不变。）
+MIDLINE_HYSTERESIS = 17.0          # 中线迟滞带（球台单位，约 16mm），进攻态需退至中线 +17 才解除
+OUTGOING_VEL_THRESHOLD = 29.0      # 人类半场离开球门的速度阈值，低于此值不提前放弃防守
 STATE_DWELL_SECONDS = 0.08         # 最小状态驻留时间（80ms），防止单帧图像噪点引起状态来回抽搐
-# 放手迟滞：往外飞的球预测停点越过中线就放手；放手后要预测停点回落到中线以内这么多才重新进攻。
-# 现场 play2 3.58s：打软的球停点在 434→378 之间随速度估计抖动，没有迟滞就会放手/进攻来回切。
-LET_GO_HYSTERESIS = 40.0
+# 放手迟滞：往外飞的球预测路线越过中线就放手；放手后要回落到中线以内这么多才重新进攻。
+# 打软的球预测随速度估计抖动，没有迟滞会在放手/进攻之间来回切。
+LET_GO_HYSTERESIS = 58.0
 # 只有"刚被我们打过"的球才放手：球槌与冰壶中心距离进过接触距离 + TOUCH_MARGIN 才算碰过
 # （PLC 位置约晚 20~30ms，留余量）。碰过之后 TOUCH_MEMORY 秒内往外飞才放手；
 # 没碰过的球（例如从机器端角落弹出来的）照样进攻。play2 里三次真实击打最近距离 14~34。
@@ -72,7 +67,7 @@ class RallyController:
         """
         self.state = RallyState.WAITING
         self.reachable_bounds = reachable_bounds
-        # ★ 遮挡保持用的记忆（见 update 里的说明）
+        # 遮挡保持用的记忆（见 OCCLUSION_* 常量）
         self._last_target = None
         self._last_seen_at = 0.0
         self._last_active_state = RallyState.WAITING
@@ -121,7 +116,7 @@ class RallyController:
             target = None
             reason = "invalid/stale puck state; target cleared"
         elif result.track_confirmed and stone is not None:
-            # 速度方向判断引入死区：在真人半场只有明确朝对方门滑行（vy > 20）才算 outgoing；
+            # 速度方向判断引入死区：在真人半场只有明确朝对方门滑行（vy > OUTGOING_VEL_THRESHOLD）才算 outgoing；
             # 速度在零点附近波动或横向滑动时维持防守准备，避免水平横跳。
             if stone.speed <= core.STONE_STOP_SPEED:
                 direction = "still"
@@ -132,8 +127,8 @@ class RallyController:
             else:
                 direction = "lateral"
 
-            # 中线空间迟滞：若当前正在进攻，冰壶需退回到中线以远（> 380 + 12 = 392）才解除进攻；
-            # 尚未进攻时，冰壶一旦踏入机器半场（<= 380）立即触发进攻。
+            # 中线空间迟滞：若当前正在进攻，冰壶需退回到中线以远（> 中线 + MIDLINE_HYSTERESIS）才解除进攻；
+            # 尚未进攻时，冰壶一旦踏入机器半场（<= 中线）立即触发进攻。
             if previous == RallyState.ATTACKING:
                 machine_half = stone.y <= (core.RINK_CENTER_Y + MIDLINE_HYSTERESIS)
             else:
@@ -144,7 +139,7 @@ class RallyController:
                 self._touched_at = now
             # 冰壶往对方飞时，只有**刚被我们打过**、且它自己能飞出机器半场才放手回 READY（不追第二次）；
             # 打软了、按物理会停在机器半场的慢球，以及没碰过、从角落弹出来的球照样进攻。
-            prediction = getattr(result, "prediction", None)
+            prediction = result.prediction
             # 判据是"预测路线会不会越过中线"，不是停点：快球会在对方半场撞墙弹回、停点落回我方半场，
             # 那也是先进了人那半场，回来时按来球防守。放手后回落到中线以内 LET_GO_HYSTERESIS 才重新进攻。
             line = core.RINK_CENTER_Y - (LET_GO_HYSTERESIS if self._letting_go else 0.0)
@@ -166,49 +161,32 @@ class RallyController:
                 if decision is None or not all(math.isfinite(v) for v in (decision.target_x, decision.target_y)):
                     target = None
                     reason = "invalid/missing AI target; target cleared"
+                elif machine_half and puck_stopped and not self.can_retrieve(stone):
+                    # 不能盲目直穿身后的球回 READY，那会从前侧推向自家球门。
+                    self.state = RallyState.RECOVERING
+                    target = None
+                    reason = (f"puck unreachable (stopped at y={stone.y:.0f}, "
+                              f"no goal-side contact): target cleared; move puck manually")
+                    self._last_target = None
                 else:
-                    target_y = decision.target_y
-                    unreachable = machine_half and puck_stopped and not self.can_retrieve(stone)
-                    if unreachable:
-                        # 不能盲目直穿身后的球回 READY，那会从前侧推向自家球门。
-                        self.state = RallyState.RECOVERING
-                        reason = (f"puck unreachable (stopped at y={stone.y:.0f}, "
-                                  f"no goal-side contact): target cleared; move puck manually")
-                        self._last_target = None
-                    elif machine_half and puck_stopped:
-                        # 死球（冰壶在自己半场停住）必须上去回收，否则回合停住 —— 不设上限。
+                    if machine_half and puck_stopped:
+                        # 死球（冰壶在自己半场停住）必须上去回收，否则回合停住
                         reason = "machine-half puck stopped: retrieve"
                     elif machine_half:
                         reason = "machine-half puck moving: pursue"
                     else:
                         reason = "human-half puck: defend/prepare"
-                    if unreachable:
-                        target = None
-                    else:
-                        target = (decision.target_x, target_y)
-                        # ★ 记下这次的有效目标 —— 供"球槌遮挡"时保持用
-                        self._last_target = target
-                        self._last_active_state = self.state
+                    target = (decision.target_x, decision.target_y)
+                    self._last_target = target
+                    self._last_active_state = self.state
             else:
                 reason = "puck moving away; READY"
-                # ★ 主动回 READY 时清掉旧目标 —— 否则后面一次遮挡会把一个
-                #   陈旧的追击点"复活"，机械臂又冲回去。
+                # 主动回 READY 时清掉旧目标，否则之后一次遮挡会把陈旧的追击点复活
                 self._last_target = None
-            # ★ 只要这一帧有确认的轨道（不管走哪一支），就刷新时间戳。
-            #   原来只在"机器半场追击"那一支里刷新 —— 如果中间夹了一帧
-            #   "球飞走"（target=READY），时间戳就不动，保持窗口会悄悄过期，
-            #   表现为"遮挡保持只成功一帧、下一帧就放弃"（现场日志里正是如此）。
+            # 只要这一帧有确认的轨道（不管走哪一支）就刷新，否则夹一帧"球飞走"保持窗口就会悄悄过期
             self._last_seen_at = now
         else:
-            # ★★★ 遮挡保持：球槌压到球上时，球会被球槌挡住 —— 检测消失、
-            # 轨道在宽限期（max_missed_frames）之后被丢弃、track_confirmed 变 False。
-            # 而"球槌压到球上"恰恰是它该做的事，于是出现
-            #     逼近球 → ATTACKING->RECOVERING(no puck) → 目标回 READY → 退开
-            #     → 球又可见 → 再去 → 再次遮挡 → 循环
-            # 现场日志里连续好几轮（mallet 239→175→143 退开 → 246→…→143 再来）。
-            #
-            # 判据：**球槌就停在最后那个目标附近**（说明是它自己挡的），
-            # 且刚丢不久 → 保持原目标和原状态，让它把这一下做完。
+            # 遮挡保持（见 OCCLUSION_* 常量）
             if (self._last_target is not None
                     and 0 <= now - self._last_seen_at <= OCCLUSION_HOLD_SECONDS
                     and math.dist(position, self._last_target) <= OCCLUSION_KEEP_RADIUS):
@@ -217,10 +195,7 @@ class RallyController:
                 held_target = True
                 reason = "puck hidden by mallet: hold target"
             elif self._last_target is not None:
-                # ★ 没保持成功时把原因写进 reason —— 现场一次就能看出是
-                #   "超时"还是"球槌离太远"。
-                #   age 取整到秒：否则每帧都变，日志会被这行刷屏，
-                #   把真正的故障信息（比如"轴故障位=X"）淹掉。
+                # 没保持成功时写明是超时还是球槌离太远；age 取整到秒，免得每帧都变、把日志刷屏
                 age = now - self._last_seen_at
                 gap = math.dist(position, self._last_target)
                 reason = f"no puck; READY (hold rejected: age={age:.0f}s gap={gap:.0f})"

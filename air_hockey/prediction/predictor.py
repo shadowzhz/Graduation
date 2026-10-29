@@ -19,11 +19,8 @@ from .state import PredictionState
 
 
 def default_max_simulation_steps(substep: float) -> int:
-    """按物理参数推算步数预算：最高速在摩擦下减到停止所需时长再留 25% 余量。
-
-    固定 4000 步（约 16.7s）只比最高速停止时长（1100/72 ≈ 15.3s）多 9%，
-    摩擦参数一旦按实台辨识变小就会耗尽预算、实时线程抛错。预算随参数自动放宽，
-    且不低于原来的 PREDICTION_MAX_SIMULATION_STEPS。
+    """按物理参数推算步数预算：最高速在摩擦下减到停止所需时长再留 25% 余量，且不少于
+    PREDICTION_MAX_SIMULATION_STEPS。预算随摩擦参数放宽，摩擦辨识得更小时也不会耗尽、让实时线程抛错。
     """
     if core.STONE_FRICTION_DECELERATION <= 0.0:
         return core.PREDICTION_MAX_SIMULATION_STEPS
@@ -135,26 +132,6 @@ class TrajectoryPredictor:
 
         return PredictionState(trajectory, (motion.x, motion.y), duration, source_state)
 
-    def predict_endpoint(
-        self,
-        stone_or_x: Any,
-        y: float | None = None,
-        vx: float | None = None,
-        vy: float | None = None,
-        *,
-        obstacles: Sequence[tuple[float, float]] = (),
-        obstacle_radius: float | None = None,
-    ) -> tuple[float, float]:
-        """输入统一冰壶状态，返回预测终点（冰壶最终停在/离场的位置）。"""
-        return self.predict(
-            stone_or_x,
-            y,
-            vx,
-            vy,
-            obstacles=obstacles,
-            obstacle_radius=obstacle_radius,
-        ).endpoint
-
     @staticmethod
     def _normalize_stone(stone_or_x: Any, y: float | None = None, vx: float | None = None, vy: float | None = None) -> StoneMotion:
         # 仿真侧的 StoneMotion 自带目标速度/响应状态，直接复制保留。
@@ -177,26 +154,3 @@ class TrajectoryPredictor:
         motion.vx, motion.vy = motion._limited_velocity(motion.vx, motion.vy)
         motion.target_vx, motion.target_vy = motion._limited_velocity(motion.target_vx, motion.target_vy)
         return motion
-
-
-_default_predictor = TrajectoryPredictor()
-
-
-def predict_trajectory(
-    stone_or_x: Any,
-    y: float | None = None,
-    vx: float | None = None,
-    vy: float | None = None,
-    *,
-    obstacles: Sequence[tuple[float, float]] = (),
-    obstacle_radius: float | None = None,
-) -> PredictionState:
-    """生成包含摩擦减速与碰撞反弹的预测结果。"""
-    return _default_predictor.predict(
-        stone_or_x,
-        y,
-        vx,
-        vy,
-        obstacles=obstacles,
-        obstacle_radius=obstacle_radius,
-    )

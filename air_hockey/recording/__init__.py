@@ -1,6 +1,6 @@
 """真实运行数据记录模块。"""
 
-from .recorder import RuntimeRecorder, record_simulation_result
+from .recorder import RuntimeRecorder
 from .schema import (
     RECORDING_FORMAT,
     RECORDING_VERSION,
@@ -22,5 +22,4 @@ __all__ = [
     "curling_state_to_dict",
     "plc_request_to_dict",
     "prediction_to_dict",
-    "record_simulation_result",
 ]

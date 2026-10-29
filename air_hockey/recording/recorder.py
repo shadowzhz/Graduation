@@ -3,7 +3,7 @@
 RuntimeRecorder 从实时 VisionResult 中抽取 CurlingState / PredictionState / timestamp / FPS，
 逐帧写入日志（每帧 flush 到系统缓存，fsync 按 sync_interval 限频），
 结束时流式写出统一 JSON；异常退出的日志可恢复。
-未设置输出路径时仅在内存中记录，供有限长度的离线仿真使用。
+未设置输出路径时仅在内存中记录。
 """
 
 from __future__ import annotations
@@ -17,8 +17,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..game_state import CurlingState
-
-from ..simulation import SimulationResult
 from .schema import RECORDING_FORMAT, RECORDING_VERSION, build_document, build_frame
 
 
@@ -232,56 +230,3 @@ class RuntimeRecorder:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
-
-
-def _simulation_states(result: SimulationResult) -> list[CurlingState]:
-    """由滤波轨迹重建逐帧 CurlingState（速度用相邻差分）。"""
-    points = result.filtered_trajectory
-    timestamps = result.timestamps
-    states: list[CurlingState] = []
-    for index, (point_x, point_y) in enumerate(points):
-        if len(points) > 1:
-            if index < len(points) - 1:
-                previous, following = index, index + 1
-            else:
-                previous, following = index - 1, index
-            dt = timestamps[following] - timestamps[previous]
-            vx = 0.0 if dt <= 0.0 else (points[following][0] - points[previous][0]) / dt
-            vy = 0.0 if dt <= 0.0 else (points[following][1] - points[previous][1]) / dt
-        else:
-            vx = vy = 0.0
-        states.append(CurlingState(x=point_x, y=point_y, vx=vx, vy=vy, timestamp=timestamps[index]))
-    return states
-
-
-def record_simulation_result(
-    result: SimulationResult,
-    path: Optional[str | Path] = None,
-    meta: Optional[dict[str, Any]] = None,
-) -> RuntimeRecorder:
-    """把一次仿真结果写成与真实运行一致的记录格式。"""
-    recorder = RuntimeRecorder(path, source="simulation", meta=meta)
-    states = _simulation_states(result)
-
-    dt = 0.0
-    if len(result.timestamps) > 1:
-        dt = result.timestamps[1] - result.timestamps[0]
-    fps = 0.0 if dt <= 0.0 else 1.0 / dt
-
-    prediction = result.prediction
-    predict_index = len(states) - 1
-    source = prediction.source_state
-    if isinstance(source, CurlingState):
-        for index, timestamp in enumerate(result.timestamps):
-            if abs(timestamp - source.timestamp) < 1e-9:
-                predict_index = index
-                break
-
-    for index, state in enumerate(states):
-        recorder.record_frame(
-            timestamp=result.timestamps[index],
-            fps=fps,
-            curling_state=state,
-            prediction=prediction if index == predict_index else None,
-        )
-    return recorder

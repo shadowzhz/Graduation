@@ -132,7 +132,8 @@ class MotionSimulator:
         initial_x = generator.uniform(core.RINK_LEFT + radius, core.RINK_RIGHT - radius)
         initial_y = generator.uniform(core.RINK_CENTER_Y, core.RINK_BOTTOM - radius)
         angle = generator.uniform(math.radians(210.0), math.radians(330.0))
-        speed = generator.uniform(150.0, 300.0)
+        # 摩擦按实测调大到 230 后，原 150~300 的球大多滑不到墙；现场击球约 760mm/s ≈ 840 单位/s
+        speed = generator.uniform(300.0, 600.0)
         config = SimulationConfig(
             initial_x=initial_x,
             initial_y=initial_y,
@@ -267,9 +268,3 @@ class MotionSimulator:
                 prediction_frame=source_index,
             )
         return results
-
-
-def run_simulation(config: Optional[SimulationConfig] = None, predict_step: Optional[int] = None) -> SimulationResult:
-    """便捷入口：用给定配置（默认场景）运行一次仿真。"""
-    simulator = MotionSimulator(config) if config is not None else MotionSimulator.default()
-    return simulator.simulate(predict_step=predict_step)

@@ -24,7 +24,7 @@ class CountingPredictor(TrajectoryPredictor):
 
 
 def ai_home_y():
-    return layout.RINK_TOP + (layout.RINK_CENTER_Y - layout.RINK_TOP) * 0.28
+    return layout.AI_HOME_Y
 
 
 def make_state(stone_x, stone_y, vx=0.0, vy=0.0, ai_y=None):
@@ -72,9 +72,9 @@ def test_rear_recovery_contacts_from_reachable_goal_side():
     link = PLCLink("offline")
     bounds = link.reachable_bounds
     minimum_distance = layout.STONE_RADIUS + layout.MALLET_RADIUS
-    for x, y, mallet_x in ((300, 140, 300), (480, 180, 480), (70, 180, 150)):
+    for x, y, mallet_x in ((300, 182, 300), (480, 240, 480), (70, 240, 150)):
         ai = AirHockeyAI(recovery_bounds=bounds)
-        state = make_state(x, y, ai_y=250)
+        state = make_state(x, y, ai_y=342)
         state.ai_x = mallet_x
         for _ in range(1000):
             decision = ai.choose_target(state)
@@ -194,7 +194,8 @@ def test_defense_uses_injected_predictor():
 
 
 def test_default_forecast_reaches_home_line_and_guides_defense():
-    state = make_state(260.0, 500.0, vx=180.0, vy=-250.0)
+    # 场地 Y 拉长 + 摩擦按实测调大后，原来 (180, -250) 的球滑不到防守线，初速相应加大
+    state = make_state(260.0, 704.0, vx=300.0, vy=-900.0)
     ai = AirHockeyAI()
     prediction = ai.predictor.predict(state.stone)
     home = state.ai_home_y
@@ -204,7 +205,7 @@ def test_default_forecast_reaches_home_line_and_guides_defense():
         if y1 <= home < y0
     ]
     assert crossings
-    assert abs(crossings[0] - 519.55) < 0.1
+    assert abs(crossings[0] - 434.16) < 0.1
     assert abs(ai._predict_stone_x(state, home, prediction) - crossings[0]) < 1e-9
     decision = ai.choose_target(state, prediction=prediction)
     expected_x = layout.RINK_CENTER_X * (1.0 - NO_ERROR.prediction) + crossings[0] * NO_ERROR.prediction
@@ -307,3 +308,14 @@ def test_slow_ball_that_stops_before_defense_line_is_attacked_not_guarded():
     ai = AirHockeyAI()
     decision = ai.choose_target(_live_state(300.0, 330.0, 0.0, -70.0))
     assert decision.target_y > ai_home_y() + 100.0
+
+
+def test_reset_clears_retrieve_memory_so_next_puck_starts_from_idle():
+    """上一颗球回收到 striking 后，新放的静止球不能直接从 striking 开始斜着推。"""
+    ai = AirHockeyAI()
+    first = make_state(300.0, 250.0, ai_y=250.0 - 65.0)   # 已在球后方且对齐
+    assert ai.choose_target(first).stalled_stone_phase == "striking"
+    ai.reset()
+    second = make_state(480.0, 300.0, ai_y=200.0)
+    second.ai_x = 300.0
+    assert ai.choose_target(second) == AirHockeyAI().choose_target(second)

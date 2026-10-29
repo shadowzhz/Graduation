@@ -184,5 +184,5 @@ class LatencyProbe:
             hints.append(f"轴实测速度只有指令速度的 {100.0 * act / cmd:.0f}%")
         keeps_up = armed and (behind <= 0.1 * armed or (lag is not None and lag < 100.0))
         if keeps_up and act is not None and cmd is not None and act >= 0.8 * cmd:
-            hints.append("轴跟得上指令：瓶颈是 TIA 运动机构速度/加速度设置，可以逐步调大")
+            hints.append("轴跟得上指令：瓶颈是 MC_MoveAbsolute 的 Velocity / TIA 工艺对象的速度、加速度设置，可以逐步调大")
         return " | ".join(parts), hints

@@ -52,7 +52,6 @@ class KalmanFilter:
         # 速度方差恢复为初始值，相当于从突变后重新做最小二乘拟合，旧速度不再拖累估计。
         # 平稳滑行时仍用小 Q 抑制抖动。None = 关闭（离线评估默认）。
         self.maneuver_gate = None if maneuver_gate is None else float(maneuver_gate)
-        self.maneuver_count = 0
         self.reset()
 
     def reset(self) -> None:
@@ -118,7 +117,6 @@ class KalmanFilter:
             # 从上一次原始观测重新起步（速度未知），本次观测照常更新：
             # 等价于从最近两次观测重新开始最小二乘拟合，触发这一帧就有新速度。
             # 不用滤波后的位置 —— 它在机动后已滞后几帧，两点差分会严重高估速度。
-            self.maneuver_count += 1
             self._initialize(previous_measurement, timestamp)
             self._friction_started = False
             self._advance(dt)

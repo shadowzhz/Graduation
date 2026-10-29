@@ -130,20 +130,3 @@ class CameraCalibrator:
             reprojection_error=result.reprojection_error,
             rms=result.rms,
         )
-
-    @staticmethod
-    def load(path: str) -> CalibrationResult:
-        """加载已保存的标定结果。"""
-        with np.load(path) as data:
-            return CalibrationResult(
-                camera_matrix=data["camera_matrix"],
-                dist_coeffs=data["dist_coeffs"],
-                image_size=tuple(int(x) for x in data["image_size"]),
-                reprojection_error=float(data["reprojection_error"]),
-                rms=float(data["rms"]),
-            )
-
-    @staticmethod
-    def undistort(image: np.ndarray, result: CalibrationResult) -> np.ndarray:
-        """使用标定结果进行畸变校正。"""
-        return cv2.undistort(image, result.camera_matrix, result.dist_coeffs)

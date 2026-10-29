@@ -78,11 +78,6 @@ class EvaluationResult:
     estimated_prediction_state: CurlingState | None = None
     motion_events: tuple[str, ...] = ()
 
-    @property
-    def endpoint_error(self) -> float:
-        """Compatibility alias for end-to-end error from the estimated state."""
-        return self.estimated_endpoint_error
-
     def to_dict(self) -> dict:
         return {
             "observation_position_error": self.observation_error.to_dict(),

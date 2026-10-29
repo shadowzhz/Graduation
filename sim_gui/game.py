@@ -10,7 +10,6 @@ import os
 import sys
 import time
 import tkinter as tk
-from dataclasses import replace
 from pathlib import Path
 from tkinter import ttk
 
@@ -26,7 +25,6 @@ from air_hockey.core_config import (
     GOAL_DEPTH,
     GOAL_LEFT,
     GOAL_POST_RADIUS,
-    GOAL_POST_RESTITUTION,
     GOAL_POSTS,
     GOAL_RIGHT,
     MALLET_RADIUS,
@@ -49,9 +47,10 @@ from air_hockey.core_config import (
     STONE_RADIUS,
     STONE_STOP_SPEED,
 )
-from air_hockey.ai import AIDecision, AirHockeyAI
+from air_hockey.ai import AirHockeyAI
 from air_hockey.physics import (
     StoneMotion,
+    bounce_off_post,
     circle_post_contact,
     clamp,
     goal_scorer,
@@ -76,7 +75,7 @@ class AirHockeyGame:
         initial_message = self._serve_instruction("player")
         self.mouse_button_down = False
         self.mouse_control_active = False
-        self.ai_home_y = RINK_TOP + (RINK_CENTER_Y - RINK_TOP) * 0.28
+        self.ai_home_y = core.AI_HOME_Y
         self.score_var = tk.StringVar(value="0 : 0")
         self.status_text = initial_message
         self.status_header_var = tk.StringVar(value=initial_message)
@@ -517,39 +516,21 @@ class AirHockeyGame:
     def _resolve_mallet_goal_posts(mallet_x, mallet_y, mallet_vx, mallet_vy):
         minimum_distance = MALLET_RADIUS + GOAL_POST_RADIUS
         for post_x, post_y in GOAL_POSTS:
-            contact = circle_post_contact(mallet_x, mallet_y, post_x, post_y, minimum_distance)
-            if contact is None:
-                continue
-            _distance, nx, ny = contact
-            mallet_x = post_x + nx * minimum_distance
-            mallet_y = post_y + ny * minimum_distance
-            normal_speed = mallet_vx * nx + mallet_vy * ny
-            if normal_speed < 0:
-                impulse = (1.0 + GOAL_POST_RESTITUTION) * normal_speed
-                mallet_vx -= impulse * nx
-                mallet_vy -= impulse * ny
+            hit = bounce_off_post(mallet_x, mallet_y, mallet_vx, mallet_vy, post_x, post_y, minimum_distance)
+            if hit is not None:
+                mallet_x, mallet_y, mallet_vx, mallet_vy, _bounced = hit
         return mallet_x, mallet_y, mallet_vx, mallet_vy
 
     @staticmethod
     def _keep_mallet_clear_of_outer_corners(mallet_x, mallet_y, mallet_vx, mallet_vy):
-        stone_x_values = (RINK_LEFT + STONE_RADIUS, RINK_RIGHT - STONE_RADIUS)
-        stone_y_values = (RINK_TOP + STONE_RADIUS, RINK_BOTTOM - STONE_RADIUS)
+        # 球槌和冰壶球心能到的四个角至少保持一个接触距离
         minimum_distance = MALLET_RADIUS + STONE_RADIUS
-        for corner_x in stone_x_values:
-            for corner_y in stone_y_values:
-                dx = mallet_x - corner_x
-                dy = mallet_y - corner_y
-                distance_sq = dx * dx + dy * dy
-                if distance_sq >= minimum_distance * minimum_distance:
+        for corner_x in (RINK_LEFT + STONE_RADIUS, RINK_RIGHT - STONE_RADIUS):
+            for corner_y in (RINK_TOP + STONE_RADIUS, RINK_BOTTOM - STONE_RADIUS):
+                contact = circle_post_contact(mallet_x, mallet_y, corner_x, corner_y, minimum_distance)
+                if contact is None:
                     continue
-                if distance_sq > COLLISION_EPSILON:
-                    distance = math.sqrt(distance_sq)
-                    nx, ny = dx / distance, dy / distance
-                else:
-                    nx = RINK_CENTER_X - corner_x
-                    ny = RINK_CENTER_Y - corner_y
-                    length = math.hypot(nx, ny)
-                    nx, ny = nx / length, ny / length
+                _distance, nx, ny = contact
                 mallet_x = corner_x + nx * minimum_distance
                 mallet_y = corner_y + ny * minimum_distance
                 mallet_vx = mallet_vy = 0.0
@@ -736,7 +717,7 @@ class AirHockeyGame:
             self.status_text = ""
         elif self.started:
             self.status_text = "已暂停"
-        elif not self.started:
+        else:
             self.status_text = self._serve_instruction("player")
         if self.status_text != self.last_rendered_status:
             self.status_header_var.set(self.status_text)

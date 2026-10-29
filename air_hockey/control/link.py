@@ -79,11 +79,8 @@ class PLCLink:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._target = None
-            self._target_at = 0.0
+            self._disarm_locked()
             self._feedback = PLCFeedback()
-            self._armed = False
-            self._arm_pending = False
             while not self._commands.empty():
                 try:
                     self._commands.get_nowait()
@@ -103,10 +100,7 @@ class PLCLink:
         PLC physically accepted the disable command; inspect drain_messages().
         """
         with self._lock:
-            self._target = None
-            self._target_at = 0.0
-            self._armed = False
-            self._arm_pending = False
+            self._disarm_locked()
             self._stop_event.set()
             self._disable_on_stop |= disable_axes
             thread = self._thread
@@ -125,10 +119,6 @@ class PLCLink:
     @property
     def connected(self):
         return self._client.connected
-
-    @property
-    def last_send_state(self):
-        return self._client.last_send_state
 
     def diagnostics(self):
         """返回并重置通信频率、跳过次数和相邻目标步距，不代表电机执行确认。"""
@@ -154,13 +144,10 @@ class PLCLink:
         text = (f"周期 {cycles / elapsed:5.1f}Hz | 下发 {counters['sent'] / elapsed:5.1f}Hz | "
                 f"死区跳过 {counters['deadzone']} | 执行中同点跳过 {counters['pending']}")
         text += f" | 步距中位 {median:.1f}mm p95 {p95:.1f}mm"
-        # ★ 这里必须用 self._client —— diagnostics() 里没有名为 client 的局部变量。
-        #   （踩过：写成 client 会 NameError，而且是在每个 [stats] 行上崩，表现为
-        #     "实时处理失败"，看起来像整个视觉管线坏了。）
         client = self._client
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
-        # ★ 夹取比例：目标被"够不到"截住的频率。高 = 经常跑到行程边缘。
+        # 夹取比例：目标被命令包络截住的频率，高说明经常要求够不到的位置
         clamp_stats = getattr(client, "clamp_stats", None)
         counts = clamp_stats.snapshot() if clamp_stats is not None else {"total": 0}
         if counts["total"]:
@@ -171,18 +158,16 @@ class PLCLink:
                 text += "  ← 频繁要求够不到的位置，机械臂长期顶在命令限位上"
         if clamp_stats is not None:
             clamp_stats.reset()
-        # ★ 序号握手的直接指标：PLC 落后几条指令。落后多 = 它跟不上。
+        # 序号握手：PLC 落后几条指令
         if seq_ack is None or seq_now is None:
-            text += f" | 序号 已发 {seq_sent} 条（PLC 未回报 ack，检查 DB1.146）"
+            text += f" | 序号 已发 {seq_sent} 条（PLC 未回报 ack，检查 DB1.94）"
         else:
-            # seq_now 是**序号值**（从时间戳起算），seq_sent 是**发送条数** ——
-            # 两者不是一回事，显示时要分清，否则看起来像 "已发 403 / PLC 939123"。
+            # seq_now 是序号值（从时间戳起算），seq_sent 是发送条数，两者不能混着显示
             lag = (seq_now - seq_ack) & 0x7FFFFFFF
             text += f" | 序号 已发 {seq_sent} 条 / PLC 落后 {lag}"
             if lag > 3:
                 text += "  ← PLC 跟不上，指令在积压"
         return text
-
 
     @property
     def feedback(self):
@@ -205,16 +190,10 @@ class PLCLink:
 
     @property
     def reachable_bounds(self):
-        """AI 可请求的命令范围（游戏坐标），由命令包络（limits.command_*）而非 TRAVEL_* 决定。
+        """AI 可请求的命令范围（游戏坐标），由命令包络 limits.command_* 决定。
 
-        这个属性是给 AI 的 recovery_bounds 用的：告诉它"哪些位置是真能到的"。
-
-        [!] 若用比命令包络更宽的范围（例如机械行程本身），AI 以为够得到、一直瞄外面，而 PLC 在下发时
-        默默把目标夹回包络 —— 表现就是"机械臂长期顶在包络角点上"，
-        而且 AI 的 target 和 PLC 实际下发的 target 对不上（有测试守着这个往返一致）。
-
-        判据很简单：**"AI 能瞄的范围" 必须等于 "PLC 会原样接受的范围"。**
-        这里读的是本 link 的 limits —— 和下发时夹取用的是同一份，所以一定一致。
+        必须和下发时夹取用的是同一份 limits：范围更宽的话 AI 会一直瞄够不到的点，
+        下发时又被默默夹回包络，机械臂长期顶在包络角点上。
         """
         limits = self.limits
         left, top = self.physical_to_game(limits.command_x_min, limits.command_y_min)
@@ -268,12 +247,8 @@ class PLCLink:
     def enable_axes(self):
         return self._run_on_worker("使能", self._enable_on_worker)
 
-    # ---- 单轴操作 ----------------------------------------------------------
-    # 现场需要：某个轴报 801 / 撞限位之后**只把那个轴**撤下来，另一个继续用；
-    # 以及单独回零 / 单独复位。
-    #
-    # ★ 单轴使能不会让程序开始发运动 —— _motion_safe 要求 x_en 和 y_en 同时为真，
-    #   所以只有一个轴使能时是安全的。
+    # ---- 单轴操作：某个轴报故障 / 撞限位后只撤下那个轴，或单独回零 / 复位 ----
+    # 单轴使能不会让程序开始发运动：_motion_safe 要求 x_en 和 y_en 同时为真。
     def set_axis_enable(self, axis, enabled):
         """axis 为 "x" / "y"。使能走 _run_on_worker（要靠新状态才 arm）。"""
         axis = str(axis).lower()
@@ -281,29 +256,17 @@ class PLCLink:
             return False
         if enabled:
             return self._run_on_worker(f"{axis.upper()} 轴使能",
-                                       lambda: self._enable_axis_on_worker(axis))
+                                       lambda: self._enable_on_worker(axis))
         return self._queue_disarmed_command(f"{axis.upper()} 轴撤销",
                                            lambda: self._client.set_axis_enable(axis, False))
 
-    def _enable_on_worker(self):
-        """双轴使能（E 键 / 按钮）。单轴版本见 _enable_axis_on_worker。"""
-        if not self._client.enable_axes():
+    def _enable_on_worker(self, axis=None):
+        """使能双轴（axis=None，E 键 / 按钮）或单轴；授权要等下一份健康的新状态。"""
+        ok = self._client.enable_axes() if axis is None else self._client.set_axis_enable(axis, True)
+        if not ok:
             return False
-        # 报警/回零可能中断旧目标；人工重新授权后不能把未完成目标当作已到达。
-        self._client.reset_tracking()
-        with self._lock:
-            if not self._stop_event.is_set():
-                # Arming awaits a healthy fresh status, never a cached snapshot.
-                # A pre-enable target must not become the first motion command.
-                self._target = None
-                self._target_at = 0.0
-                self._arm_pending = True
-        return True
-
-    def _enable_axis_on_worker(self, axis):
-        if not self._client.set_axis_enable(axis, True):
-            return False
-        # 目标跟踪作废：重新使能后不能把旧目标当作"已到达"（和双轴使能一致）。
+        # 报警/回零可能中断旧目标：重新授权后不能把未完成的目标当作已到达，
+        # 使能前留下的目标也不能成为第一条运动指令。
         self._client.reset_tracking()
         with self._lock:
             if not self._stop_event.is_set():
@@ -323,7 +286,7 @@ class PLCLink:
         return self.set_axis_enable(axis, wanted), wanted
 
     def home_axis(self, axis):
-        """单轴回零。[!] 回零会让该轴动，是刻意的人工动作。"""
+        """单轴回零。当前 MC_Home Mode=0：不移动，直接把当前位置设为原点（见 PLCInterface.home_axis）。"""
         axis = str(axis).lower()
         if axis not in AXIS_NAMES:
             return False
@@ -357,6 +320,13 @@ class PLCLink:
             except queue.Empty:
                 return messages
 
+    def _disarm_locked(self):
+        """撤销授权并清掉目标；调用方必须持有 self._lock。"""
+        self._target = None
+        self._target_at = 0.0
+        self._armed = False
+        self._arm_pending = False
+
     def _run_on_worker(self, name, func):
         with self._lock:
             if self._stop_event.is_set() or not self._client.connected:
@@ -368,10 +338,7 @@ class PLCLink:
         with self._lock:
             if self._stop_event.is_set() or not self._client.connected:
                 return False
-            self._target = None
-            self._target_at = 0.0
-            self._armed = False
-            self._arm_pending = False
+            self._disarm_locked()
             self._commands.put((name, lambda: self._execute_disarmed(func)))
             return True
 
@@ -380,10 +347,7 @@ class PLCLink:
             return func()
         finally:
             with self._lock:
-                self._target = None
-                self._target_at = 0.0
-                self._armed = False
-                self._arm_pending = False
+                self._disarm_locked()
 
     def _drain_commands(self):
         while not self._stop_event.is_set():
@@ -401,10 +365,7 @@ class PLCLink:
 
     def _invalidate_feedback(self):
         with self._lock:
-            self._target = None
-            self._target_at = 0.0
-            self._armed = False
-            self._arm_pending = False
+            self._disarm_locked()
             if self._feedback.valid:
                 self._feedback = PLCFeedback()
             # Commands from the old connection must not be replayed on reconnect.
@@ -495,8 +456,7 @@ class PLCLink:
         feedback = self._publish(status)
         if feedback is None:
             return
-        # ★ 把轴的实际位置交给 client —— 死区判据要用它判断"轴到没到"。
-        #   不更新的话一旦轴没走到上次发的目标，代码会永远跳过（假死）。
+        # 死区判据要用轴的实际位置判断"到没到"，不更新会把没走到的目标当成已到达、一直跳过
         try:
             client.actual_game = (feedback.x, feedback.y)
         except Exception:
@@ -518,10 +478,7 @@ class PLCLink:
             if fault:
                 revoked = self._armed or self._arm_pending
                 interrupted_target = self._target
-                self._armed = False
-                self._arm_pending = False
-                self._target = None
-                self._target_at = 0.0
+                self._disarm_locked()
             elif safe and self._arm_pending:
                 self._armed = True
                 self._arm_pending = False
@@ -584,7 +541,7 @@ class PLCLink:
                 return
             send_start = time.perf_counter()
             sent_sequence = None
-            # ★ 序号只在**真的下发成功**时推进（interface 内部），死区/积压跳过不推进。
+            # 序号只在真正下发成功时推进（interface 内部），死区/执行中跳过不推进
             client.send_linear_move(*target)
             if client.connected and client.last_send_state == "sent":
                 self._sequence_sent += 1
@@ -600,15 +557,11 @@ class PLCLink:
                                          send_start - target_at, sent_x, sent_y, seq=sent_sequence)
             except Exception:
                 pass
-            # 现场诊断累计。整个累计块必须容错 —— 诊断是"非必要"的，
-            # 绝不能让它的任何异常把 worker 线程打死（那会让后续命令全部失效）。
+            # 诊断累计必须容错：任何异常都不能打死 worker 线程
             try:
                 state = client.last_send_state
                 with self._lock:
-                    # ★ "deadzone-resend" 也是真发出去了（目标没变、但轴没到位，
-                    #   所以重发）—— 必须算进"下发 Hz"。原来它落到下面的 else
-                    #   分支，于是现场日志出现"下发 0.0Hz"却其实一直在发，
-                    #   把"轴到底动没动"这个判断彻底带偏。
+                    # deadzone-resend 也真发出去了（目标没变但轴没到位），要算进下发频率
                     if state in ("sent", "deadzone-resend"):
                         self._stats_counters["sent"] += 1
                         self._stats_dists.append(
@@ -627,8 +580,7 @@ class PLCLink:
 
     def _run(self):
         client = self._client
-        # ★ 绝对截止时间排程：原来每轮都 wait(period - 耗时)，
-        #   线程唤醒的固定开销会累加成 +1.5ms 的周期误差（30Hz 只到 28.8）。
+        # 按绝对截止时间排程：每轮 wait(period - 耗时) 会把唤醒开销累加成周期误差（30Hz 只到 28.8）
         next_due = time.perf_counter()
         try:
             while not self._stop_event.is_set():

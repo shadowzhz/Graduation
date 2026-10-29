@@ -155,6 +155,22 @@ class CameraGeometry:
                 )
             homography_matrix = data["homography_matrix"]
             raw_size = data["image_size"]
+            undistorted_points = data["undistorted_points"] if "undistorted_points" in data.files else None
+        # 矩阵是按标定当时的场地四角求的；场地坐标系一改（例如 2026-10-29 改成各向同性），
+        # 旧矩阵会静默把球映射到旧坐标。用存下的四角核对一次，对不上直接拒绝。
+        if undistorted_points is not None:
+            from .. import core_config as core
+            expected = np.array([[core.RINK_LEFT, core.RINK_TOP], [core.RINK_RIGHT, core.RINK_TOP],
+                                 [core.RINK_RIGHT, core.RINK_BOTTOM], [core.RINK_LEFT, core.RINK_BOTTOM]])
+            projected = cv2.perspectiveTransform(
+                np.asarray(undistorted_points, dtype=np.float64).reshape(1, 4, 2),
+                np.asarray(homography_matrix, dtype=np.float64))[0]
+            if np.max(np.linalg.norm(projected - expected, axis=1)) > 0.5:
+                raise ValueError(
+                    f"table calibration file {table_calibration_file} maps the corners to a different rink "
+                    "coordinate system; regenerate it with air_hockey/tools/calibrate_table.py "
+                    "(or recompute from its undistorted_points)"
+                )
         image_size = tuple(int(v) for v in np.asarray(raw_size).ravel())
         if len(image_size) != 2:
             raise ValueError(f"image_size must contain exactly 2 values (width, height), got {raw_size}")
@@ -231,25 +247,17 @@ class CameraGeometry:
             raise ValueError(f"table_roi width and height must be positive: {table_roi}")
         self.table_roi = (x, y, w, h)
 
-    def _get_undistorted_table_bounds(self) -> Tuple[float, float, float, float]:
-        """获取去畸变坐标系下球台矩形的 (ux0, uy0, ux1, uy1)。"""
+    def _linear_mapping(self) -> Tuple[float, float, float, float]:
+        """无 Homography 时的线性映射：table_roi 左上角的去畸变坐标与缩放 (ux0, uy0, scale_x, scale_y)。"""
         if self.table_roi is None:
             raise ValueError("table_roi is not set")
         rx, ry, rw, rh = self.table_roi
         ux0, uy0 = self.raw_to_undistorted(rx, ry)
         ux1, uy1 = self.raw_to_undistorted(rx + rw, ry + rh)
-        return ux0, uy0, ux1, uy1
-
-    def _get_rink_scales(self) -> Tuple[float, float]:
-        """计算去畸变像素到球台坐标的缩放比例 (scale_x, scale_y)。"""
-        ux0, uy0, ux1, uy1 = self._get_undistorted_table_bounds()
-        span_w = max(1.0, ux1 - ux0)
-        span_h = max(1.0, uy1 - uy0)
         rink_left, rink_right, rink_top, rink_bottom = self.rink_bounds
-        return (
-            (rink_right - rink_left) / span_w,
-            (rink_bottom - rink_top) / span_h,
-        )
+        return (ux0, uy0,
+                (rink_right - rink_left) / max(1.0, ux1 - ux0),
+                (rink_bottom - rink_top) / max(1.0, uy1 - uy0))
 
     def raw_to_undistorted(self, raw_x: float, raw_y: float) -> Tuple[float, float]:
         """原始相机像素坐标 -> 去畸变相机像素坐标。
@@ -270,26 +278,8 @@ class CameraGeometry:
 
     def undistorted_to_raw(self, undist_x: float, undist_y: float) -> Tuple[float, float]:
         """去畸变相机像素坐标 -> 原始相机像素坐标（逆投影）。"""
-        if not self.enabled or self.camera_matrix is None or self.new_camera_matrix is None:
-            return float(undist_x), float(undist_y)
-
-        fx = self.new_camera_matrix[0, 0]
-        fy = self.new_camera_matrix[1, 1]
-        cx = self.new_camera_matrix[0, 2]
-        cy = self.new_camera_matrix[1, 2]
-
-        pts_3d = np.array(
-            [[[(float(undist_x) - cx) / fx, (float(undist_y) - cy) / fy, 1.0]]],
-            dtype=np.float32,
-        )
-        projected, _ = cv2.projectPoints(
-            pts_3d,
-            self._zero_rvec,
-            self._zero_tvec,
-            self.camera_matrix,
-            self.dist_coeffs,
-        )
-        return float(projected[0][0][0]), float(projected[0][0][1])
+        raw = self._undistorted_to_raw_array(np.array([[float(undist_x), float(undist_y)]], dtype=np.float64))
+        return float(raw[0, 0]), float(raw[0, 1])
 
     def undistorted_to_table(self, undist_x: float, undist_y: float) -> Tuple[float, float]:
         """去畸变相机像素坐标 -> 球台/场地坐标。
@@ -299,26 +289,16 @@ class CameraGeometry:
         """
         if self.homography_matrix is not None:
             return self._apply_homography(self.homography_matrix, undist_x, undist_y)
-        ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
-        scale_x, scale_y = self._get_rink_scales()
+        ux0, uy0, scale_x, scale_y = self._linear_mapping()
         rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
         table_x = rink_left + (float(undist_x) - ux0) * scale_x
         table_y = rink_top + (float(undist_y) - uy0) * scale_y
         return table_x, table_y
 
     def table_to_undistorted(self, table_x: float, table_y: float) -> Tuple[float, float]:
-        """球台/场地坐标 -> 去畸变相机像素坐标。
-
-        配置了 Homography 时使用其逆矩阵进行透视变换；否则回退为 ROI 线性缩放。
-        """
-        if self.homography_inverse is not None:
-            return self._apply_homography(self.homography_inverse, table_x, table_y)
-        ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
-        scale_x, scale_y = self._get_rink_scales()
-        rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
-        undist_x = ux0 + (float(table_x) - rink_left) / scale_x
-        undist_y = uy0 + (float(table_y) - rink_top) / scale_y
-        return undist_x, undist_y
+        """球台/场地坐标 -> 去畸变相机像素坐标（undistorted_to_table 的逆）。"""
+        undist = self._table_to_undistorted_array(np.array([[float(table_x), float(table_y)]], dtype=np.float64))
+        return float(undist[0, 0]), float(undist[0, 1])
 
     @staticmethod
     def _apply_homography(matrix: np.ndarray, x: float, y: float) -> Tuple[float, float]:
@@ -328,83 +308,57 @@ class CameraGeometry:
         return float(transformed[0][0][0]), float(transformed[0][0][1])
 
     def raw_to_table(self, raw_x: float, raw_y: float) -> Tuple[float, float]:
-        """原始相机像素坐标 -> 球台/场地坐标。
-
-        链式调用: raw pixel -> undistorted pixel -> table coordinate
-        """
+        """原始相机像素坐标 -> 球台/场地坐标（raw -> undistorted -> table）。"""
         undist_x, undist_y = self.raw_to_undistorted(raw_x, raw_y)
         return self.undistorted_to_table(undist_x, undist_y)
 
     def table_to_raw(self, table_x: float, table_y: float) -> Tuple[float, float]:
-        """球台/场地坐标 -> 原始相机像素坐标。
-
-        链式调用: table coordinate -> undistorted pixel -> raw pixel
-        """
-        undist_x, undist_y = self.table_to_undistorted(table_x, table_y)
-        return self.undistorted_to_raw(undist_x, undist_y)
-
+        """球台/场地坐标 -> 原始相机像素坐标（table -> undistorted -> raw）。"""
+        return self.table_to_raw_batch([(table_x, table_y)])[0]
 
     def table_to_raw_batch(
         self, points: Union[Sequence[Tuple[float, float]], np.ndarray]
     ) -> List[Tuple[float, float]]:
-        """球台/场地坐标 -> 原始相机像素坐标（批量）。
-
-        输入约定为 (N, 2) 形状点集合。
-        """
+        """球台/场地坐标 -> 原始相机像素坐标（批量，输入为 (N, 2) 点集）。"""
         if len(points) == 0:
             return []
         arr = np.asarray(points, dtype=np.float64)
-        if arr.shape[0] == 0:
-            return []
         if arr.ndim != 2 or arr.shape[1] != 2:
             raise ValueError(f"points must have shape (N, 2), got {arr.shape}")
-
-        if self.homography_inverse is not None:
-            pts_in = np.ascontiguousarray(arr, dtype=np.float64).reshape(-1, 1, 2)
-            undist = cv2.perspectiveTransform(pts_in, self.homography_inverse).reshape(-1, 2)
-        else:
-            ux0, uy0, _ux1, _uy1 = self._get_undistorted_table_bounds()
-            scale_x, scale_y = self._get_rink_scales()
-            rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
-            undist = np.empty((len(arr), 2), dtype=np.float64)
-            undist[:, 0] = ux0 + (arr[:, 0] - rink_left) / scale_x
-            undist[:, 1] = uy0 + (arr[:, 1] - rink_top) / scale_y
-
-        if not self.enabled or self.camera_matrix is None or self.new_camera_matrix is None:
-            raw = undist
-        else:
-            fx = self.new_camera_matrix[0, 0]
-            fy = self.new_camera_matrix[1, 1]
-            cx = self.new_camera_matrix[0, 2]
-            cy = self.new_camera_matrix[1, 2]
-
-            pts_3d = np.empty((len(undist), 1, 3), dtype=np.float32)
-            pts_3d[:, 0, 0] = (undist[:, 0] - cx) / fx
-            pts_3d[:, 0, 1] = (undist[:, 1] - cy) / fy
-            pts_3d[:, 0, 2] = 1.0
-
-            projected, _ = cv2.projectPoints(
-                pts_3d,
-                self._zero_rvec,
-                self._zero_tvec,
-                self.camera_matrix,
-                self.dist_coeffs,
-            )
-            raw = projected.reshape(-1, 2)
-
+        raw = self._undistorted_to_raw_array(self._table_to_undistorted_array(arr))
         return list(zip(raw[:, 0].tolist(), raw[:, 1].tolist()))
 
-    def raw_velocity_to_table(
-        self,
-        raw_x: float,
-        raw_y: float,
-        raw_vx: float,
-        raw_vy: float,
-        dt: float = 0.01,
-    ) -> Tuple[float, float]:
-        """通过位置微小位移差分计算球台坐标系速度，保证与位置使用同一套坐标转换逻辑。"""
-        if dt <= 0.0:
-            raise ValueError("dt must be positive")
-        tx0, ty0 = self.raw_to_table(raw_x, raw_y)
-        tx1, ty1 = self.raw_to_table(raw_x + raw_vx * dt, raw_y + raw_vy * dt)
-        return (tx1 - tx0) / dt, (ty1 - ty0) / dt
+    def _table_to_undistorted_array(self, table: np.ndarray) -> np.ndarray:
+        """(N, 2) 球台坐标 -> (N, 2) 去畸变像素。"""
+        if self.homography_inverse is not None:
+            pts_in = np.ascontiguousarray(table, dtype=np.float64).reshape(-1, 1, 2)
+            return cv2.perspectiveTransform(pts_in, self.homography_inverse).reshape(-1, 2)
+        ux0, uy0, scale_x, scale_y = self._linear_mapping()
+        rink_left, _rink_right, rink_top, _rink_bottom = self.rink_bounds
+        undist = np.empty((len(table), 2), dtype=np.float64)
+        undist[:, 0] = ux0 + (table[:, 0] - rink_left) / scale_x
+        undist[:, 1] = uy0 + (table[:, 1] - rink_top) / scale_y
+        return undist
+
+    def _undistorted_to_raw_array(self, undist: np.ndarray) -> np.ndarray:
+        """(N, 2) 去畸变像素 -> (N, 2) 原始像素：按新相机矩阵反投影后重新加上畸变。"""
+        if not self.enabled or self.camera_matrix is None or self.new_camera_matrix is None:
+            return undist
+        fx = self.new_camera_matrix[0, 0]
+        fy = self.new_camera_matrix[1, 1]
+        cx = self.new_camera_matrix[0, 2]
+        cy = self.new_camera_matrix[1, 2]
+
+        pts_3d = np.empty((len(undist), 1, 3), dtype=np.float32)
+        pts_3d[:, 0, 0] = (undist[:, 0] - cx) / fx
+        pts_3d[:, 0, 1] = (undist[:, 1] - cy) / fy
+        pts_3d[:, 0, 2] = 1.0
+
+        projected, _ = cv2.projectPoints(
+            pts_3d,
+            self._zero_rvec,
+            self._zero_tvec,
+            self.camera_matrix,
+            self.dist_coeffs,
+        )
+        return projected.reshape(-1, 2)

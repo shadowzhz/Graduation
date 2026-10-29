@@ -170,13 +170,11 @@ class VisionWindow:
         return group
 
     def attach_plc(self, link):
-        """轴命令由现场操作员主动触发；连接成功不自动使能。
+        """加上轴操作按钮和快捷键；轴命令由现场操作员主动触发，连接成功不自动使能。
 
-        ★ 单轴按钮：某个轴报 801 / 撞限位之后可以**只把那个轴**撤下来，
-          另一个继续用；也能单独回零 / 单独复位。
-        ★ 单轴使能**不会**让程序开始追球 —— 运动需要 X、Y 同时使能
-          （PLCLink._motion_safe 要求 x_en and y_en）。
-        [!] 回零会让该轴动（去找参考点），是刻意的人工动作。
+        单轴按钮用于某个轴报故障 / 撞限位后只撤下那个轴，或单独回零 / 复位；
+        单轴使能不会让程序开始追球（运动需要 X、Y 同时使能）。
+        当前 MC_Home Mode=0：回零不移动，直接把当前位置设为原点，见 PLCInterface.home_axis。
         """
         self._plc = link
         both = self._group(self._bar, "双轴")
@@ -200,7 +198,7 @@ class VisionWindow:
         for key, command in (("e", link.enable_axes), ("h", link.home_axes),
                              ("c", link.axes_reset), ("k", self._toggle_cylinder)):
             self.root.bind(key, lambda _event, callback=command: callback())
-        # ★ 大小写区分：小写 = 单轴使能/撤销，大写(Shift) = 单轴回零
+        # 小写 = 单轴使能/撤销，大写（Shift）= 单轴回零
         self.root.bind("x", lambda _event: self._toggle_axis("x"))
         self.root.bind("y", lambda _event: self._toggle_axis("y"))
         self.root.bind("X", lambda _event: self._home_axis("x"))
@@ -236,7 +234,8 @@ class VisionWindow:
     def _home_axis(self, axis):
         link = getattr(self, "_plc", None)
         if link is not None:
-            print(f"[PLC] {axis.upper()} 轴回零 —— 该轴会移动，注意手别在行程里")
+            print(f"[PLC] {axis.upper()} 轴回零 —— 当前位置将被设为原点（MC_Home Mode=0），"
+                  "轴不在参考位置时坐标系会错位")
             link.home_axis(axis)
 
     def _reset_axis(self, axis):
@@ -287,7 +286,7 @@ class VisionWindow:
         self._state.configure(text=name, fg=color)
         self._reason.configure(text=reason)
 
-        stone = None if result is None else result.stone_state
+        stone = None if result is None else result.curling_state
         pair = lambda value, fmt="{:.0f}, {:.0f}": "—" if value is None else fmt.format(*value)
         self._fps.configure(text="" if result is None else f"{result.fps:.0f} fps")
         values = {

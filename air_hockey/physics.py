@@ -64,6 +64,23 @@ def circle_post_contact(circle_x, circle_y, post_x, post_y, minimum_distance):
     return 0.0, nx / length, ny / length
 
 
+def bounce_off_post(x, y, vx, vy, post_x, post_y, minimum_distance):
+    """圆碰门柱：推回接触圆上，朝门柱的法向速度按恢复系数反弹。
+
+    没碰到返回 None，否则返回 (x, y, vx, vy, 是否发生反弹)。
+    """
+    contact = circle_post_contact(x, y, post_x, post_y, minimum_distance)
+    if contact is None:
+        return None
+    _distance, nx, ny = contact
+    normal_speed = vx * nx + vy * ny
+    bounced = normal_speed < 0
+    if bounced:
+        impulse = (1.0 + core.GOAL_POST_RESTITUTION) * normal_speed
+        vx, vy = vx - impulse * nx, vy - impulse * ny
+    return post_x + nx * minimum_distance, post_y + ny * minimum_distance, vx, vy, bounced
+
+
 @dataclass
 class StoneMotion:
     x: float = field(default_factory=lambda: core.RINK_CENTER_X)
@@ -235,17 +252,12 @@ class StoneMotion:
         for post_x, post_y in core.GOAL_POSTS:
             if abs(self.y - post_y) >= minimum_distance or abs(self.x - post_x) >= minimum_distance:
                 continue
-            contact = circle_post_contact(self.x, self.y, post_x, post_y, minimum_distance)
-            if contact is None:
+            hit = bounce_off_post(self.x, self.y, *self.collision_velocity(), post_x, post_y, minimum_distance)
+            if hit is None:
                 continue
-            _distance, nx, ny = contact
-            self.x = post_x + nx * minimum_distance
-            self.y = post_y + ny * minimum_distance
-            vx, vy = self.collision_velocity()
-            normal_speed = vx * nx + vy * ny
-            if normal_speed < 0:
-                impulse = (1.0 + core.GOAL_POST_RESTITUTION) * normal_speed
-                self.set_immediate_velocity(vx - impulse * nx, vy - impulse * ny)
+            self.x, self.y, vx, vy, post_bounce = hit
+            if post_bounce:
+                self.set_immediate_velocity(vx, vy)
                 bounced = True
         return bounced
 

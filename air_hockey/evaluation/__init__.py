@@ -4,7 +4,6 @@ from .experiment import (
     Experiment,
     ExperimentConfig,
     ExperimentReport,
-    run_experiment,
 )
 from .metrics import (
     ErrorStats,
@@ -27,5 +26,4 @@ __all__ = [
     "evaluate_result",
     "position_errors",
     "velocity_errors",
-    "run_experiment",
 ]

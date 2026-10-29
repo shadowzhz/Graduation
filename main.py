@@ -17,18 +17,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent  # 找到 main.py 所在文件夹
 SIM_ROOT = PROJECT_ROOT / "sim_gui"              # 仿真代码（仅 --sim 子进程使用）
 
-# ★★★ Windows 控制台默认是 GBK(936)，打印一个它编不出的字符（² ³ [!] OK …）
-#     就会抛 UnicodeEncodeError 把整个程序打断 —— 现场踩过：
-#         UnicodeEncodeError: 'gbk' codec can't encode character '\xb2'
-#     这里把 stdout/stderr 的编码错误策略改成 replace：编不出的字符显示成 "?"，
-#     但**永远不会再因为一句日志而崩**。改任何提示文案都不用再担心这件事。
+# Windows 控制台默认 GBK，打印编不出的字符（² ³ 等）会抛 UnicodeEncodeError 打断程序；
+# 改成 replace，编不出的字符显示成 "?"。
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(errors="replace")
     except (AttributeError, ValueError, OSError):
-        pass  # 老解释器 / 被重定向到不支持的对象：忽略，不影响运行
+        pass  # 被重定向到不支持 reconfigure 的对象：忽略
 
 from air_hockey.app.live import run_vision
+from air_hockey.control.limits import (
+    DEFAULT_MOTION_MARGIN_MM, TRAVEL_X_MAX, TRAVEL_X_MIN, TRAVEL_Y_MAX, TRAVEL_Y_MIN,
+)
 
 
 def run_game(plc_ip=None, plc_rate=30.0):
@@ -58,10 +58,11 @@ def build_parser():
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
                              "不然轴总是慢一拍、球走了才追到。设 0 关闭提前量。"
                              "这不是 PLC 轴速度设置，需要在现场实测后调准")
-    parser.add_argument("--motion-margin-mm", type=float, default=5.0, metavar="MM",
-                        help="命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
-                             "默认 2（冲到边上可能碰限位开关停轴，频繁发生就调大）。机械行程 X -192..224 / Y -129..187，"
-                             "包络 = 行程内缩它。程序不另设软件行程保护")
+    parser.add_argument("--motion-margin-mm", type=float, default=DEFAULT_MOTION_MARGIN_MM, metavar="MM",
+                        help=f"命令余量：下发目标离机械行程端点（硬件限位开关）再内缩多少毫米，"
+                             f"默认 {DEFAULT_MOTION_MARGIN_MM:g}（冲到边上可能碰限位开关停轴，频繁发生就调大）。"
+                             f"机械行程 X {TRAVEL_X_MIN:g}..{TRAVEL_X_MAX:g} / Y {TRAVEL_Y_MIN:g}..{TRAVEL_Y_MAX:g}，"
+                             "包络 = 行程内缩它，X/Y 另有固定附加余量。程序不另设软件行程保护")
     parser.add_argument("--preview-fps", type=float, default=20.0, help="预览刷新率上限")
     parser.add_argument("--camera-device", default=None, help="相机路径（如 /dev/video2）；不给则依次尝试 /dev/video*")
     parser.add_argument("--calibration", default="calibration/camera_calibration.npz", help="相机内参标定文件")

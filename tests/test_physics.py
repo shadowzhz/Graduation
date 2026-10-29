@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 from air_hockey import core_config as layout
 from air_hockey.physics import (
@@ -7,8 +8,8 @@ from air_hockey.physics import (
     goal_scorer,
     stone_inside_goal_mouth,
 )
-from air_hockey.game_state import GameState, StoneState
-from air_hockey.prediction import TrajectoryPredictor, predict_trajectory
+from air_hockey.game_state import StoneState
+from air_hockey.prediction import TrajectoryPredictor
 
 
 def test_clamp():
@@ -236,8 +237,8 @@ def test_vision_and_sim_produce_identical_trajectory():
     sim_stone = StoneMotion(x=x, y=y, vx=vx, vy=vy)
     sim_traj = predictor.predict(sim_stone)
 
-    # 函数入口 predict_trajectory
-    func_traj = predict_trajectory(x, y, vx, vy)
+    # 裸坐标入口
+    func_traj = predictor.predict(x, y, vx, vy)
 
     assert vision_traj == sim_traj
     assert vision_traj == func_traj
@@ -285,9 +286,9 @@ def test_ai_crossing_matches_shared_prediction():
     ai = ai.AirHockeyAI()
 
     # 验证 AI 的预测直接由其共享的 predictor 提供
-    state = StoneState(x=300.0, y=500.0, vx=80.0, vy=-120.0)
-    game_state = GameState.from_vision(state)
-    target_y = 420.0
+    state = StoneState(x=300.0, y=704.0, vx=150.0, vy=-400.0)
+    game_state = SimpleNamespace(stone=state)   # _predict_stone_x 只用到 stone
+    target_y = 588.0
     predicted_x = ai._predict_stone_x(game_state, target_y=target_y)
 
     # 手动用同个 predictor 算一遍截距，应完全一致
@@ -320,16 +321,15 @@ def test_vision_sim_ai_share_same_prediction_core():
     sim_stone = StoneMotion(x=x, y=y, vx=vx, vy=vy)
     sim_traj = sim_predictor.predict(sim_stone)
 
-    # 3. AI 输入 (GameState.stone)
-    game_state = GameState.from_vision(vision_stone)
-    ai_traj = ai.predictor.predict(game_state.stone)
+    # 3. AI 共享的预测器
+    ai_traj = ai.predictor.predict(vision_stone)
 
     assert vision_traj == sim_traj
     assert vision_traj == ai_traj
 
 
 def test_default_forecast_reaches_stop_after_multiple_bounces():
-    source = StoneMotion(x=300.0, y=380.0, vx=layout.MAX_STONE_SPEED)
+    source = StoneMotion(x=300.0, y=530.0, vx=layout.MAX_STONE_SPEED)
     prediction = TrajectoryPredictor().predict(source)
     expected = StoneMotion(x=source.x, y=source.y, vx=source.vx)
     step = layout.PREDICTION_SUBSTEP
@@ -344,9 +344,10 @@ def test_default_forecast_reaches_stop_after_multiple_bounces():
     assert prediction.endpoint == (expected.x, expected.y)
     assert prediction[-1] == prediction.endpoint
     assert abs(prediction.duration - steps * step) < 1e-9
-    assert prediction.duration > 1024 * step
+    # 摩擦按实测调大（72 -> 230）后最高速约 576 步停下；仍是多次弹墙的完整过程
+    assert prediction.duration > 512 * step
     walls = (layout.RINK_LEFT + layout.STONE_RADIUS, layout.RINK_RIGHT - layout.STONE_RADIUS)
-    assert sum(x in walls for x, _ in prediction) > 2
+    assert sum(x in walls for x, _ in prediction) >= 2
     assert source.vx == layout.MAX_STONE_SPEED
 
 
@@ -393,11 +394,11 @@ def test_current_and_target_velocity_are_capped_without_losing_response():
 
 
 def test_stationary_current_velocity_with_active_response_still_moves():
-    source = StoneMotion(x=300.0, y=380.0, target_vx=150.0, response_active=True)
+    source = StoneMotion(x=300.0, y=530.0, target_vx=400.0, response_active=True)
     prediction = TrajectoryPredictor().predict(source)
     assert prediction.endpoint[0] > source.x + 100.0
     assert prediction.duration > 1.0
-    assert (source.vx, source.target_vx, source.response_active) == (0.0, 150.0, True)
+    assert (source.vx, source.target_vx, source.response_active) == (0.0, 400.0, True)
 
 
 

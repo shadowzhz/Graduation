@@ -17,7 +17,6 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from air_hockey import core_config as core
-from air_hockey.ai import AIDecision
 from air_hockey.app.rally import ARRIVAL_TOLERANCE, READY_POSITION
 from air_hockey.control import PLCLink, PlcControlAdapter
 from air_hockey.control.link import DEFAULT_PERIOD, TARGET_MAX_AGE
@@ -52,7 +51,7 @@ def build_points():
     center_x, ready_y = READY_POSITION
     quarter_width = (core.RINK_RIGHT - core.RINK_LEFT) / 4.0
     return tuple(
-        (name, adapter.build_target(AIDecision(x, ready_y, "idle"), timestamp=0.0))
+        (name, adapter.build_target(x, ready_y, 0.0))
         for name, x in (
             ("READY", center_x), ("LEFT", center_x - quarter_width),
             ("CENTER", center_x), ("RIGHT", center_x + quarter_width), ("READY", center_x),

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from math import hypot
 
 from .types import Track, TrackState
@@ -69,28 +68,6 @@ class StoneTracker:
         self._candidate = None
         self._update_track(detection)
         return [self._track]
-
-    def predict(self, timestamp):
-        """在检测间隔帧上按常速模型返回预测轨迹，不修改内部观测状态。"""
-        # 如果没有跟踪的目标，直接返回空列表
-        if self._track is None:
-            return []
-        timestamp = float(timestamp)                    # 当前帧的时间戳
-        dt = timestamp - self._track.last_timestamp     # 预测时间差
-        return [replace(
-            self._track,
-
-            # 匀速运动模型
-            center_x=self._track.center_x + self._track.vx * dt,
-            center_y=self._track.center_y + self._track.vy * dt,
-
-            last_timestamp=timestamp,
-            age=self._track.age + 1,
-        )]
-
-    def reset(self) -> None:
-        self._track = None
-        self._candidate = None
 
     def predict_position(self, timestamp: float) -> tuple[float, float]:
         """根据最后已知速度外推指定时间戳的位置。"""

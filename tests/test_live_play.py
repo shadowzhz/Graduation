@@ -84,10 +84,10 @@ class _LiveTable:
         if request is None:
             assert result.rally.target is None, (self.sequence, result.rally)
             return result, None
-        limits = self.adapter._limits
+        adapter = self.adapter
         for x, y in (result.rally.target, (request.target_x, request.target_y)):
             assert math.isfinite(x) and math.isfinite(y)
-            assert limits[0] <= x <= limits[1] and limits[2] <= y <= limits[3], (x, y)
+            assert adapter.X_MIN <= x <= adapter.X_MAX and adapter.Y_MIN <= y <= adapter.Y_MAX, (x, y)
         return result, request
 
     def advance(self, request):
@@ -177,8 +177,8 @@ def test_live_behind_mallet_pucks_are_retrieved_without_own_goal():
 
 
 def test_live_rear_pucks_return_with_measured_mechanical_travel():
-    for x, y, mallet_x in ((300, 140, 300), (480, 180, 480), (70, 180, 150)):
-        table = _LiveTable(StoneMotion(x=x, y=y), (mallet_x, 250), PLCLink("offline"))
+    for x, y, mallet_x in ((300, 182, 300), (480, 240, 480), (70, 240, 150)):
+        table = _LiveTable(StoneMotion(x=x, y=y), (mallet_x, 342), PLCLink("offline"))
         table.return_puck()
         assert table.minimum_y >= y - 1.0
 
@@ -190,14 +190,14 @@ def test_live_moving_rear_puck_is_bypassed_and_returned():
 
 def test_live_rear_contact_uses_runtime_default_command_margin():
     link = PLCLink("offline", limits=MotionLimits(margin_mm=40.0))
-    table = _LiveTable(StoneMotion(x=300, y=140), (300, 250), link)
+    table = _LiveTable(StoneMotion(x=300, y=182), (300, 342), link)
     for _ in range(30):
         _, request = table.observe()
         assert request is not None
         table.advance(request)
         if table.impacts:
             assert table.game.stone.vy > 0
-            assert table.minimum_y >= 139.0
+            assert table.minimum_y >= 181.0
             break
     else:
         raise AssertionError(("Reachable rear puck was never contacted", table.mallet))

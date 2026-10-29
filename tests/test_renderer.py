@@ -3,10 +3,13 @@ from pathlib import Path
 import numpy as np
 
 from air_hockey import core_config as core
+from air_hockey.ai import AIDecision
 from air_hockey.app.rally import RallyDecision, RallyState
-from air_hockey.app.renderer import COLOR_TARGET, format_status, render, render_preview
+from air_hockey.app.renderer import COLOR_TARGET, format_status, render_preview
 from air_hockey.app.vision_runtime import VisionResult
 from air_hockey.camera.types import Frame
+from air_hockey.game_state import CurlingState
+from air_hockey.prediction import PredictionState
 from air_hockey.vision.types import Detection, Track, TrackState
 from air_hockey.vision.geometry import CameraGeometry
 
@@ -27,8 +30,23 @@ class MockGeometry:
         return [self.table_to_raw(tx, ty) for tx, ty in points]
 
 
+def _prediction(trajectory):
+    return PredictionState(list(trajectory), trajectory[-1], 1.0, CurlingState(*trajectory[0]))
+
+
+def _rally(target):
+    return RallyDecision(
+        state=RallyState.DEFENDING,
+        target=target,
+        reason="incoming puck",
+        direction="incoming",
+        mallet_position=(300.0, 100.0),
+        mallet_source="software",
+    )
+
+
 def test_render_preserves_shape_and_does_not_modify_original():
-    """验证输入 VisionResult 时，输出尺寸不变、原图未被修改，且 table 轨迹经 geometry 转换后绘制。"""
+    """全宽预览：输出尺寸不变、原图未被修改，且 table 轨迹/终点/目标都经 geometry 转换后绘制。"""
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
     original_copy = img.copy()
 
@@ -49,26 +67,20 @@ def test_render_preserves_shape_and_does_not_modify_original():
         detection=detection,
         track=track,
         fps=60.0,
-        trajectory=[(10.0, 20.0), (30.0, 40.0)],
-        ai_target=(50.0, 60.0),
+        prediction=_prediction([(10.0, 20.0), (30.0, 40.0)]),
+        rally=_rally((50.0, 60.0)),
     )
     table_roi = (350, 0, 580, 650)
     geometry = MockGeometry(offset_x=200.0, offset_y=100.0)
 
-    output = render(result, table_roi, geometry)
+    output = render_preview(result, table_roi, geometry, img.shape[1])
 
-    # 验证输出尺寸和类型不变
     assert output.shape == img.shape
     assert output.dtype == img.dtype
-
-    # 验证不修改原图且不是同一个内存视图
     assert np.array_equal(img, original_copy)
     assert not np.shares_memory(output, img)
-
-    # 验证确实进行了绘制
     assert np.any(output != 0)
 
-    # 验证 table trajectory 和 ai_target 经过 geometry 转换
     assert (10.0, 20.0) in geometry.calls
     assert (30.0, 40.0) in geometry.calls
     assert (50.0, 60.0) in geometry.calls
@@ -76,58 +88,50 @@ def test_render_preserves_shape_and_does_not_modify_original():
 
 def test_format_status():
     """验证 GUI 状态栏字符串格式化输出。"""
-    img = np.zeros((10, 10, 3), dtype=np.uint8)
-    frame = Frame(image=img, timestamp=1.0, sequence=1)
-    result_empty = VisionResult(frame=frame, fps=30.0)
-    status_empty = format_status(result_empty, correction_enabled=True)
-    assert "未检测到冰壶" in status_empty
-    assert "校正 ON" in status_empty
+    frame = Frame(image=np.zeros((10, 10, 3), dtype=np.uint8), timestamp=1.0, sequence=1)
+    result = VisionResult(frame=frame, fps=30.0)
+    result.rally = RallyDecision(
+        state=RallyState.WAITING, target=None, reason="no puck; READY", direction="invalid",
+        mallet_position=(300.0, 181.5), mallet_source="software",
+    )
+    status = format_status(result, correction_enabled=True)
+    assert "校正 ON" in status
+    assert "WAITING: no puck; READY" in status
+    assert "速度 none" in status and "target none" in status
 
 
-def test_render_draws_requested_target_not_raw_ai_target():
-    for preview_width in (None, 300):
+def test_render_draws_rally_target_not_raw_ai_target():
+    for preview_width in (600, 300):
         for rally_present, rally_target in ((False, None), (True, (150.0, 180.0)), (True, None)):
             _assert_requested_target(preview_width, rally_present, rally_target)
 
 
 def _assert_requested_target(preview_width, rally_present, rally_target):
     image = np.zeros((400, 600, 3), dtype=np.uint8)
+    ai_target = (350.0, 280.0)
     result = VisionResult(
         frame=Frame(image=image, timestamp=1.0, sequence=1),
-        ai_target=(350.0, 280.0),
+        ai_decision=AIDecision(*ai_target, "idle"),
     )
     if rally_present:
-        result.rally = RallyDecision(
-            state=RallyState.DEFENDING,
-            target=rally_target,
-            reason="incoming puck",
-            direction="incoming",
-            mallet_position=(300.0, 100.0),
-            mallet_source="software",
-        )
+        result.rally = _rally(rally_target)
     geometry = MockGeometry()
     roi = (5, 50, 580, 340)
-    if preview_width is None:
-        output = render(result, roi, geometry)
-        scale = 1.0
-    else:
-        output = render_preview(result, roi, geometry, preview_width)
-        scale = preview_width / image.shape[1]
+    output = render_preview(result, roi, geometry, preview_width)
+    scale = preview_width / image.shape[1]
 
-    target = rally_target if rally_present else result.ai_target
-    if target is not None:
-        x = round((target[0] + geometry.offset_x) * scale)
-        y = round((target[1] + geometry.offset_y) * scale)
+    if rally_target is not None:
+        x = round((rally_target[0] + geometry.offset_x) * scale)
+        y = round((rally_target[1] + geometry.offset_y) * scale)
         assert np.array_equal(output[y, x], COLOR_TARGET)
-        assert geometry.calls == [target]
+        assert geometry.calls == [rally_target]
     else:
         assert geometry.calls == []
         assert not np.any(np.all(output == COLOR_TARGET, axis=2))
 
-    if rally_present:
-        old_x = round((result.ai_target[0] + geometry.offset_x) * scale)
-        old_y = round((result.ai_target[1] + geometry.offset_y) * scale)
-        assert np.array_equal(output[old_y, old_x], [0, 0, 0])
+    old_x = round((ai_target[0] + geometry.offset_x) * scale)
+    old_y = round((ai_target[1] + geometry.offset_y) * scale)
+    assert np.array_equal(output[old_y, old_x], [0, 0, 0])
     assert not np.any(image)
 
 
@@ -153,14 +157,14 @@ def test_render_batch_trajectory_matches_pointwise_exact_pixels():
 
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
     frame = Frame(image=img, timestamp=1.0, sequence=1)
-    result = VisionResult(frame=frame, fps=60.0, trajectory=trajectory)
+    result = VisionResult(frame=frame, fps=60.0, prediction=_prediction(trajectory))
 
     # 1. 批量与逐点转换点坐标完全一致
     pw_pts = [geom.table_to_raw(x, y) for x, y in trajectory]
     batch_pts = geom.table_to_raw_batch(trajectory)
     assert pw_pts == batch_pts
 
-    # 2. 模拟逐点转换验证渲染像素一致
+    # 2. 模拟逐点转换验证渲染像素一致（全宽与 640 预览）
     class PointwiseBaselineGeometry:
         def table_to_raw(self, tx, ty):
             return geom.table_to_raw(tx, ty)
@@ -169,15 +173,8 @@ def test_render_batch_trajectory_matches_pointwise_exact_pixels():
             return [geom.table_to_raw(tx, ty) for tx, ty in points]
 
     pw_geom = PointwiseBaselineGeometry()
-    output_batch = render(result, table_roi, geom)
-    output_pw = render(result, table_roi, pw_geom)
-
-    # 验证输出图像像素绝对一致（最大像素差为 0）
-    diff = np.max(np.abs(output_batch.astype(int) - output_pw.astype(int)))
-    assert diff == 0, f"Expected pixel diff 0, got {diff}"
-
-    # 验证预览模式下的像素一致性
-    prev_batch = render_preview(result, table_roi, geom, 640)
-    prev_pw = render_preview(result, table_roi, pw_geom, 640)
-    diff_prev = np.max(np.abs(prev_batch.astype(int) - prev_pw.astype(int)))
-    assert diff_prev == 0, f"Expected preview pixel diff 0, got {diff_prev}"
+    for width in (1280, 640):
+        batch = render_preview(result, table_roi, geom, width)
+        pointwise = render_preview(result, table_roi, pw_geom, width)
+        diff = np.max(np.abs(batch.astype(int) - pointwise.astype(int)))
+        assert diff == 0, f"Expected pixel diff 0 at width {width}, got {diff}"

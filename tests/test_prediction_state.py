@@ -3,7 +3,6 @@
 覆盖：
 - Predictor 输出 PredictionState（trajectory / endpoint / duration / source_state）
 - 序列协议（len / 遍历 / 下标 / 切片）与裸列表比较
-- predict_endpoint 与 PredictionState.endpoint 一致
 - VisionRuntime 透传 PredictionState
 """
 
@@ -16,7 +15,7 @@ import numpy as np
 from air_hockey import core_config as core
 from air_hockey.app.vision_runtime import VisionRuntime
 from air_hockey.camera.types import Frame
-from air_hockey.prediction import PredictionState, TrajectoryPredictor, predict_trajectory
+from air_hockey.prediction import PredictionState, TrajectoryPredictor
 from air_hockey.vision.types import Detection
 from air_hockey.game_state import CurlingState
 
@@ -57,24 +56,13 @@ def test_prediction_state_sequence_protocol_matches_trajectory():
     assert len(pred) == len(pred.trajectory)
 
 
-def test_predict_endpoint_matches_prediction_state_endpoint():
-    predictor = TrajectoryPredictor()
-    source = CurlingState(x=280.0, y=480.0, vx=150.0, vy=-220.0)
-    assert predictor.predict_endpoint(source) == predictor.predict(source).endpoint
-
-
-def test_predict_trajectory_function_returns_prediction_state():
-    pred = predict_trajectory(300.0, 400.0, 120.0, -60.0)
-    assert isinstance(pred, PredictionState)
-    assert pred.endpoint == pred.trajectory[-1]
-
-
 def test_stop_endpoint_includes_last_subpixel_motion_at_budget_boundary():
     predictor = TrajectoryPredictor(substep=0.01, point_interval=1.0, max_simulation_steps=2)
-    prediction = predictor.predict(300.0, 380.0, 9.0, 0.0)
+    # 初速取在"第一步后仍高于停止速度、第二步后低于"的区间（摩擦 230 时为 10.3~12.6）
+    prediction = predictor.predict(300.0, 530.0, 11.0, 0.0)
     assert len(prediction.trajectory) == 2
-    assert prediction[0] == (300.0, 380.0)
-    assert math.dist(prediction.endpoint, (300.1728, 380.0)) < 1e-10
+    assert prediction[0] == (300.0, 530.0)
+    assert math.dist(prediction.endpoint, (300.197, 530.0)) < 1e-10
     assert prediction.endpoint == prediction[-1]
     assert prediction.duration == 0.02
 
@@ -83,13 +71,11 @@ def test_budget_exhaustion_never_returns_false_terminal_state():
     predictor = TrajectoryPredictor(max_simulation_steps=1)
     with TestCase().assertRaisesRegex(RuntimeError, "max_simulation_steps=1.*terminal"):
         predictor.predict(300.0, 380.0, 150.0, 0.0)
-    with TestCase().assertRaisesRegex(RuntimeError, "max_simulation_steps=1.*terminal"):
-        predictor.predict_endpoint(300.0, 380.0, 150.0, 0.0)
 
 
 def test_goal_and_obstacle_terminal_positions_are_exact():
     predictor = TrajectoryPredictor()
-    goal = predictor.predict(300.0, 80.0, 0.0, -150.0)
+    goal = predictor.predict(300.0, 80.0, 0.0, -400.0)
     assert goal.endpoint == goal[-1]
     assert goal.endpoint[1] + core.STONE_RADIUS < core.RINK_TOP
     assert goal.duration > 0.0
@@ -165,8 +151,7 @@ def test_vision_runtime_forwards_prediction_state():
     result = runtime.process_frame(Frame(image=image, timestamp=1.0, sequence=1))
 
     assert isinstance(result.prediction, PredictionState)
-    assert result.prediction.endpoint == result.trajectory[-1]
-    assert result.trajectory_debug.predicted_endpoint == result.prediction.endpoint
+    assert result.prediction.source_state is result.curling_state
 
 
 def test_default_budget_covers_lower_identified_friction():

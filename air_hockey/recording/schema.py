@@ -1,11 +1,10 @@
-"""真实运行与仿真共用的记录格式。
+"""运行记录格式。
 
 所有记录统一为一个版本化 JSON 文档，帧级字段一致：
     format / version / source / meta / frames
 每帧记录 timestamp、fps、curling_state、prediction、ai_decision、plc_request、plc_state。
 plc_state 是接 PLC 时的轴状态快照（实际位置、最近一次下发点、busy、seq_ack 等），
 其中的 age 字段表示"距记录时多久以前"，用来和帧时间对齐计算延迟。
-因此真实摄像头运行与仿真的数据可以直接对比、复用同一套分析工具。
 """
 
 from __future__ import annotations
@@ -13,11 +12,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..game_state import CurlingState
-
 from ..prediction import PredictionState
 
 RECORDING_FORMAT = "curling_recording"
-RECORDING_VERSION = 3
+# 4：2026-10-29 场地坐标改为各向同性（Y 拉长到 968 单位），与 3 及以前的坐标不可直接比较
+RECORDING_VERSION = 4
 
 
 def curling_state_to_dict(state: CurlingState) -> dict:

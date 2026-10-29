@@ -85,9 +85,8 @@ class StoneDetector:
         if cropped.size == 0:
             return []
 
-        # ★ 丢检时会退回全幅 ROI，阈值+形态学+轮廓是这时掉帧率的主因。
-        #   大区域先降采样搜索，坐标/面积/半径按 scale 换算回原分辨率；
-        #   小 ROI（正常追踪）面积远达不到阈值，走原路径，行为完全不变。
+        # 丢检时退回全幅 ROI，阈值+形态学+轮廓是这时掉帧的主因：大区域先降采样粗找，
+        # 坐标/面积/半径按 scale 换算回原分辨率；小 ROI（正常追踪）达不到面积阈值，不受影响。
         scale = 1.0
         if cropped.shape[0] * cropped.shape[1] > SEARCH_DOWNSCALE_AREA:
             scale = SEARCH_DOWNSCALE_SCALE

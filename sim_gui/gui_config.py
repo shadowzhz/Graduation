@@ -6,8 +6,7 @@
 
 import threading
 
-BASE_CANVAS_WIDTH = 600.0
-BASE_CANVAS_HEIGHT = 760.0
+from air_hockey.core_config import BASE_CANVAS_HEIGHT, BASE_CANVAS_WIDTH
 UI_SCALE = 1.0
 
 CANVAS_WIDTH = BASE_CANVAS_WIDTH

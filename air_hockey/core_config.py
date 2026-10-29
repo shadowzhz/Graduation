@@ -9,15 +9,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # 场地基准尺寸与边界
+# 游戏坐标必须各向同性（X、Y 每单位代表同样的毫米数）：物理里的半径、hypot 速度、
+# 摩擦、接触距离全按圆和各向同性计算。真实台面（墙内）480mm x 880mm，
+# X 取 528 单位宽 -> 1 单位 = 480/528 ≈ 0.909mm，Y 按同一比例 = 968 单位。
+# （2026-10-29 前是 528 x 668，Y 方向每单位比 X 大 1.45 倍，Y 方向的物理全部失真。）
+TABLE_WIDTH_MM = 480.0
+TABLE_LENGTH_MM = 880.0
 BASE_CANVAS_WIDTH = 600.0
-BASE_CANVAS_HEIGHT = 760.0
 
 RINK_LEFT = 36.0
 RINK_RIGHT = BASE_CANVAS_WIDTH - 36.0  # 564.0
+UNITS_PER_MM = (RINK_RIGHT - RINK_LEFT) / TABLE_WIDTH_MM  # 1.1
 RINK_TOP = 46.0
-RINK_BOTTOM = BASE_CANVAS_HEIGHT - 46.0  # 714.0
+RINK_BOTTOM = RINK_TOP + TABLE_LENGTH_MM * UNITS_PER_MM  # 1014.0
+BASE_CANVAS_HEIGHT = RINK_BOTTOM + 46.0  # 1060.0
 RINK_CENTER_X = BASE_CANVAS_WIDTH / 2    # 300.0
-RINK_CENTER_Y = BASE_CANVAS_HEIGHT / 2   # 380.0
+RINK_CENTER_Y = (RINK_TOP + RINK_BOTTOM) / 2   # 530.0
+# 机器端防守线（READY 位置的 y）：球门线到中线的 28%
+AI_HOME_Y = RINK_TOP + (RINK_CENTER_Y - RINK_TOP) * 0.28   # 181.52
 
 # 球门几何参数
 GOAL_HALF_WIDTH = 92.0
@@ -40,7 +49,11 @@ GOAL_POSTS = (
 # 物理动力学参数
 PLAYER_MAX_SPEED = 12_000.0
 MAX_STONE_SPEED = 1_100.0
-STONE_FRICTION_DECELERATION = 72.0
+# 2026-10-29 用 play2 记录按毫米重新拟合（只有 3 段干净的自由滑行，都沿长边方向）：
+# 225 / 318 / 561 mm/s²（561 那段转角 15°，可能蹭了墙）；HANDOFF 的"实测约 156"换成毫米约 205。
+# 取约 210mm/s² ≈ 230 单位/s²。原值 72（仿真时代）让预测滑行距离长出 2~3 倍。
+# 数据量少，上实机后用 --record 采更多直线滑行段复核。
+STONE_FRICTION_DECELERATION = 230.0
 STONE_STOP_SPEED = 8.0
 MIN_WALL_BOUNCE_SPEED = 96.0
 # 2026-10-21 play2 现场 4 次边墙反弹实测：法向保留 0.54~0.78、沿墙保留 0.59~0.88；
@@ -76,10 +89,12 @@ class Difficulty:
     attack_line: float
 
 
+# 最后一列（进攻线相对中线的偏移）是纯 Y 距离：场地 Y 方向由 668 拉长到 968 单位后
+# 按 ×1.449 换算，保持它在半场里的比例不变。
 DIFFICULTY_BASES = {
-    "简单": (345.0, 0.18, 55.0, 0.45, -145.0),
-    "普通": (500.0, 0.085, 24.0, 0.78, -95.0),
-    "困难": (680.0, 0.035, 7.0, 1.0, -55.0),
+    "简单": (345.0, 0.18, 55.0, 0.45, -210.0),
+    "普通": (500.0, 0.085, 24.0, 0.78, -138.0),
+    "困难": (680.0, 0.035, 7.0, 1.0, -80.0),
 }
 
 

@@ -18,7 +18,6 @@ from air_hockey.simulation import (
     MotionSimulator,
     SimulationConfig,
     SimulationResult,
-    run_simulation,
 )
 from air_hockey.game_state import CurlingState
 
@@ -88,7 +87,7 @@ def test_physical_endpoint_continues_beyond_recorded_horizon():
 
 
 def test_scored_true_trajectory_holds_position_and_timestamps():
-    config = SimulationConfig(300.0, 80.0, 0.0, -150.0, dt=1 / 60, steps=120, position_noise=0.0)
+    config = SimulationConfig(300.0, 80.0, 0.0, -400.0, dt=1 / 60, steps=120, position_noise=0.0)
     result = MotionSimulator(config).simulate()
     trajectory = result.true_trajectory
     scored_index = next(index for index, (_, y) in enumerate(trajectory) if y + core.STONE_RADIUS < core.RINK_TOP)
@@ -216,8 +215,8 @@ def test_random_generator_respects_floor_bounds():
     assert config.initial_vy < 0.0
 
 
-def test_run_simulation_helper_and_summary():
-    result = run_simulation()
+def test_default_simulation_and_summary():
+    result = MotionSimulator.default().simulate()
     assert isinstance(result, SimulationResult)
     text = result.summary()
     assert "true_endpoint" in text
@@ -290,14 +289,14 @@ def test_oracle_prediction_matches_goal_post_truth():
 
 
 def test_scored_endpoint_uses_first_held_goal_position():
-    report = _oracle_report((core.RINK_CENTER_X, 80.0, 0.0, -150.0))
+    report = _oracle_report((core.RINK_CENTER_X, 80.0, 0.0, -400.0))
     result = report.runs[0]
     simulation = MotionSimulator(
         SimulationConfig(
             core.RINK_CENTER_X,
             80.0,
             0.0,
-            -150.0,
+            -400.0,
             dt=core.PREDICTION_SUBSTEP,
             steps=700,
             position_noise=0.0,

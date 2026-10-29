@@ -20,12 +20,12 @@ class PLCFeedback:
     y_en: bool = False
     x_err: bool = False
     y_err: bool = False
-    # ★ 轴自己的故障码（DB18.2 / DB18.6）。撞软限位、跟随误差等都会在这里给出
-    #   TIA 里看到的那个具体代码；None = 该字段读不到（DB18 还是旧长度）。
+    # 下面可为 None 的字段：None = 还没有有效反馈。
+    # 轴自己的故障码（DB18.2 / DB18.6），撞限位、跟随误差等都在这里给出 TIA 里看到的代码
     x_errid: Optional[int] = None
     y_errid: Optional[int] = None
-    # 运动指令的 Error / ErrorId（DB18.34.3 / DB18.36）
-    mc_error: Optional[bool] = None
+    # DB18.32 以后的诊断字段 1211C 程序还没写，读到恒为 0
+    mc_error: Optional[bool] = None         # 运动指令 Error / ErrorId（DB18.34.3 / DB18.36）
     mc_errid: Optional[int] = None
     busy: bool = False
     comm_lost: bool = False
@@ -33,16 +33,10 @@ class PLCFeedback:
     plc_echo_ok: bool = True
     group_stop: bool = False
     comm_lost_latch: bool = False
-    kinematics_error: int = 0
-    # TO_Kinematics.ErrorDetail.Reaction（DInt）：TO 对该错误的**反应**。
-    # Number 说"报了什么"，Reaction 说"因此做了什么" —— 后者决定
-    # 这到底是一个原因，还是别的原因（比如使能被撤）导致的结果。
-    kin_reaction: Optional[int] = None
-    # 序号握手：PLC 已处理到的序号（DB1.94）。和本地下发序号一比就是"落后几条"。
-    # None = 没读到（PLC 还没加这个字段）。
-    seq_ack: Optional[int] = None
-    # ---- 诊断补充（PLC 加了多少就显示多少；None = 未读到）----
-    mc_remaining: Optional[float] = None   # ★ 当前运动还差多远（MC.RemainingDistance）
+    kinematics_error: int = 0               # ErrorDetail.Number：报了什么
+    kin_reaction: Optional[int] = None      # ErrorDetail.Reaction：TO 因此做了什么
+    seq_ack: Optional[int] = None           # PLC 已处理到的序号（DB1.94），和本地序号一比就是"落后几条"
+    mc_remaining: Optional[float] = None    # 当前运动还差多远（RemainingDistance）
 
     @property
     def axis_fault(self):

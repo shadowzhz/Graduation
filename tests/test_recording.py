@@ -28,9 +28,7 @@ from air_hockey.recording import (
     curling_state_to_dict,
     plc_request_to_dict,
     prediction_to_dict,
-    record_simulation_result,
 )
-from air_hockey.simulation import MotionSimulator
 from air_hockey.vision.types import Detection
 from air_hockey.game_state import CurlingState
 
@@ -196,44 +194,6 @@ def test_empty_recorder_serializes_valid_document():
     assert document["frames"] == []
 
 
-def test_simulation_recording_matches_runtime_format():
-    simulation = MotionSimulator.default(steps=60).simulate(predict_step=-1)
-    recorder = record_simulation_result(simulation)
-    simulation_document = recorder.to_dict()
-
-    runtime_document = RuntimeRecorder(None).to_dict()
-
-    assert set(simulation_document.keys()) == set(runtime_document.keys()) == DOCUMENT_KEYS
-    assert simulation_document["source"] == "simulation"
-    assert simulation_document["version"] == runtime_document["version"] == RECORDING_VERSION
-    assert len(simulation_document["frames"]) == len(simulation.timestamps)
-
-    for frame in simulation_document["frames"]:
-        assert set(frame.keys()) == FRAME_KEYS
-        assert set(frame["curling_state"].keys()) == STATE_KEYS
-        if frame["prediction"] is not None:
-            assert set(frame["prediction"].keys()) == PREDICTION_KEYS
-
-
-def test_simulation_recording_attaches_prediction_at_source_frame():
-    simulation = MotionSimulator.default(steps=60).simulate(predict_step=10)
-    document = record_simulation_result(simulation).to_dict()
-    with_prediction = [frame["index"] for frame in document["frames"] if frame["prediction"] is not None]
-    assert with_prediction == [10]
-
-
-def test_simulation_recording_writes_file():
-    simulation = MotionSimulator.default(steps=40).simulate()
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "sim.json"
-        recorder = record_simulation_result(simulation, path)
-        recorder.close()
-        document = json.loads(path.read_text(encoding="utf-8"))
-    assert set(document.keys()) == DOCUMENT_KEYS
-    assert document["source"] == "simulation"
-    assert len(document["frames"]) > 0
-
-
 class _MockDetector:
     def __init__(self):
         self._count = 0
@@ -251,7 +211,7 @@ class _MockDetector:
 
 
 def test_runtime_pipeline_records_in_unified_format():
-    """真实运行链路（VisionRuntime -> recorder）产出的记录与仿真格式一致。"""
+    """真实运行链路（VisionRuntime -> recorder）产出统一格式的记录。"""
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     runtime = VisionRuntime(
         table_roi=(350, 0, 580, 650),
@@ -394,14 +354,6 @@ def test_existing_recording_file_cannot_be_overwritten():
             pass
         else:
             raise AssertionError("creating recorder over existing final file must raise FileExistsError")
-
-        simulation = MotionSimulator.default(steps=10).simulate()
-        try:
-            record_simulation_result(simulation, path=path)
-        except FileExistsError:
-            pass
-        else:
-            raise AssertionError("simulation recorder over existing final file must raise FileExistsError")
 
         assert path.read_bytes() == original_bytes
         assert not path.with_name(path.name + ".journal").exists()

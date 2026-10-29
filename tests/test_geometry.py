@@ -18,11 +18,9 @@ import cv2
 import numpy as np
 
 from air_hockey import core_config as core
-from air_hockey.game_state import StoneState
-from air_hockey.vision.detector import StoneDetector
 from air_hockey.vision.geometry import CameraGeometry
 from air_hockey.vision.pipeline import VisionPipeline
-from air_hockey.vision.tracker import StoneTracker, TrackState
+from air_hockey.vision.tracker import StoneTracker
 from air_hockey.vision.types import Detection, ROI
 
 CALIB_FILE = Path(__file__).resolve().parents[1] / "calibration" / "camera_calibration.npz"
@@ -57,13 +55,14 @@ def _make_trapezoid_geometry():
     return geometry, homography
 
 
-def _write_homography_file(path, homography, image_size):
-    """写入一个符合 calibrate_table.py 输出格式的球台 Homography 文件。"""
+def _write_homography_file(path, homography, image_size, undistorted_points=None):
+    """写入一个符合 calibrate_table.py 输出格式的球台 Homography 文件（默认四角为 TRAPEZOID_SOURCE）。"""
+    points = TRAPEZOID_SOURCE if undistorted_points is None else undistorted_points
     np.savez(
         path,
         homography_matrix=np.asarray(homography, dtype=np.float64),
-        raw_points=np.zeros((4, 2), dtype=np.float64),
-        undistorted_points=np.zeros((4, 2), dtype=np.float64),
+        raw_points=np.asarray(points, dtype=np.float64),
+        undistorted_points=np.asarray(points, dtype=np.float64),
         image_size=np.asarray(image_size, dtype=np.int32),
     )
 
@@ -113,52 +112,6 @@ def test_raw_to_undistorted_and_table():
     back_raw_x, back_raw_y = geom.table_to_raw(tx, ty)
     assert abs(back_raw_x - test_raw_x) < 0.05
     assert abs(back_raw_y - test_raw_y) < 0.05
-
-
-def test_raw_velocity_with_distortion():
-    """验证开启畸变校正后速度通过差分计算正确，保证位置和速度使用同一套坐标转换逻辑。"""
-    table_roi = (350.0, 0.0, 580.0, 650.0)
-    rink_bounds = (36.0, 564.0, 46.0, 714.0)
-    geom = CameraGeometry.from_calibration_file(
-        CALIB_FILE,
-        table_roi=table_roi,
-        rink_bounds=rink_bounds,
-        table_calibration_file=None,
-        enabled=True,
-    )
-
-    raw_x, raw_y = 400.0, 300.0
-    raw_vx, raw_vy = 120.0, -80.0
-    dt = 0.01
-
-    # 执行速度转换
-    tvx, tvy = geom.raw_velocity_to_table(raw_x, raw_y, raw_vx, raw_vy, dt=dt)
-
-    # 独立用 raw_to_table 计算差分进行断言，验证位置和速度转换逻辑严格一致
-    tx0, ty0 = geom.raw_to_table(raw_x, raw_y)
-    tx1, ty1 = geom.raw_to_table(raw_x + raw_vx * dt, raw_y + raw_vy * dt)
-    expected_tvx = (tx1 - tx0) / dt
-    expected_tvy = (ty1 - ty0) / dt
-
-    assert abs(tvx - expected_tvx) < 1e-9
-    assert abs(tvy - expected_tvy) < 1e-9
-
-    # 速度为 0 时结果为 0
-    zero_vx, zero_vy = geom.raw_velocity_to_table(raw_x, raw_y, 0.0, 0.0)
-    assert zero_vx == 0.0 and zero_vy == 0.0
-
-    # 关闭畸变校正时，差分计算结果应与线性比例严格一致
-    geom_off = CameraGeometry.from_calibration_file(
-        CALIB_FILE,
-        table_roi=table_roi,
-        rink_bounds=rink_bounds,
-        table_calibration_file=None,
-        enabled=False,
-    )
-    scale_x, scale_y = geom_off._get_rink_scales()
-    off_vx, off_vy = geom_off.raw_velocity_to_table(raw_x, raw_y, raw_vx, raw_vy, dt=dt)
-    assert abs(off_vx - raw_vx * scale_x) < 1e-5
-    assert abs(off_vy - raw_vy * scale_y) < 1e-5
 
 
 def test_missing_rink_bounds_raises_error():
@@ -435,24 +388,6 @@ def test_homography_local_scale_varies_across_trapezoid():
     assert abs(top_scale_y - bottom_scale_y) > 1e-3
 
 
-def test_homography_velocity_matches_finite_difference():
-    """Homography 下速度转换仍与位置有限差分严格一致。"""
-    geometry, _homography = _make_trapezoid_geometry()
-    raw_x, raw_y = 460.0, 320.0
-    raw_vx, raw_vy = 120.0, -80.0
-    dt = 0.01
-
-    table_vx, table_vy = geometry.raw_velocity_to_table(raw_x, raw_y, raw_vx, raw_vy, dt=dt)
-    tx0, ty0 = geometry.raw_to_table(raw_x, raw_y)
-    tx1, ty1 = geometry.raw_to_table(raw_x + raw_vx * dt, raw_y + raw_vy * dt)
-
-    assert abs(table_vx - (tx1 - tx0) / dt) < 1e-9
-    assert abs(table_vy - (ty1 - ty0) / dt) < 1e-9
-    # 非零速度，且已进入透视局部比例（不是简单的线性缩放）
-    assert abs(table_vx) > 1e-6
-    assert abs(table_vy) > 1e-6
-
-
 def test_homography_ignores_table_roi():
     """Homography 启用后，table_roi 不再参与 undistorted <-> table 的数学映射。"""
     homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, RINK_CORNERS)
@@ -574,6 +509,23 @@ def test_homography_missing_image_size_rejected():
             assert False, "Should have raised ValueError"
         except ValueError as exc:
             assert "image_size" in str(exc)
+
+
+def test_homography_file_for_other_rink_coordinates_rejected():
+    """矩阵把标定四角映射到别的场地坐标（例如 2026-10-29 前的 528x668 场地）时必须拒绝加载。"""
+    old_corners = RINK_CORNERS.copy()
+    old_corners[2:, 1] = 714.0  # 旧场地底边
+    homography = cv2.getPerspectiveTransform(TRAPEZOID_SOURCE, old_corners)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "table_homography.npz"
+        _write_homography_file(path, homography, (1280, 720))
+        try:
+            CameraGeometry.from_calibration_file(
+                CALIB_FILE, rink_bounds=RINK_BOUNDS, table_calibration_file=path, enabled=True,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError as exc:
+            assert "different rink coordinate system" in str(exc)
 
 
 def test_homography_file_loads_matrix_and_image_size():

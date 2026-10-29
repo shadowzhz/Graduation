@@ -23,10 +23,11 @@ from air_hockey.app.rally import (
     RallyController,
     RallyState,
 )
-from air_hockey.app.vision_runtime import AI_HOME_Y, VisionResult, VisionRuntime
+from air_hockey.app.vision_runtime import VisionResult, VisionRuntime
 from air_hockey.camera.types import Frame
 from air_hockey.control import PlcControlAdapter
 from air_hockey.control import PLCFeedback
+from air_hockey.core_config import AI_HOME_Y
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.game_state import CurlingState, GameState, StoneState
 from air_hockey.vision.tracker import StoneTracker
@@ -69,6 +70,12 @@ class FixedKalman:
 
     def update(self, *args, **kwargs):
         return self.state
+
+
+def _target(result):
+    """本帧 AI 目标；没有决策时为 None。"""
+    decision = result.ai_decision
+    return None if decision is None else (decision.target_x, decision.target_y)
 
 
 def test_stone_tracker_predict_position_public():
@@ -128,7 +135,6 @@ def test_vision_runtime_dataflow_track_to_ai():
 
     detector = MockDetector([det1, det2])
     runtime = VisionRuntime(
-        detection_interval=3,
         tracker=StoneTracker(min_confirmed_hits=2),
         table_roi=(350, 0, 580, 650),
         calibration_file=str(CALIB_FILE),
@@ -149,43 +155,30 @@ def test_vision_runtime_dataflow_track_to_ai():
     assert not res1.track_confirmed
 
     # 验证经过坐标变换生成的 StoneState
-    assert isinstance(res1.stone_state, StoneState)
-    assert res1.stone_state.radius == 25.0
+    assert isinstance(res1.curling_state, StoneState)
+    assert res1.curling_state.radius == 25.0
 
     # 验证 TrajectoryPredictor 输出的桌面轨迹
-    assert res1.trajectory is not None
-    assert len(res1.trajectory) >= 1
+    assert res1.prediction is not None
+    assert len(res1.prediction.trajectory) >= 1
 
     # 验证 AI 决策输出的目标坐标
-    assert res1.ai_target is not None
-    assert len(res1.ai_target) == 2
-    assert isinstance(res1.ai_target[0], float)
-    assert isinstance(res1.ai_target[1], float)
+    assert res1.ai_decision is not None
+    assert isinstance(res1.ai_decision.target_x, float)
+    assert isinstance(res1.ai_decision.target_y, float)
 
-    # 处理第二帧：检测间隔帧，Tracker 进行常速预测
-    frame2 = Frame(image=img, timestamp=1.033, sequence=2)
-    res2 = runtime.process_frame(frame2)
-    assert res2.detection is None
+    # 第二次硬检测：确认轨迹并更新速度
+    res2 = runtime.process_frame(Frame(image=img, timestamp=1.05, sequence=2))
+
+    assert res2.detection is not None
     assert res2.track is not None
-    assert res2.stone_state is not None
-    assert res2.trajectory is not None
-    assert res2.ai_target is not None
-
-    # 处理第三帧：第 3 帧到达检测周期 (frame_index % 3 == 0)，执行硬检测并更新速度
-    frame3 = Frame(image=img, timestamp=1.066, sequence=3)
-    res3 = runtime.process_frame(frame3)
-
-    assert res3.detection is not None
-    assert res3.track is not None
-    assert res3.track.state == TrackState.ACTIVE
-    assert res3.track_confirmed
-    assert res3.track.vx > 0
-    assert res3.stone_state is not None
-    assert res3.stone_state.vx > 0
-    assert res3.trajectory is not None
-    assert len(res3.trajectory) >= 1
-    assert res3.ai_target is not None
-    assert res3.fps > 0.0
+    assert res2.track.state == TrackState.ACTIVE
+    assert res2.track_confirmed
+    assert res2.track.vx > 0
+    assert res2.curling_state.vx > 0
+    assert len(res2.prediction.trajectory) >= 1
+    assert res2.ai_decision is not None
+    assert res2.fps > 0.0
 
 
 def _assert_vision_runtime_threat_predicts_once(stone_y):
@@ -205,7 +198,6 @@ def _assert_vision_runtime_threat_predicts_once(stone_y):
     assert result.prediction is not None
     assert result.prediction.source_state is result.curling_state
     assert isinstance(result.ai_decision, AIDecision)
-    assert result.ai_target == (result.ai_decision.target_x, result.ai_decision.target_y)
     assert abs(result.ai_decision.reaction_timer + 0.001) < 1e-9
 
     baseline_ai = AirHockeyAI()
@@ -225,7 +217,7 @@ def _assert_vision_runtime_threat_predicts_once(stone_y):
         difficulty=runtime._ai_difficulty,
     )
     baseline = baseline_ai.update(baseline_state, 0.001)
-    assert result.ai_target == (baseline.target_x, baseline.target_y)
+    assert _target(result) == (baseline.target_x, baseline.target_y)
     assert result.ai_decision.stalled_stone_phase == baseline.stalled_stone_phase
 
 
@@ -237,7 +229,6 @@ def test_realtime_ai_target_stays_fixed_for_a_stationary_puck():
     runtime = VisionRuntime(
         table_calibration_file=None,
         disable_undistort=True,
-        detection_interval=1,
         detector=MockDetector([detection(timestamp) for timestamp in timestamps]),
     )
     runtime.ai._random.seed(120)
@@ -248,7 +239,7 @@ def test_realtime_ai_target_stays_fixed_for_a_stationary_puck():
         for index, timestamp in enumerate(timestamps)
     ]
 
-    targets = [result.ai_target for result in results]
+    targets = [_target(result) for result in results]
     assert all(target is not None for target in targets)
     assert all(target == targets[0] for target in targets)
 
@@ -260,7 +251,7 @@ def test_vision_runtime_threat_behind_ai_predicts_once():
 def test_default_runtime_accepts_and_moves_on_first_machine_half_detection():
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     for x, y, vy in (
-        (260.0, 250.0, 0.0),
+        (260.0, 342.0, 0.0),
         (260.0, core.RINK_CENTER_Y - 50.0, 100.0),
         (core.RINK_CENTER_X, AI_HOME_Y - 30.0, 0.0),
     ):
@@ -276,12 +267,12 @@ def test_default_runtime_accepts_and_moves_on_first_machine_half_detection():
         )
         result = runtime.process_frame(Frame(image, timestamp=1.0))
         assert result.track.state == TrackState.ACTIVE and result.track_confirmed
-        assert result.ai_target != READY_POSITION
+        assert _target(result) != READY_POSITION
         if y < AI_HOME_Y:
             assert result.ai_decision.stalled_stone_phase == "sidestepping"
-            assert result.ai_target[1] == AI_HOME_Y
+            assert _target(result)[1] == AI_HOME_Y
         else:
-            assert result.ai_target == (x, y)
+            assert _target(result) == (x, y)
         second = runtime.process_frame(Frame(image, timestamp=1.01))
         assert second.detection is not None and second.track_confirmed
 
@@ -302,31 +293,6 @@ def test_explicit_two_hit_tracker_keeps_first_detection_tentative():
     assert not result.track_confirmed
 
 
-def test_explicit_two_hit_tracker_confirms_on_detection_not_prediction():
-    runtime = VisionRuntime(
-        table_calibration_file=None, disable_undistort=True, detection_interval=3,
-        tracker=StoneTracker(min_confirmed_hits=2),
-        detector=MockDetector([
-            Detection(center_x=500.0, center_y=300.0, radius=25.0,
-                      area=1960.0, timestamp=1.0),
-            Detection(center_x=501.0, center_y=300.0, radius=25.0,
-                      area=1960.0, timestamp=1.066),
-        ]),
-    )
-    image = np.zeros((720, 1280, 3), dtype=np.uint8)
-    results = []
-    states = []
-    for index in range(3):
-        result = runtime.process_frame(Frame(image, timestamp=1.0 + index * 0.033))
-        results.append(result)
-        states.append(result.track.state)
-
-    assert states == [TrackState.TENTATIVE, TrackState.TENTATIVE, TrackState.ACTIVE]
-    assert results[1].detection is None
-    assert results[2].detection is not None
-    assert [result.track_confirmed for result in results] == [False, False, True]
-
-
 def test_new_far_identity_takes_over_after_two_consistent_hits():
     detections = [
         Detection(center_x=x, center_y=300.0, radius=25.0, area=1960.0,
@@ -334,7 +300,7 @@ def test_new_far_identity_takes_over_after_two_consistent_hits():
         for index, x in enumerate((500.0, 501.0, 900.0, 901.0))
     ]
     runtime = VisionRuntime(
-        table_calibration_file=None, disable_undistort=True, detection_interval=1,
+        table_calibration_file=None, disable_undistort=True,
         detector=MockDetector(detections),
     )
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -356,9 +322,9 @@ def test_vision_runtime_threat_outside_attack_zone_predicts_once():
     _assert_vision_runtime_threat_predicts_once(500.0)
 
 
-def test_vision_runtime_supports_custom_ai_without_prediction_parameter():
+def test_vision_runtime_uses_injected_ai_decision():
     class IndependentAI:
-        def update(self, state, dt):
+        def update(self, state, dt, prediction=None):
             return AIDecision(225.0, 155.0, "striking", 0.35)
 
     runtime = VisionRuntime(
@@ -370,7 +336,6 @@ def test_vision_runtime_supports_custom_ai_without_prediction_parameter():
     )
     result = runtime.process_frame(Frame(image=np.zeros((720, 1280, 3), dtype=np.uint8), timestamp=1.0, sequence=1))
     assert result.ai_decision == AIDecision(225.0, 155.0, "striking", 0.35)
-    assert result.ai_target == (225.0, 155.0)
     assert runtime.stalled_phase == "striking"
     assert runtime.reaction_timer == 0.35
 
@@ -380,7 +345,7 @@ def test_vision_runtime_ai_uses_fresh_axis_feedback_not_software_position():
         def __init__(self):
             self.positions = []
 
-        def update(self, state, dt):
+        def update(self, state, dt, prediction=None):
             self.positions.append((state.ai_x, state.ai_y))
             return AIDecision(400.0, 200.0, "idle", 0.0)
 
@@ -419,7 +384,7 @@ def test_plc_track_confirmation_survives_one_missed_detection():
     ])
     runtime = VisionRuntime(
         calibration_file=str(CALIB_FILE), table_calibration_file=None,
-        disable_undistort=True, detection_interval=1, detector=detector,
+        disable_undistort=True, detector=detector,
     )
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     results = [runtime.process_frame(Frame(image=image, timestamp=1 + (i - 1) * 0.03, sequence=i))
@@ -453,10 +418,10 @@ def test_vision_runtime_without_detection():
     assert isinstance(result, VisionResult)
     assert result.detection is None
     assert result.track is None
-    assert result.stone_state is None
-    assert result.trajectory is None
-    assert result.ai_target == READY_POSITION
+    assert result.curling_state is None
+    assert result.prediction is None
     assert result.ai_decision is None
+    assert tuple(runtime.target) == READY_POSITION
 
 
 def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limit():
@@ -464,7 +429,6 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
 
     runtime = VisionRuntime(
         table_roi=(0, 0, 1280, 720), table_calibration_file=None, disable_undistort=True,
-        detection_interval=3,
     )
     controller = RallyController()
     adapter = PlcControlAdapter()
@@ -488,12 +452,11 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
             if sequence <= 3:
                 assert result.curling_state.vy == 0.0
                 assert result.rally.state == RallyState.DEFENDING
-                assert result.ai_target == (result.curling_state.x, READY_POSITION[1])
+                assert _target(result) == (result.curling_state.x, READY_POSITION[1])
             else:
                 assert result.curling_state.vy < -25
             assert request is not None
-            assert request.target_x == result.ai_target[0]
-            assert request.target_y == result.ai_target[1]
+            assert (request.target_x, request.target_y) == _target(result)
             assert request.target_x > READY_POSITION[0] + core.MALLET_RADIUS
             active_targets.append((request.target_x, request.target_y))
     assert set(identities) == {1}
@@ -507,13 +470,7 @@ def test_low_fps_moving_puck_keeps_identity_and_uses_2d_target_within_depth_limi
 
 
 def test_low_fps_real_miss_keeps_confirmation_within_grace_period():
-    """漏检一帧**不再撤销**确认 —— 只要还在 max_missed_frames 宽限期内。
-
-    ★ 回归现场问题：追踪器在漏检第一帧就把 state 置 LOST，而 track_confirmed
-    原来绑在 `state == ACTIVE` 上 → 漏检一帧就 False → rally 每两帧切回 READY
-    → 机械臂刚起步就被叫回 (300,140) → **接不到球**。
-    宽限期内位置由 Kalman 外推，对"球往哪走"的判断依然有效。
-    """
+    """漏检一帧不撤销确认，只要还在 max_missed_frames 宽限期内（追踪器 state 仍会报 LOST）。"""
     runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
     states = []
     confirmed = []
@@ -536,13 +493,13 @@ def test_confirmation_is_revoked_after_the_grace_period_expires():
     ] + [None] * 20)
     runtime = VisionRuntime(
         calibration_file=str(CALIB_FILE), table_calibration_file=None,
-        disable_undistort=True, detection_interval=1, detector=detector,
+        disable_undistort=True, detector=detector,
     )
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     results = [runtime.process_frame(Frame(image=image, timestamp=1 + i * 0.03, sequence=i))
                for i in range(1, 22)]
     assert results[0].track_confirmed
-    # 宽限期内（detection_interval * 8 = 8 帧）仍然确认
+    # 宽限期内（8 帧）仍然确认
     assert results[5].track_confirmed
     assert results[7].track_confirmed
     # 超过宽限期之后必须撤销，且轨道被丢弃
@@ -574,9 +531,7 @@ def test_fast_reversal_reacquires_outside_local_roi_after_one_confirming_frame()
 
 
 def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
-    runtime = VisionRuntime(
-        table_calibration_file=None, disable_undistort=True, detection_interval=1,
-    )
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
     results = []
     for sequence, x in enumerate([500, 503, 506, 509, 512, None, None, None, 800, 800], 1):
         hsv = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -613,7 +568,7 @@ def test_real_detector_misses_advance_clock_and_new_identity_resets_estimator():
 
 def test_estimator_reset_on_no_track_preserves_new_observation_initialization():
     runtime = VisionRuntime(
-        table_calibration_file=None, disable_undistort=True, detection_interval=1,
+        table_calibration_file=None, disable_undistort=True,
         tracker=StoneTracker(max_missed_frames=0),
         detector=MockDetector([
             Detection(center_x=500.0, center_y=300.0, radius=30.0, area=2800.0, timestamp=1.0),
@@ -630,7 +585,7 @@ def test_estimator_reset_on_no_track_preserves_new_observation_initialization():
     runtime.reaction_timer = 0.35
     missing = runtime.process_frame(Frame(image=image, timestamp=1.01))
     assert missing.track is None and missing.curling_state is None
-    assert missing.ai_target == READY_POSITION
+    assert tuple(runtime.target) == READY_POSITION
     assert runtime.stalled_phase == "idle" and runtime.reaction_timer == 0.0
     new = runtime.process_frame(Frame(image=image, timestamp=1.015))
     expected = runtime.camera_geometry.undistorted_to_table(800.0, 300.0)
@@ -656,7 +611,7 @@ def test_new_identity_does_not_inherit_recovery_phase_or_reaction_timer():
     runtime.ai_current_pos[:] = (core.RINK_CENTER_X, runtime.ai_home_y)
     new = runtime.process_frame(Frame(image, timestamp=1.2))
     assert new.track.track_id != old_identity and new.track_confirmed
-    assert new.ai_target == new.curling_state.position
+    assert _target(new) == new.curling_state.position
     assert new.ai_decision.stalled_stone_phase == "idle"
 
 
@@ -671,17 +626,17 @@ def test_no_puck_updates_feedback_pose_and_smoothly_returns_fallback_to_ready():
     image = np.zeros((720, 1280, 3), dtype=np.uint8)
     result = runtime.process_frame(Frame(image, timestamp=1.0))
     assert result.track is None and result.ai_decision is None
-    assert result.ai_target == READY_POSITION
+    assert tuple(runtime.target) == READY_POSITION
     assert runtime.ai_current_pos == [210.0, 160.0]
 
     runtime.set_ai_feedback(None)
     for index in range(1, 31):
         result = runtime.process_frame(Frame(image, timestamp=1.0 + index * 0.02))
-    assert result.ai_target == READY_POSITION
+    assert tuple(runtime.target) == READY_POSITION
     assert math.dist(runtime.ai_current_pos, READY_POSITION) < core.STONE_RADIUS
     cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
     new = runtime.process_frame(Frame(image, timestamp=1.7))
-    assert new.ai_target == new.curling_state.position
+    assert _target(new) == new.curling_state.position
 
 
 def test_camera_calibration_capture_failure_exits_and_cleans_up():
@@ -769,7 +724,7 @@ def test_adaptive_roi_stationary_puck_local_detection_maintains_track():
     """静止冰壶动态 ROI 包含目标并由局部 detect_candidates 找回，维持同一轨迹。"""
     from air_hockey.app.vision_runtime import _compute_dynamic_roi
 
-    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
     track_id = None
 
     for i in range(3):
@@ -803,7 +758,7 @@ def test_adaptive_roi_fast_puck_and_dropped_frames_reacquired_locally():
     """高速球与掉帧时根据速度和时间差扩展搜索框，局部候选找回并维持轨迹。"""
     from air_hockey.app.vision_runtime import _compute_dynamic_roi
 
-    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
 
     track_id = None
     x = 200
@@ -849,7 +804,7 @@ def test_adaptive_roi_fast_reversal_contains_previous_observation():
     """快速反向时 ROI 同时包含上一观测点与预测位置，局部找回并维持轨迹。"""
     from air_hockey.app.vision_runtime import _compute_dynamic_roi
 
-    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True, detection_interval=1)
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
 
     track_id = None
     x = 200
@@ -945,10 +900,9 @@ def test_prediction_failure_does_not_kill_runtime_and_ai_still_defends():
     cv2.circle(image, (640, 600), 30, (0, 0, 255), -1)
     result = runtime.process_frame(Frame(image, timestamp=1.0))
     assert result.curling_state is not None
-    assert result.prediction is None and result.trajectory is None
+    assert result.prediction is None
     assert result.ai_decision is not None
     assert math.isfinite(result.ai_decision.target_x) and math.isfinite(result.ai_decision.target_y)
-    assert runtime.prediction_errors == 1
 
 
 def test_pending_far_detection_does_not_rewind_kalman():
@@ -969,3 +923,33 @@ def test_pending_far_detection_does_not_rewind_kalman():
     assert pending.curling_state.timestamp == 1.09
     moved = (pending.curling_state.x - missed.curling_state.x, pending.curling_state.y - missed.curling_state.y)
     assert moved[0] * missed.curling_state.vx + moved[1] * missed.curling_state.vy > 0.0
+
+
+def test_track_loss_and_new_identity_reset_ai_memory():
+    """换球 / 丢轨时 AI 的回收阶段与冲门迟滞必须一起清掉，不能带到下一颗球。"""
+    runtime = VisionRuntime(table_calibration_file=None, disable_undistort=True)
+
+    def dirty():
+        runtime.ai._retrieving, runtime.ai._retrieve_step, runtime.ai._goal_guard = True, 3, True
+
+    def assert_clean():
+        assert (runtime.ai._retrieving, runtime.ai._retrieve_step, runtime.ai._goal_guard) == (False, 0, False)
+
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    dirty()
+    runtime.process_frame(Frame(image, timestamp=1.0))   # 没有球
+    assert_clean()
+
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image, (500, 300), 30, (0, 0, 255), -1)
+    old_identity = runtime.process_frame(Frame(image, timestamp=1.1)).track.track_id
+    calls = []
+    original_reset = runtime.ai.reset
+    runtime.ai.reset = lambda: (calls.append(1), original_reset())
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
+    runtime.process_frame(Frame(image, timestamp=1.2))   # 远处候选，第一次只记待确认，不换身份
+    assert not calls
+    new = runtime.process_frame(Frame(image, timestamp=1.3))
+    assert new.track.track_id != old_identity
+    assert calls == [1]

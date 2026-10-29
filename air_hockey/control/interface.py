@@ -11,7 +11,7 @@ import time
 
 from . import protocol
 from .limits import (
-    COORD_EPSILON, DEFAULT_LIMITS, DEFAULT_ZONE, ClampStats,
+    DEFAULT_LIMITS, DEFAULT_ZONE, ClampStats,
     game_to_physical, game_to_physical_raw, physical_to_game, validated_zone,
 )
 from .protocol import (
@@ -43,8 +43,7 @@ class PLCInterface:
 
     def __init__(self, ip="192.168.0.64", rack=0, slot=1, zone=None, limits=None):
         self.ip, self.rack, self.slot = ip, rack, slot
-        # ★ 轴的实际位置（游戏坐标），由 PLCLink 每个周期从反馈里更新。
-        #   _prepare_move 的死区判据要用它 —— 只看"上次发了什么"会假死，见那里的注释。
+        # 轴的实际位置（游戏坐标）和 busy，由 PLCLink 每周期从反馈更新，_prepare_move 的死区判据要用
         self.actual_game = None
         self.actual_busy = False
         self.zone = validated_zone(DEFAULT_ZONE if zone is None else zone)
@@ -144,12 +143,7 @@ class PLCInterface:
         return [self._client.db_read(db, start, size) for db, start, size in specs]
 
     def _read_multi_vars(self, specs):
-        """一次请求读多个区域。
-
-        python-snap7 1.x 的 read_multi_vars 要的是 S7DataItem 的 ctypes 数组，
-        旧代码传 dict 列表会被 byref() 拒绝，于是退化成逐块读（两次往返 ≈ 9 ms）。
-        这里直接调底层 Cli_ReadMultiVars，把 2 次往返压成 1 次。
-        """
+        """一次请求读多个区域：直接调底层 Cli_ReadMultiVars，把两次往返（约 9ms）压成一次。"""
         library = getattr(self._client, "_library", None)
         pointer = getattr(self._client, "_pointer", None)
         if library is None or pointer is None:
@@ -176,90 +170,55 @@ class PLCInterface:
                 raise RuntimeError(f"item {index} failed: {items[index].Result}")
         return [bytearray(bytes(buffer)) for buffer in buffers]
 
-    def _read_status_blocks(self):
-        try:
-            return self._read_db_blocks(
-                ((DB_MOTION, STATUS_READ_START, STATUS_READ_SIZE),
-                 (DB_COMM, COMM_READ_START, COMM_READ_SIZE)))
-        except Exception:
-            return None, None
-
     def clear_trigger(self):
         self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, False)
 
-    def set_axis_enable(self, axis, enabled):
-        """单轴使能 / 撤销。axis 为 "x" 或 "y"。
-
-        两个轴必须**都**使能程序才允许下发运动（见 PLCLink._motion_safe），
-        所以单轴使能只用于现场单独调试或单独撤下一个报故障的轴。
-        """
-        if not self.connected:
-            return False
-        bit = AXIS_ENABLE_BITS.get(axis)
-        if bit is None:
+    def _write_command_bit(self, byte, bit, value=None):
+        """写 DB1 命令位；value=None 时发一个 50ms 脉冲（写 1 再写 0）。失败返回 False 并标记断线。"""
+        if not self.connected or bit is None:
             return False
         try:
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, bit, bool(enabled))
+            if value is None:
+                self._write_bool(DB_MOTION, byte, bit, True)
+                time.sleep(0.05)
+                self._write_bool(DB_MOTION, byte, bit, False)
+            else:
+                self._write_bool(DB_MOTION, byte, bit, value)
             return True
         except Exception:
             self._connected = False
             return False
+
+    def set_axis_enable(self, axis, enabled):
+        """单轴使能 / 撤销（axis 为 "x" / "y"）；两个轴都使能才允许下发运动（见 PLCLink._motion_safe）。"""
+        return self._write_command_bit(MOTION_CMD_BYTE, AXIS_ENABLE_BITS.get(axis), bool(enabled))
 
     def reset_axis(self, axis):
         """单轴复位（清该轴的报警）。"""
-        if not self.connected:
-            return False
-        bit = AXIS_RESET_BITS.get(axis)
-        if bit is None:
-            return False
-        try:
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, bit, True)
-            time.sleep(0.05)
-            self._write_bool(DB_MOTION, MOTION_CMD_BYTE, bit, False)
-            return True
-        except Exception:
-            self._connected = False
-            return False
+        return self._write_command_bit(MOTION_CMD_BYTE, AXIS_RESET_BITS.get(axis))
 
     def home_axis(self, axis):
-        """单轴回零。[!] 回零**会让该轴动**（去找参考点），是刻意的人工动作。"""
-        if not self.connected:
-            return False
-        bit = AXIS_HOME_BITS.get(axis)
-        if bit is None:
-            return False
-        try:
-            self._write_bool(DB_MOTION, HOMING_BYTE, bit, True)
-            time.sleep(0.05)
-            self._write_bool(DB_MOTION, HOMING_BYTE, bit, False)
-            return True
-        except Exception:
-            self._connected = False
-            return False
+        """单轴回零（脉冲 DB1.1.0 / 1.1）。
+
+        当前 TIA 里 MC_Home 的 Mode 没接线 = 0：轴不会动，PLC 直接把当前位置设为原点。
+        轴不在参考位置时按下，坐标系随之错位、命令包络失效，只剩硬件限位开关兜底。
+        """
+        return self._write_command_bit(HOMING_BYTE, AXIS_HOME_BITS.get(axis))
 
     def enable_axes(self):
         return all(self.set_axis_enable(axis, True) for axis in AXIS_NAMES)
 
     def disable_axes(self):
-        # 两个都要写：用 all() 会在第一个失败时短路，漏掉另一个。
+        # 用列表而不是生成器：两个轴都要写，不能在第一个失败时短路
         return all([self.set_axis_enable(axis, False) for axis in AXIS_NAMES])
 
     def home_axes(self):
         return all(self.home_axis(axis) for axis in AXIS_NAMES)
 
     def axes_reset(self):
-        # 组复位 + 两个单轴复位
+        """两个单轴复位 + 组复位。"""
         ok = all([self.reset_axis(axis) for axis in AXIS_NAMES])
-        if not self.connected:
-            return False
-        try:
-            self._write_bool(DB_MOTION, GROUP_CTRL_BYTE, GROUP_RESET_BIT, True)
-            time.sleep(0.05)
-            self._write_bool(DB_MOTION, GROUP_CTRL_BYTE, GROUP_RESET_BIT, False)
-            return ok
-        except Exception:
-            self._connected = False
-            return False
+        return self._write_command_bit(GROUP_CTRL_BYTE, GROUP_RESET_BIT) and ok
 
     def set_cylinder(self, on):
         """DB1.118.0 气缸启动：开关量，状态由界面持有（PLC 无回读）。"""
@@ -291,9 +250,8 @@ class PLCInterface:
                         abs(phys_y - self._last_phys_y)) < ENDPOINT_RESEND_MM):
             self.last_send_state = "pending"
             return None
-        # 起点：优先用"上次真正发出去的位置"；还没有就用轴的**实际位置**打底。
-        # [!] 只做局部变量，self._last_phys_* 只在 _commit_move 里更新 ——
-        #    否则"写失败后必须清空跟踪"的保证失效（有测试守着）。
+        # 起点：优先用上次真正发出去的位置，还没有就用轴的实际位置。
+        # 只用局部变量：self._last_phys_* 只在 _commit_move 里更新，写失败时跟踪才能保持清空。
         origin_x, origin_y = self._last_phys_x, self._last_phys_y
         actual = self.actual_game
         if origin_x is None and actual is not None:
@@ -331,10 +289,9 @@ class PLCInterface:
         self.last_send_state = "sent"
 
     def send_linear_move(self, game_x, game_y):
-        """序号握手：写目标块，再写递增的序号 —— PLC 比较序号后执行。
+        """序号握手：先写目标块，再写递增的序号，PLC 比较序号后执行。
 
-        [!] 顺序不能反：**先写目标块，再写序号**。这样 PLC 看到新序号时
-        目标已经稳定。序号只在整条写成功后才推进。
+        顺序不能反，PLC 看到新序号时目标必须已经稳定；序号只在整条写成功后才推进。
         """
         if not self.connected:
             self.last_send_state = "disconnected"
@@ -359,27 +316,13 @@ class PLCInterface:
         if not self.connected:
             return None
         try:
-            db1, db18 = self._read_status_blocks()
-            if db1 is None:
-                self._connected = False
-                return None
+            db1, db18 = self._read_db_blocks(((DB_MOTION, STATUS_READ_START, STATUS_READ_SIZE),
+                                              (DB_COMM, COMM_READ_START, COMM_READ_SIZE)))
             status, comm, group = db1[MOTION_STATUS_BYTE], db18[COMM_BYTE], db1[GROUP_CTRL_BYTE]
 
-            def _word(offset):
-                """按无符号读一个 Word；DB18 还是旧长度时返回 None。"""
-                if offset + 2 > len(db18):
-                    return None
+            def word(offset):
+                # 按无符号读，16#8001 这类码才和 TIA 显示一致
                 return struct.unpack_from(">H", db18, offset)[0]
-
-            def _bit(offset, bit):
-                if offset >= len(db18):
-                    return None
-                return bool(db18[offset] & (1 << bit))
-
-            def _lreal(offset):
-                if offset + 8 > len(db18):
-                    return None
-                return struct.unpack_from(">d", db18, offset)[0]
 
             return {
                 "x_en": bool(status & 0x04), "y_en": bool(status & 0x08),
@@ -387,28 +330,22 @@ class PLCInterface:
                 "y_pos": struct.unpack_from(">f", db1, Y_POS_OFFSET)[0],
                 "x_err": bool(comm & (1 << COMM_X_ERR_BIT)),
                 "y_err": bool(db18[COMM_Y_ERR_OFFSET] & (1 << COMM_Y_ERR_BIT)),
-                # ★ 轴自己的故障码（一直没读）
-                "x_errid": _word(COMM_X_ERRID_OFFSET),
-                "y_errid": _word(COMM_Y_ERRID_OFFSET),
-                # 运动指令的 Error / ErrorId（DB18.34.3 / 36，1211C 程序暂未接线，恒为 0）
-                "mc_error": _bit(COMM_MC_ERR_OFFSET, COMM_MC_ERR_BIT),
-                "mc_errid": _word(COMM_MC_ERRID_OFFSET),
+                "x_errid": word(COMM_X_ERRID_OFFSET),
+                "y_errid": word(COMM_Y_ERRID_OFFSET),
+                # DB18.32 以后（运动指令 Error/ErrorId、ErrorDetail、RemainingDistance）1211C 程序还没写，恒为 0
+                "mc_error": bool(db18[COMM_MC_ERR_OFFSET] & (1 << COMM_MC_ERR_BIT)),
+                "mc_errid": word(COMM_MC_ERRID_OFFSET),
                 "busy": bool(db1[MOTION_BUSY_BYTE] & 1),
                 "plc_heartbeat": bool(comm & (1 << COMM_PLC_HEARTBEAT_BIT)),
                 "comm_lost": bool(comm & (1 << COMM_LINK_LOST_BIT)),
                 "axes_ready": bool(comm & (1 << COMM_AXES_READY_BIT)),
                 "group_stop": bool(group & (1 << GROUP_STOP_BIT)),
                 "comm_lost_latch": bool(group & (1 << GROUP_COMM_LOST_LATCH_BIT)),
-                # ErrorDetail.Number：按**无符号**读，16#8001 这类码才和 TIA 显示一致。
-                "kinematics_error": struct.unpack_from(">H", db18, COMM_KIN_ERROR_OFFSET)[0],
-                # ErrorDetail.Reaction（DInt，有符号）—— 读不到就是 None（DB18 短）
-                "kin_reaction": (struct.unpack_from(">i", db18, COMM_KIN_REACTION_OFFSET)[0]
-                                 if COMM_KIN_REACTION_OFFSET + 4 <= len(db18) else None),
-                # PLC 已处理到的序号（DB1.94 上次序号），和本地序号一比就是"落后几条"。
-                "seq_ack": (struct.unpack_from(">i", db1, COMM_SEQ_ACK_OFFSET)[0]
-                            if COMM_SEQ_ACK_OFFSET + 4 <= len(db1) else None),
-                # 当前运动还差多远（DB18.46，1211C 程序暂未接线）
-                "mc_remaining": _lreal(COMM_MC_REMAINING_OFFSET),
+                "kinematics_error": word(COMM_KIN_ERROR_OFFSET),
+                "kin_reaction": struct.unpack_from(">i", db18, COMM_KIN_REACTION_OFFSET)[0],
+                # PLC 已处理到的序号（DB1.94），和本地序号一比就是"落后几条"
+                "seq_ack": struct.unpack_from(">i", db1, COMM_SEQ_ACK_OFFSET)[0],
+                "mc_remaining": struct.unpack_from(">d", db18, COMM_MC_REMAINING_OFFSET)[0],
             }
         except Exception:
             self._connected = False
