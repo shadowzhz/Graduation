@@ -4,39 +4,15 @@
 不包含也不得修改任何共享物理与算法常量。
 """
 
-import threading
-
 from air_hockey.core_config import BASE_CANVAS_HEIGHT, BASE_CANVAS_WIDTH
 UI_SCALE = 1.0
 
 CANVAS_WIDTH = BASE_CANVAS_WIDTH
 CANVAS_HEIGHT = BASE_CANVAS_HEIGHT
 
-LAYOUT_CONFIG_LOCK = threading.RLock()
-LAYOUT_THREAD_ID = None
-LAYOUT_CONFIGURED = False
-LAYOUT_ROOT = None
-
 
 def configure_responsive_layout(root):
-    """按屏幕大小缩放画布，只能在 Tk 主线程调一次。"""
-    global LAYOUT_THREAD_ID, LAYOUT_CONFIGURED, LAYOUT_ROOT
-    thread_id = threading.get_ident()
-    with LAYOUT_CONFIG_LOCK:
-        if LAYOUT_THREAD_ID is None:
-            LAYOUT_THREAD_ID = thread_id
-        elif LAYOUT_THREAD_ID != thread_id:
-            raise RuntimeError("configure_responsive_layout 必须在 Tk 主线程调用")
-        if LAYOUT_CONFIGURED:
-            if LAYOUT_ROOT is root:
-                return
-            raise RuntimeError("布局已经绑定到另一个窗口，不能在运行中重新配置")
-        _apply_responsive_layout(root)
-        LAYOUT_CONFIGURED = True
-        LAYOUT_ROOT = root
-
-
-def _apply_responsive_layout(root):
+    """按屏幕大小缩放画布；在创建 AirHockeyGame 之前调用。"""
     global UI_SCALE, CANVAS_WIDTH, CANVAS_HEIGHT
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()

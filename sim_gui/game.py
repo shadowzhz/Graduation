@@ -6,7 +6,6 @@
 
 import argparse
 import math
-import os
 import sys
 import time
 import tkinter as tk
@@ -452,7 +451,7 @@ class AirHockeyGame:
 
         feedback = self.plc.feedback
         # PLC 暂时连着但反馈停止更新时，上一笔位置同样不再可信。
-        fresh = feedback.valid and 0 <= time.monotonic() - feedback.stamp < 0.25
+        fresh = feedback.valid and 0 <= time.perf_counter() - feedback.stamp < 0.25
         online = bool(self.plc.connected and fresh)
         self.plc_feedback_ready = online and feedback.plc_echo_ok
         self.plc_axis_alarm = bool(online and (feedback.kinematics_error or feedback.x_err or feedback.y_err))
@@ -821,11 +820,6 @@ def main():
     if args.plc and (not math.isfinite(args.plc_rate) or args.plc_rate <= 0.0):
         parser.error("--plc-rate 必须为有限正数")
 
-    if not os.environ.get("DISPLAY") and os.path.exists("/tmp/.X11-unix/X0"):
-        os.environ["DISPLAY"] = ":0"
-        xauthority = "/run/user/1000/gdm/Xauthority"
-        if os.path.exists(xauthority) and not os.environ.get("XAUTHORITY"):
-            os.environ["XAUTHORITY"] = xauthority
     root = tk.Tk()
     gui_config.configure_responsive_layout(root)
     AirHockeyGame(root, plc_ip=args.plc, plc_rate=args.plc_rate)

@@ -220,7 +220,7 @@ def test_reset_tracking_reissues_same_target_without_reporting_failure():
         link.drain_messages()
 
         assert link.reset_tracking()
-        assert until(lambda: client._last_phys_x is None)
+        assert until(lambda: client.last_phys_x is None)
         assert not link.drain_messages()
 
         link.set_target(300, 180)
@@ -247,13 +247,13 @@ def test_atomic_trigger_preserves_deadzone_and_clipping():
         client.clear_trigger()
         before = len(client.transport.moves)
         before_operations = len(client.transport.operations)
-        previous_target = (client._last_phys_x, client._last_phys_y)
+        previous_target = (client.last_phys_x, client.last_phys_y)
         assert not client.send_linear_move(1e9, 1e9)
         assert client.last_send_state == "invalid"
         assert len(client.transport.moves) == before
         assert not any(operation[0] == "payload"
                        for operation in client.transport.operations[before_operations:])
-        assert (client._last_phys_x, client._last_phys_y) == previous_target
+        assert (client.last_phys_x, client.last_phys_y) == previous_target
         for invalid in (float("nan"), float("inf"), -float("inf")):
             assert not client.send_linear_move(invalid, 0)
             assert client.last_send_state == "invalid"
@@ -558,7 +558,7 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
         try:
             assert client.connect()
             assert client.send_linear_move(300, 180)
-            previous = (client._last_phys_x, client._last_phys_y, client.sequence)
+            previous = (client.last_phys_x, client.last_phys_y, client.sequence)
             before = len(client.transport.moves)
             start = len(client.transport.operations)
             client.transport.fail_payload = failure == "payload"
@@ -567,7 +567,7 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
             assert not client.connected and client.last_send_state == "disconnected"
             assert len(client.transport.moves) == before
             # 序号没写成功就不能推进，否则下一条会跳号
-            assert (client._last_phys_x, client._last_phys_y, client.sequence) == previous
+            assert (client.last_phys_x, client.last_phys_y, client.sequence) == previous
             operations = client.transport.operations[start:]
             # 每次下发按顺序写：目标块 → 序号。
             #   · payload 失败在第 1 步 → 只有 1 次操作
@@ -681,7 +681,7 @@ def test_native_motion_error_invalidates_worker_feedback_and_arm():
             assert not client.connected and not link.armed
             assert not link.feedback.valid and link._target is None
             assert client.transport.moves == []
-            assert client._last_phys_x is None
+            assert client.last_phys_x is None
         finally:
             client.disconnect()
 

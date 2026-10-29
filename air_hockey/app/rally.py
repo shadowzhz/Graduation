@@ -79,14 +79,11 @@ class RallyController:
         """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
         if self.reachable_bounds is None:
             return True
-        try:
-            left, right, top, bottom = self.reachable_bounds
-            closest_x = min(max(stone.x, left), right)
-            closest_y = min(stone.y, bottom)
-            return (stone.y > top and math.hypot(stone.x - closest_x, stone.y - closest_y)
-                    < core.STONE_RADIUS + core.MALLET_RADIUS)
-        except (TypeError, ValueError, IndexError):
-            return True
+        left, right, top, bottom = self.reachable_bounds
+        closest_x = min(max(stone.x, left), right)
+        closest_y = min(stone.y, bottom)
+        return (stone.y > top and math.hypot(stone.x - closest_x, stone.y - closest_y)
+                < core.STONE_RADIUS + core.MALLET_RADIUS)
 
     def update(self, result: VisionResult, *, now: float, feedback=None,
                mallet_position=READY_POSITION) -> RallyDecision:

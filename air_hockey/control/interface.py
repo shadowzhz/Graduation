@@ -54,13 +54,12 @@ class PLCInterface:
         self._connected = False
         self.last_heartbeat_time = 0.0
         self.heartbeat_state = False
-        self._last_phys_x = None
-        self._last_phys_y = None
+        self.last_phys_x = None
+        self.last_phys_y = None
         # 序号握手：每成功下发一条 +1。种子取当前时间，避免重启后恰好与 PLC 里记的"上次序号"相同、
         # 第一条指令被当成旧指令丢掉。
         self.sequence = int(time.time()) % 1000000 + 1
         self.last_send_state = "unknown"
-        # 第一次下发时 _last_phys_x 还是 None，诊断代码照样要能读到它。
         self.last_send_dist_mm = 0.0
         self.last_error = ""
         self._multi_read_failed = False
@@ -104,8 +103,8 @@ class PLCInterface:
         self.reset_tracking()
 
     def reset_tracking(self):
-        self._last_phys_x = None
-        self._last_phys_y = None
+        self.last_phys_x = None
+        self.last_phys_y = None
         return True
 
     def _write_bool(self, db, offset, bit, value):
@@ -245,14 +244,14 @@ class PLCInterface:
             self.last_send_state = "invalid"
             return None
         # 执行中：新终点离上次下发的终点不到 ENDPOINT_RESEND_MM 就不再排队。
-        if (self.actual_busy and self._last_phys_x is not None
-                and max(abs(phys_x - self._last_phys_x),
-                        abs(phys_y - self._last_phys_y)) < ENDPOINT_RESEND_MM):
+        if (self.actual_busy and self.last_phys_x is not None
+                and max(abs(phys_x - self.last_phys_x),
+                        abs(phys_y - self.last_phys_y)) < ENDPOINT_RESEND_MM):
             self.last_send_state = "pending"
             return None
         # 起点：优先用上次真正发出去的位置，还没有就用轴的实际位置。
-        # 只用局部变量：self._last_phys_* 只在 _commit_move 里更新，写失败时跟踪才能保持清空。
-        origin_x, origin_y = self._last_phys_x, self._last_phys_y
+        # 只用局部变量：self.last_phys_* 只在 _commit_move 里更新，写失败时跟踪才能保持清空。
+        origin_x, origin_y = self.last_phys_x, self.last_phys_y
         actual = self.actual_game
         if origin_x is None and actual is not None:
             try:
@@ -283,7 +282,7 @@ class PLCInterface:
                               struct.pack(">ffff", phys_x, phys_y, phys_y, 0.0))
 
     def _commit_move(self, phys_x, phys_y, distance):
-        self._last_phys_x, self._last_phys_y = phys_x, phys_y
+        self.last_phys_x, self.last_phys_y = phys_x, phys_y
         if distance is not None:
             self.last_send_dist_mm = distance
         self.last_send_state = "sent"

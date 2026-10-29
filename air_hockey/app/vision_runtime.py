@@ -18,7 +18,7 @@ from ..camera.types import Frame
 from ..game_state import CurlingState, GameState, TrackingState
 from ..estimation import KalmanFilter
 from ..prediction import PredictionState, TrajectoryPredictor
-from ..vision import StoneDetector, VisionPipeline
+from ..vision import CameraGeometry, StoneDetector
 from ..vision.tracker import StoneTracker, TrackState
 from ..vision.types import Detection, ROI, Track
 
@@ -134,7 +134,6 @@ class VisionRuntime:
         predictor: Optional[TrajectoryPredictor] = None,
         ai: Optional[AirHockeyAI] = None,
         mallet_speed: Optional[float] = None,
-        vision_pipeline: Optional[VisionPipeline] = None,
         profile: bool = False,
     ) -> None:
         self.table_roi = tuple(table_roi)
@@ -169,18 +168,13 @@ class VisionRuntime:
             reaction_delay=0.0, attack_line=core.RINK_CENTER_Y,
         )
 
-        if vision_pipeline is not None:
-            self.vision_pipeline = vision_pipeline
-            self.camera_geometry = vision_pipeline.geometry
-        else:
-            self.vision_pipeline = VisionPipeline(
-                calibration_file=calibration_file,
-                enabled=not disable_undistort,
-                table_roi=self.table_roi,
-                rink_bounds=(core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM),
-                table_calibration_file=table_calibration_file,
-            )
-            self.camera_geometry = self.vision_pipeline.geometry
+        self.camera_geometry = CameraGeometry.from_calibration_file(
+            calibration_file=calibration_file,
+            table_roi=self.table_roi,
+            rink_bounds=(core.RINK_LEFT, core.RINK_RIGHT, core.RINK_TOP, core.RINK_BOTTOM),
+            table_calibration_file=table_calibration_file,
+            enabled=not disable_undistort,
+        )
 
         self.last_timestamp = None
         self._kalman_track_id = None
@@ -240,9 +234,13 @@ class VisionRuntime:
         self.last_ai_ms = None
         self.frame_index += 1
 
-        processed_frame = self.vision_pipeline.process(frame)
+        geometry = self.camera_geometry
+        if geometry.enabled and geometry.camera_matrix is not None:
+            height, width = frame.image.shape[:2]
+            if geometry.image_size != (width, height):
+                geometry.set_image_size((width, height))
 
-        now = processed_frame.timestamp
+        now = frame.timestamp
         raw_dt = 0.0 if self.last_timestamp is None else (now - self.last_timestamp)
         self.last_timestamp = now
         dt = min(max(raw_dt, 0.001), 0.1)
@@ -254,12 +252,12 @@ class VisionRuntime:
         t_detect_start = time.perf_counter()
         dynamic_roi = None
         if _track_usable(self.tracker.track):
-            img_h, img_w = processed_frame.image.shape[:2]
+            img_h, img_w = frame.image.shape[:2]
             dynamic_roi = _compute_dynamic_roi(
                 self.tracker.track, self.tracker.predict_position(now), img_w, img_h)
-        detection = self._detect(processed_frame, dynamic_roi=dynamic_roi)
+        detection = self._detect(frame, dynamic_roi=dynamic_roi)
         if detection is None and dynamic_roi is not None:
-            detection = self._detect(processed_frame)
+            detection = self._detect(frame)
         detected_ms = (time.perf_counter() - t_detect_start) * 1000
         self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
         if self.profile:
@@ -293,7 +291,7 @@ class VisionRuntime:
                 )
             else:
                 estimated = self.kalman.predict(
-                    processed_frame.timestamp,
+                    frame.timestamp,
                     confidence=track.confidence,
                     radius=track.radius,
                 )
@@ -351,7 +349,7 @@ class VisionRuntime:
         self.frame_ms = self.frame_ms * 0.9 + (time.perf_counter() - t0) * 1000 * 0.1
 
         return VisionResult(
-            frame=processed_frame,
+            frame=frame,
             detection=detection,
             track=track,
             track_confirmed=_track_usable(track),

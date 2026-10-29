@@ -45,9 +45,8 @@ class PLCLink:
         self._requires_snap7 = client_factory is None
         self._client = (PLCInterface(ip, rack, slot, zone=self.zone, limits=self.limits)
                         if client_factory is None else client_factory(ip, rack, slot))
-        if isinstance(self._client, PLCInterface):
-            self._client.zone = self.zone
-            self._client.limits = self.limits
+        self._client.zone = self.zone
+        self._client.limits = self.limits
         self._lock = threading.Lock()
         self._target = None
         self._target_at = 0.0
@@ -134,7 +133,7 @@ class PLCLink:
             self._stats_dists = []
             # 序号模式的诊断：PLC 已处理到哪
             seq_ack = self._feedback.seq_ack
-            seq_now = getattr(self._client, "sequence", None)
+            seq_now = self._client.sequence
             seq_sent = self._sequence_sent
 
         dists.sort()
@@ -148,16 +147,14 @@ class PLCLink:
         if counters["other"]:
             text += f" | 其它状态 {counters['other']}"
         # 夹取比例：目标被命令包络截住的频率，高说明经常要求够不到的位置
-        clamp_stats = getattr(client, "clamp_stats", None)
-        counts = clamp_stats.snapshot() if clamp_stats is not None else {"total": 0}
+        counts = client.clamp_stats.snapshot()
         if counts["total"]:
             pct_x = 100.0 * counts["x"] / counts["total"]
             pct_y = 100.0 * counts["y"] / counts["total"]
             text += f" | 目标被夹取 X {pct_x:.0f}% Y {pct_y:.0f}%"
             if pct_x > 30.0 or pct_y > 30.0:
                 text += "  ← 频繁要求够不到的位置，机械臂长期顶在命令限位上"
-        if clamp_stats is not None:
-            clamp_stats.reset()
+        client.clamp_stats.reset()
         # 序号握手：PLC 落后几条指令
         if seq_ack is None or seq_now is None:
             text += f" | 序号 已发 {seq_sent} 条（PLC 未回报 ack，检查 DB1.94）"
@@ -457,12 +454,8 @@ class PLCLink:
         if feedback is None:
             return
         # 死区判据要用轴的实际位置判断"到没到"，不更新会把没走到的目标当成已到达、一直跳过
-        try:
-            client.actual_game = (feedback.x, feedback.y)
-        except Exception:
-            pass
-        if isinstance(client, PLCInterface):
-            client.actual_busy = feedback.busy
+        client.actual_game = (feedback.x, feedback.y)
+        client.actual_busy = feedback.busy
         safe = self._motion_safe(feedback)
         revoked = False
         interrupted_target = None
@@ -524,8 +517,8 @@ class PLCLink:
                 f"prev_en=({previous.x_en},{previous.y_en}) prev_ready={previous.axes_ready} "
                 f"prev_err=({previous.x_err},{previous.y_err}) prev_busy={previous.busy} "
                 f"intent={interrupted_target} "
-                f"last_sent=({getattr(client, '_last_phys_x', None)},{getattr(client, '_last_phys_y', None)}) "
-                f"step_mm={getattr(client, 'last_send_dist_mm', None)}"
+                f"last_sent=({client.last_phys_x},{client.last_phys_y}) "
+                f"step_mm={client.last_send_dist_mm}"
             )
         # Network I/O is never under the lock. Cancellation of an already executing
         # db_write cannot be guaranteed; no subsequent target remains queued.
@@ -545,11 +538,10 @@ class PLCLink:
             client.send_linear_move(*target)
             if client.connected and client.last_send_state == "sent":
                 self._sequence_sent += 1
-                sent_sequence = getattr(client, "sequence", None)
+                sent_sequence = client.sequence
             send_done = time.perf_counter()
             try:
-                sent_x = getattr(client, "_last_phys_x", None)
-                sent_y = getattr(client, "_last_phys_y", None)
+                sent_x, sent_y = client.last_phys_x, client.last_phys_y
                 if client.connected and client.last_send_state == "sent" and sent_x is not None:
                     with self._lock:
                         self._sent_snapshot = (send_done, sent_x, sent_y)
@@ -557,23 +549,18 @@ class PLCLink:
                                          send_start - target_at, sent_x, sent_y, seq=sent_sequence)
             except Exception:
                 pass
-            # 诊断累计必须容错：任何异常都不能打死 worker 线程
-            try:
-                state = client.last_send_state
-                with self._lock:
-                    # deadzone-resend 也真发出去了（目标没变但轴没到位），要算进下发频率
-                    if state in ("sent", "deadzone-resend"):
-                        self._stats_counters["sent"] += 1
-                        self._stats_dists.append(
-                            float(getattr(client, "last_send_dist_mm", 0.0) or 0.0))
-                    elif state == "deadzone":
-                        self._stats_counters["deadzone"] += 1
-                    elif state == "pending":
-                        self._stats_counters["pending"] += 1
-                    else:
-                        self._stats_counters["other"] += 1
-            except Exception:
-                pass
+            state = client.last_send_state
+            with self._lock:
+                # deadzone-resend 也真发出去了（目标没变但轴没到位），要算进下发频率
+                if state in ("sent", "deadzone-resend"):
+                    self._stats_counters["sent"] += 1
+                    self._stats_dists.append(client.last_send_dist_mm)
+                elif state == "deadzone":
+                    self._stats_counters["deadzone"] += 1
+                elif state == "pending":
+                    self._stats_counters["pending"] += 1
+                else:
+                    self._stats_counters["other"] += 1
         if not client.connected:
             self._invalidate_feedback()
         self.cycle_count += 1

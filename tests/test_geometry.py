@@ -19,7 +19,6 @@ import numpy as np
 
 from air_hockey import core_config as core
 from air_hockey.vision.geometry import CameraGeometry
-from air_hockey.vision.pipeline import VisionPipeline
 from air_hockey.vision.tracker import StoneTracker
 from air_hockey.vision.types import Detection, ROI
 
@@ -130,13 +129,6 @@ def test_missing_rink_bounds_raises_error():
     except ValueError as e:
         assert "rink_bounds must be provided" in str(e)
 
-    # 通过 VisionPipeline 调用时不给 rink_bounds
-    try:
-        VisionPipeline(calibration_file=CALIB_FILE, rink_bounds=None)
-        assert False, "Should have raised ValueError"
-    except ValueError as e:
-        assert "rink_bounds must be provided" in str(e)
-
     # 传入不符合 4 元素长度的 rink_bounds
     try:
         CameraGeometry(rink_bounds=(0.0, 100.0))
@@ -202,40 +194,6 @@ def test_disabled_calibration_does_not_require_image_size():
         np.savez(path, camera_matrix=np.eye(3), dist_coeffs=np.zeros(5))
         geom = CameraGeometry.from_calibration_file(path, rink_bounds=RINK_BOUNDS, enabled=False)
         assert not geom.enabled and geom.camera_matrix is None
-
-
-def test_tracker_independent_of_calibration_roi():
-    """测试 Tracker 坐标完全运行在 raw pixel，不受相机校正 ROI 影响。"""
-    tracker1 = StoneTracker(max_distance=100.0)
-    tracker2 = StoneTracker(max_distance=100.0)
-
-    # 模拟真实原始相机检测点
-    det1 = Detection(center_x=450.0, center_y=320.0, radius=25.0, area=1960.0, timestamp=0.0)
-    det2 = Detection(center_x=465.0, center_y=325.0, radius=25.0, area=1960.0, timestamp=0.05)
-
-    # Tracker 1: 直接以 raw 检测结果更新
-    tracker1.update(det1)
-    track1 = tracker1.update(det2)[0]
-
-    # Tracker 2: 即便存在 VisionPipeline (包含标定参数)，检测结果不被修改，Tracker 2 也接收相同的 raw 坐标
-    pipeline = VisionPipeline(
-        CALIB_FILE,
-        rink_bounds=(0.0, 1000.0, 0.0, 2000.0),
-        table_calibration_file=None,
-        enabled=True,
-    )
-    assert pipeline.enabled
-    # 按照新架构，pipeline 不会改变检测结果
-    tracker2.update(det1)
-    track2 = tracker2.update(det2)[0]
-
-    # 验证两个 Tracker 的内部状态完全一致且均为原始像素
-    assert track1.center_x == 465.0
-    assert track1.center_y == 325.0
-    assert track2.center_x == 465.0
-    assert track2.center_y == 325.0
-    assert track1.vx == track2.vx
-    assert track1.vy == track2.vy
 
 
 def test_dynamic_roi_centers_on_tracker_raw():
