@@ -46,7 +46,7 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False):
     if plc is not None:
         if dry_run:
             plc.clear_target()
-        elif not plc.set_target(request.target_x, request.target_y):
+        elif not plc.set_target(request.target_x, request.target_y, request.timestamp):
             plc.clear_target()
             return None
     return request
@@ -174,6 +174,7 @@ class LiveSession:
 
         self.plc_adapter = PlcControlAdapter()
         self.rally = RallyController()
+        self._plc_armed = False
         if args.plc:
             self.plc = start_plc(args, self.runtime, self.rally)
             if self.window is not None and not args.dry_run:
@@ -259,6 +260,16 @@ class LiveSession:
         finally:
             self.stop.set()
 
+    def _note_plc_arming(self, plc):
+        """撤权/回零/复位/故障/断线重连都会让 armed 从 True 变 False。
+
+        这一跳变时清掉 Rally 的接触与遮挡保持记忆：重新授权后不能复活上一颗球的旧目标。
+        """
+        armed_now = plc is not None and plc.armed
+        if self._plc_armed and not armed_now:
+            self.rally.reset()
+        return armed_now
+
     def _handle_frame(self, frame):
         plc, samples, runtime = self.plc, self.samples, self.runtime
 
@@ -266,6 +277,7 @@ class LiveSession:
         if plc is not None:
             for message in plc.drain_messages():
                 print(f"[PLC] {message}")
+        self._plc_armed = self._note_plc_arming(plc)
         runtime.set_ai_feedback(feedback)
         process_start = time.perf_counter() if samples is not None else 0.0
         result = runtime.process_frame(frame)

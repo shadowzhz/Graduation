@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import math
+import time
 from unittest.mock import patch
 
 import cv2
@@ -24,11 +25,11 @@ from air_hockey.control import PLCFeedback
 from air_hockey.prediction import TrajectoryPredictor
 from air_hockey.vision.types import Detection, Track, TrackState
 from air_hockey.game_state import CurlingState, GameState
-from air_hockey.app.live import submit_rally_target
+from air_hockey.app.live import LiveSession, submit_rally_target
 
 
 def observation(t, *, x=420.0, y=704.0, vx=0.0, vy=-300.0, hard=True,
-                confirmed=True, identity=1, mallet=READY_POSITION):
+                confirmed=True, identity=1, mallet=READY_POSITION, ai=None):
     stone = CurlingState(x, y, vx, vy, timestamp=t)
     prediction = TrajectoryPredictor().predict(stone)
     state = GameState(
@@ -39,7 +40,7 @@ def observation(t, *, x=420.0, y=704.0, vx=0.0, vy=-300.0, hard=True,
         difficulty=replace(core.DIFFICULTIES["普通"], aim_error=0, prediction=1,
                            reaction_delay=0, attack_line=core.RINK_CENTER_Y),
     )
-    decision = AirHockeyAI().choose_target(state, prediction=prediction)
+    decision = (ai or AirHockeyAI()).choose_target(state, prediction=prediction)
     return VisionResult(
         frame=Frame(np.zeros((20, 20, 3), np.uint8), timestamp=t),
         detection=Detection(x, y, 14, 700, t) if hard else None,
@@ -209,7 +210,7 @@ def test_dry_run_and_manual_plc_arm_remain_independent_of_play():
             pass
     plc = PLCLink("offline", client_factory=Transport)
     adapter = PlcControlAdapter()
-    result = observation(1, x=420, y=250, vy=0)
+    result = observation(time.perf_counter(), x=420, y=250, vy=0)
     tick(RallyController(), result)
     request = submit_rally_target(result, adapter, plc, dry_run=True)
     assert (request.target_x, request.target_y) == (420, 250)
@@ -325,6 +326,52 @@ def test_rally_rejects_stopped_pucks_outside_contact_reach():
         assert tick(controller, result).target is None
 
 
+def test_new_track_identity_does_not_inherit_touch_memory():
+    """★ F11 回归：换轨迹代号后不能沿用上一颗球的接触/放手记忆。"""
+    controller = RallyController()
+    # 旧球停在球槌下：建立接触记忆
+    old = observation(1.0, identity=1, x=400, y=400, vx=0, vy=0)
+    assert tick(controller, old, mallet=(400, 400)).state == RallyState.ATTACKING
+    # 新球（新代号）在机器半场朝对方飞，且离球槌很远：
+    # 若沿用旧接触记忆会被误判为"刚被我们打过"而放手回 READY
+    new = observation(1.1, identity=2, x=200, y=400, vx=0, vy=400)
+    decision = tick(controller, new, mallet=(400, 400))
+    assert decision.state == RallyState.ATTACKING
+    assert decision.target != READY_POSITION
+
+
+def test_invalid_state_does_not_let_hold_revive_the_old_target():
+    """★ F11 回归：无效帧清目标后，下一帧无球不能从保持记忆恢复旧目标。"""
+    controller = RallyController()
+    result = observation(1.0, x=420, y=250, vy=0)
+    held = tick(controller, result).target
+    assert held is not None and held != READY_POSITION
+    # 无效状态帧：位置非有限 -> 目标清空，保持记忆也必须作废
+    bad = observation(1.05, x=420, y=250, vy=0)
+    bad.curling_state = replace(bad.curling_state, x=float("nan"))
+    assert tick(controller, bad, mallet=held).target is None
+    occluded = observation(1.1, x=420, y=250, vy=0, hard=False, confirmed=False, mallet=held)
+    decision = tick(controller, occluded, now=1.1, mallet=held)
+    assert decision.target == READY_POSITION and not decision.held_target
+
+
+def test_plc_disarm_clears_cross_puck_rally_memory():
+    """★ F11 回归：撤权/回零/复位/重连（armed True->False）要清掉 Rally 记忆。"""
+    class FakePLC:
+        def __init__(self, armed):
+            self.armed = armed
+
+    session = LiveSession.__new__(LiveSession)
+    session.rally = RallyController()
+    session._plc_armed = True
+    session.rally._last_target = (350.0, 350.0)
+    session.rally._touched_at = 1.0
+    assert not session._note_plc_arming(FakePLC(False))
+    assert session.rally._last_target is None
+    assert session.rally._touched_at == -math.inf
+    assert session._note_plc_arming(FakePLC(True))
+
+
 def test_occlusion_hold_is_published_after_track_deletion_and_expires():
     runtime = VisionRuntime(table_roi=(0, 0, 1280, 720),
                             table_calibration_file=None, disable_undistort=True)
@@ -339,7 +386,8 @@ def test_occlusion_hold_is_published_after_track_deletion_and_expires():
             cv2.circle(image, (900, 220), 30, (0, 0, 255), -1)
         feedback = PLCFeedback(stamp=timestamp, valid=True, x=400, y=220,
                                x_en=True, y_en=True, axes_ready=True)
-        with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=timestamp):
+        with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=timestamp), \
+                patch("air_hockey.control.link.time.perf_counter", return_value=timestamp):
             runtime.set_ai_feedback(feedback)
             result = runtime.process_frame(Frame(image, timestamp=timestamp, sequence=sequence))
             tick(controller, result, feedback=feedback)
@@ -354,7 +402,8 @@ def test_occlusion_hold_is_published_after_track_deletion_and_expires():
 
     expired = timestamp + OCCLUSION_HOLD_SECONDS + 0.1
     feedback = replace(feedback, stamp=expired)
-    with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=expired):
+    with patch("air_hockey.app.vision_runtime.time.perf_counter", return_value=expired), \
+            patch("air_hockey.control.link.time.perf_counter", return_value=expired):
         runtime.set_ai_feedback(feedback)
         result = runtime.process_frame(Frame(image, timestamp=expired, sequence=sequence + 1))
         tick(controller, result, feedback=feedback)
@@ -362,6 +411,37 @@ def test_occlusion_hold_is_published_after_track_deletion_and_expires():
     assert request is not None
     assert link._target == READY_POSITION
     assert not link.armed
+
+def test_low_fps_occlusion_hold_counts_from_last_real_observation():
+    """★ F10 回归：10FPS 下漏检帧不能给确认和遮挡保持续命。
+
+    旧行为：最后观测后 0.8s 仍 confirmed，保持期再从预测帧起算，约 1.8s 才回 READY。
+    现在盲预测受物理时间限制，保持期固定从最后真实观测起算。
+    """
+    runtime = VisionRuntime(table_roi=(0, 0, 1280, 720),
+                            table_calibration_file=None, disable_undistort=True)
+    controller = RallyController()
+    visible = np.zeros((720, 1280, 3), np.uint8)
+    cv2.circle(visible, (900, 220), 30, (0, 0, 255), -1)
+    hidden = np.zeros_like(visible)
+    mallet = READY_POSITION
+    seen = {}
+    for sequence in range(1, 14):
+        t = 1.0 + (sequence - 1) * 0.1
+        result = runtime.process_frame(
+            Frame(visible if sequence == 1 else hidden, timestamp=t, sequence=sequence))
+        decision = controller.update(result, now=t, mallet_position=mallet)
+        seen[round(t, 2)] = (result.track_confirmed, decision.held_target, decision.target)
+        if sequence == 1:
+            assert decision.target is not None
+            mallet = decision.target
+    # 最后真实观测 1.0s；按帧续命会在 1.8s 仍 confirmed
+    assert not seen[1.8][0]
+    # 保持窗口从观测算 1.0s：窗口内仍保持，之后回 READY 且球槌停在旧目标附近也不再续期
+    assert seen[1.9][1]
+    assert not seen[2.1][1] and seen[2.1][2] == READY_POSITION
+    assert not seen[2.2][1] and seen[2.2][2] == READY_POSITION
+
 
 def test_midline_hysteresis_and_velocity_deadband_prevent_chatter():
     """验证中线迟滞带与速度死区彻底消除边界高频横跳。"""
@@ -418,3 +498,65 @@ def test_weak_outgoing_puck_that_stays_in_machine_half_is_still_attacked():
     weak = tick(controller, observation(1.0, x=340, y=250, vx=0, vy=60))
     assert weak.state == RallyState.ATTACKING, weak
     assert weak.target is not None and weak.target != READY_POSITION, weak
+
+
+def test_production_ai_defaults_midline_target_no_chatter():
+    """生产默认参数下，球在 y=529 与 531 之间抖动时，物理 Y 目标严禁在 172 与 -75.3mm 之间横跳。"""
+    from air_hockey.control.limits import DEFAULT_ZONE, DEFAULT_LIMITS, game_to_physical
+    controller = RallyController()
+    ai = AirHockeyAI()
+    # 连续跨中线抖动：y 从 529 切入机器半场后，在 529 与 531 间交替
+    puck_seq = [(1.0, 529.0), (1.05, 531.0), (1.1, 529.0), (1.15, 531.0)]
+    phys_y_targets = []
+    for t, y in puck_seq:
+        dec = tick(controller, observation(t, x=300.0, y=y, vx=0.0, vy=-20.0, ai=ai))
+        assert dec.state == RallyState.ATTACKING
+        _px, py = game_to_physical(DEFAULT_ZONE, DEFAULT_LIMITS, *dec.target)
+        phys_y_targets.append(py)
+    # 物理 Y 目标跳变必须小于 10mm（之前是 247.3mm 跳变）
+    for i in range(1, len(phys_y_targets)):
+        assert abs(phys_y_targets[i] - phys_y_targets[i - 1]) < 10.0, (
+            f"物理 Y 目标发生大幅跳变: {phys_y_targets[i-1]} -> {phys_y_targets[i]}"
+        )
+
+
+def test_strike_threshold_commitment_no_target_jump():
+    """迎击时间窗口边界（~0.15s）时间轻微抖动时，承诺阶段保持迎击，严禁 54.5mm 目标抽搐。"""
+    from air_hockey.control.limits import DEFAULT_ZONE, DEFAULT_LIMITS, game_to_physical
+    ai = AirHockeyAI()
+    home = core.AI_HOME_Y
+    # y=388 触发迎击（gap/speed < 0.15），y=389 略超窗口（gap/speed > 0.15）
+    # 迎击承诺建立后，在 388 与 389 间抖动目标必须锁在迎击点，不退回防守线
+    puck_y = [388.0, 389.0, 388.0, 389.0]
+    targets = []
+    for y in puck_y:
+        stone = CurlingState(300.0, y, 0.0, -1000.0)
+        state = GameState(
+            ai_x=300.0, ai_y=home, ai_home_y=home,
+            target_x=300.0, target_y=home, stone=stone,
+            awaiting_serve=False, current_server="player", serve_phase="idle",
+            stalled_stone_phase="idle", reaction_timer=0,
+            difficulty=replace(core.DIFFICULTIES["普通"], aim_error=0, prediction=1,
+                               reaction_delay=0, attack_line=core.RINK_CENTER_Y),
+        )
+        dec = ai.choose_target(state)
+        _px, py = game_to_physical(DEFAULT_ZONE, DEFAULT_LIMITS, dec.target_x, dec.target_y)
+        targets.append(py)
+    # 一旦进入迎击，后续在 388 与 389 之间抖动不能退回 -75.3mm（产生约 54.5mm 跳变）
+    for i in range(1, len(targets)):
+        assert abs(targets[i] - targets[i - 1]) < 5.0, (
+            f"迎击边界产生跳变: {targets[i-1]} -> {targets[i]}"
+        )
+    # 球反弹离开后（vy 变为正数），退出条件触发，平滑退回防守线
+    rebound_stone = CurlingState(300.0, 600.0, 0.0, 800.0)
+    rebound_state = GameState(
+        ai_x=300.0, ai_y=home, ai_home_y=home,
+        target_x=300.0, target_y=home, stone=rebound_stone,
+        awaiting_serve=False, current_server="player", serve_phase="idle",
+        stalled_stone_phase="idle", reaction_timer=0,
+        difficulty=replace(core.DIFFICULTIES["普通"], aim_error=0, prediction=1,
+                           reaction_delay=0, attack_line=core.RINK_CENTER_Y),
+    )
+    exit_dec = ai.choose_target(rebound_state)
+    _px, py = game_to_physical(DEFAULT_ZONE, DEFAULT_LIMITS, exit_dec.target_x, exit_dec.target_y)
+    assert abs(py - (-75.3)) < 1.0, f"反弹后应退出迎击回到防守线，实际为: {py}"

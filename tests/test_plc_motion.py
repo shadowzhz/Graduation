@@ -543,12 +543,83 @@ def test_stale_target_does_not_emit_motion_or_revoke_arm():
         link._armed = True
         link.set_target(450, 180)
         with link._lock:
-            link._target_at = time.perf_counter() - TARGET_MAX_AGE - 0.01
+            link._target_deadline = time.perf_counter() - 0.01
         link._cycle()
         assert client.transport.moves == []
         assert link.armed
     finally:
         client.disconnect()
+
+
+@memory_binding()
+def test_target_validity_counts_from_source_observation_not_republication():
+    """★ F06 回归：有效期从源观测算起，重发同一帧不能续期。
+
+    10.00s 的帧在 10.24s 发布，10.48s 仍发送过：本地年龄只有 240ms，
+    但源年龄已 480ms。deadline 必须固定在源时间 + TARGET_MAX_AGE。
+    """
+    client = MemoryPLC()
+    link = PLCLink("memory", client_factory=lambda *args: client)
+    clock = SimpleNamespace(now=100.0)
+    with patch("air_hockey.control.link.time.perf_counter", lambda: clock.now):
+        try:
+            assert client.connect()
+            link._echo_seen = True
+            link._echo_change_at = clock.now
+            link._last_plc_heartbeat = False
+            link._armed = True
+            # 源帧已 480ms 旧：发布本身不能让它变新
+            clock.now = 100.48
+            assert not link.set_target(450, 180, 100.0)
+            assert link._target is None
+            # 10.00s 帧在 10.24s 发布，10.26s 重发同一帧不得续期
+            clock.now = 100.24
+            assert link.set_target(450, 180, 100.0)
+            clock.now = 100.26
+            assert not link.set_target(450, 180, 100.0)
+            link._cycle()
+            assert client.transport.moves == []
+            # 新观测重新起算有效期
+            assert link.set_target(450, 180, 100.26)
+            link._cycle()
+            assert len(client.transport.moves) == 1
+        finally:
+            client.disconnect()
+
+
+@memory_binding()
+def test_slow_status_read_stamps_feedback_at_read_start():
+    """★ F07 回归：读取耗时 300ms 时，反馈年龄必须算上这段延迟。
+
+    原来时间戳取读取完成时刻，旧使能/位置反馈 age 恒为 0，会被当成刚采样。
+    """
+    client = MemoryPLC()
+    clock = SimpleNamespace(now=100.0)
+    read = client.read_status_and_position
+
+    def slow_read():
+        status = read()
+        clock.now += 0.3
+        return status
+
+    client.read_status_and_position = slow_read
+    link = PLCLink("memory", client_factory=lambda *args: client)
+    with patch("air_hockey.control.link.time.perf_counter", lambda: clock.now):
+        try:
+            assert client.connect()
+            link._echo_seen = True
+            link._echo_change_at = clock.now
+            link._last_plc_heartbeat = False
+            link._armed = True
+            link.set_target(450, 180)
+            link._cycle()
+            feedback = link.feedback
+            assert feedback.valid and feedback.stamp == 100.0
+            assert clock.now - feedback.stamp > TARGET_MAX_AGE
+            assert not link.armed
+            assert client.transport.moves == []
+        finally:
+            client.disconnect()
 
 
 @memory_binding()

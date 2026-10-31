@@ -10,7 +10,7 @@ from .. import core_config as core
 
 @dataclass(frozen=True)
 class PlcTarget:
-    """交给 PLCLink 的游戏场地目标；timestamp 仅用于本地记录。"""
+    """交给 PLCLink 的游戏场地目标；timestamp 是决策所用帧的 perf_counter 时刻，用于计算有效期。"""
 
     target_x: float
     target_y: float

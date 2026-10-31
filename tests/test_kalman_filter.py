@@ -343,5 +343,43 @@ def test_maneuver_gate_recovers_after_wall_bounce():
     assert False, "没有发生弹墙"
 
 
+def _recover_after_gap(target_y, predict_step, *, gap=0.045):
+    """静止收敛后遮挡 gap 秒，期间按 predict_step 逐帧预测，再用 target_y 的观测恢复。"""
+    kf = KalmanFilter(maneuver_gate=20.0)
+    for i in range(60):
+        kf.update(300.0, 600.0, i * 0.005)
+    t0 = 59 * 0.005
+    if predict_step is not None:
+        step = t0 + predict_step
+        while step < t0 + gap:
+            kf.predict(step)
+            step += predict_step
+    return kf.update(300.0, target_y, t0 + gap)
+
+
+def test_maneuver_gate_after_gap_uses_real_measurement_interval():
+    """★ F09 回归：遮挡期间插入 predict 不能改变机动重估速度。
+
+    速度必须由两次真实观测的间隔拟合；原实现用的是距最后一次 predict 的间隔，
+    同样 45ms 位移在插入 8 次预测后速度被放大 4 倍（-787 -> -3157）。
+    """
+    gap = 0.045
+    strike_y = 600.0 - 787.57 * gap
+    estimates = [_recover_after_gap(strike_y, step).vy for step in (None, 0.005, 0.002)]
+    for vy in estimates:
+        assert abs(vy - estimates[0]) < 1e-9, f"预测次数改变了机动重估：{estimates}"
+    assert abs(abs(estimates[0]) - 787.57) < 0.15 * 787.57
+
+
+def test_maneuver_gate_after_gap_bounded_when_ball_bounces():
+    """遮挡期间弹墙：两端观测只给出净位移，按真实间隔拟合即可，不能因预测次数放大。"""
+    gap = 0.045
+    bounce_y = 600.0 + 30.0
+    estimates = [_recover_after_gap(bounce_y, step).vy for step in (None, 0.005, 0.002)]
+    for vy in estimates:
+        assert abs(vy - estimates[0]) < 1e-9, f"预测次数改变了机动重估：{estimates}"
+        assert 0.0 < vy < 2.0 * abs(bounce_y - 600.0) / gap
+
+
 def test_maneuver_gate_disabled_by_default():
     assert KalmanFilter().maneuver_gate is None

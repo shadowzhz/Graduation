@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import hypot
+from math import hypot, isfinite
 
 from .types import Track, TrackState
 
@@ -17,16 +17,20 @@ class StoneTracker:
 
     # max_distance      最大允许移动距离
     # max_missed_frames 最大允许漏检帧数
+    # max_missed_seconds 最大允许无观测时长（秒）：低帧率下防止按帧续命
     # velocity_alpha    平滑系数
     # min_confirmed_hits 最少硬检测命中次数
     # replacement_hits  已有轨迹时，远处新目标接管轨迹所需的连续命中次数（1 = 立即接管）
     # max_speed         候选确认时允许的最大像素速度（px/s），冰壶最高约 1100 单位/s ≈ 2500px/s
     def __init__(self, max_distance=80.0, max_missed_frames=5, velocity_alpha=0.2,
-                 min_confirmed_hits=2, replacement_hits=1, max_speed=3000.0) -> None:
+                 min_confirmed_hits=2, replacement_hits=1, max_speed=3000.0,
+                 max_missed_seconds=0.25) -> None:
         if max_distance <= 0.0:
             raise ValueError("最大允许移动距离必须有效")
         if max_missed_frames < 0:
             raise ValueError("最大允许漏检帧数必须是非负数")
+        if not isfinite(max_missed_seconds) or max_missed_seconds <= 0.0:
+            raise ValueError("最大允许无观测时长必须有限且为正数")
         if not 0.0 < velocity_alpha <= 1.0:
             raise ValueError("平滑系数必须在 (0, 1]")
         if int(min_confirmed_hits) < 1 or int(min_confirmed_hits) != min_confirmed_hits:
@@ -35,6 +39,7 @@ class StoneTracker:
             raise ValueError("轨迹接管命中次数必须是正整数")
         self.max_distance = float(max_distance)
         self.max_missed_frames = int(max_missed_frames)
+        self.max_missed_seconds = float(max_missed_seconds)
         self.velocity_alpha = float(velocity_alpha)
         self.min_confirmed_hits = int(min_confirmed_hits)
         self.replacement_hits = int(replacement_hits)
@@ -49,10 +54,10 @@ class StoneTracker:
         return self._track
 
     # Detector 提供一个新的检测结果，用来更新 Tracker
-    def update(self, detection):
-        """用新的检测结果校正轨迹。"""
+    def update(self, detection, timestamp=None):
+        """用新的检测结果校正轨迹。detection 为 None 时 timestamp 是本帧时间。"""
         if detection is None:                           # 如果当前帧没检测到目标
-            return self._handle_missing_detection()     # 漏检计数
+            return self._handle_missing_detection(timestamp)  # 漏检计数
         if self._track is None:                         # 如果没有轨迹
             self._candidate = None
             self._track = self._create_track(detection) # 创建对象
@@ -109,13 +114,17 @@ class StoneTracker:
         track.state = (TrackState.ACTIVE if track.hits >= self.min_confirmed_hits
                        else TrackState.TENTATIVE)
 
-    def _handle_missing_detection(self):
+    def _handle_missing_detection(self, timestamp=None):
         if self._track is None:
             return []
         if self._track.state == TrackState.TENTATIVE:
             self._track.hits = 0
         self._track.missed_frames += 1
-        if self._track.missed_frames > self.max_missed_frames:
+        # 低帧率下 8 帧可能是 0.8s：宽限同时受物理时间和帧数限制，
+        # 否则盲预测窗口随帧率变化，10FPS 时球早就没了还在追。
+        blind = None if timestamp is None else float(timestamp) - self._track.last_timestamp
+        if (self._track.missed_frames > self.max_missed_frames
+                or (blind is not None and blind > self.max_missed_seconds)):
             self._track.state = TrackState.LOST
             self._track = None
             return []
@@ -135,7 +144,7 @@ class StoneTracker:
         if hits < self.replacement_hits:
             # 还没确认：旧轨迹按漏检处理（宽限期内继续外推），候选留待下一帧
             self._candidate = (detection, hits)
-            return self._handle_missing_detection()
+            return self._handle_missing_detection(detection.timestamp)
         self._candidate = None
         self._track = self._create_track(detection)
         return [self._track]

@@ -50,6 +50,7 @@ class PLCLink:
         self._lock = threading.Lock()
         self._target = None
         self._target_at = 0.0
+        self._target_deadline = 0.0
         self._feedback = PLCFeedback()
         self._commands = queue.Queue()
         self._messages = queue.Queue()
@@ -221,22 +222,34 @@ class PLCLink:
                 pass
         return snapshot
 
-    def set_target(self, game_x, game_y):
+    def set_target(self, game_x, game_y, source_timestamp=None):
+        """发布目标。source_timestamp 是决策所用观测的 perf_counter 时刻。
+
+        有效期从源观测算起而不是从发布算起，处理延迟和 PLC 排队都计入年龄；
+        同一帧重复发布得到同一个 deadline，重发不会续期。None 表示人工/工具目标，从当前时刻起算。
+        """
         try:
             x, y = validate_game_point(self.zone, game_x, game_y)
         except (ValueError, OverflowError):
+            return False
+        now = time.perf_counter()
+        source = now if source_timestamp is None else float(source_timestamp)
+        deadline = source + TARGET_MAX_AGE
+        if not math.isfinite(deadline) or deadline < now:
             return False
         with self._lock:
             if self._stop_event.is_set():
                 return False
             self._target = x, y
-            self._target_at = time.perf_counter()
+            self._target_at = now
+            self._target_deadline = deadline
         return True
 
     def clear_target(self):
         with self._lock:
             self._target = None
             self._target_at = 0.0
+            self._target_deadline = 0.0
 
     def reset_tracking(self):
         return self._run_on_worker("清死区", self._client.reset_tracking)
@@ -269,6 +282,7 @@ class PLCLink:
             if not self._stop_event.is_set():
                 self._target = None
                 self._target_at = 0.0
+                self._target_deadline = 0.0
                 self._arm_pending = True
         return True
 
@@ -321,6 +335,7 @@ class PLCLink:
         """撤销授权并清掉目标；调用方必须持有 self._lock。"""
         self._target = None
         self._target_at = 0.0
+        self._target_deadline = 0.0
         self._armed = False
         self._arm_pending = False
 
@@ -391,8 +406,7 @@ class PLCLink:
         elif self._requires_snap7:
             self._messages.put(f"PLC 连接失败：{self._client.last_error}")
 
-    def _publish(self, status):
-        now = time.perf_counter()
+    def _publish(self, status, sampled_at):
         try:
             x, y = self.physical_to_game(status["x_pos"], status["y_pos"])
         except (ValueError, OverflowError):
@@ -401,19 +415,19 @@ class PLCLink:
         heartbeat = status["plc_heartbeat"]
         if self._last_plc_heartbeat is None:
             self._last_plc_heartbeat = heartbeat
-            self._echo_change_at = now
+            self._echo_change_at = sampled_at
         elif heartbeat != self._last_plc_heartbeat:
             self._last_plc_heartbeat = heartbeat
-            self._echo_change_at = now
+            self._echo_change_at = sampled_at
             self._echo_seen = True
-        echo_ok = self._echo_seen and now - self._echo_change_at < ECHO_TIMEOUT
+        echo_ok = self._echo_seen and sampled_at - self._echo_change_at < ECHO_TIMEOUT
         with self._lock:
             previous = self._feedback
-            dt = now - previous.stamp
+            dt = sampled_at - previous.stamp
             vx = (x - previous.x) / dt if previous.valid and dt > 1e-6 else 0.0
             vy = (y - previous.y) / dt if previous.valid and dt > 1e-6 else 0.0
             self._feedback = PLCFeedback(
-                stamp=now, valid=True, x=x, y=y, vx=vx, vy=vy,
+                stamp=sampled_at, valid=True, x=x, y=y, vx=vx, vy=vy,
                 x_en=status["x_en"], y_en=status["y_en"],
                 x_err=status["x_err"], y_err=status["y_err"],
                 x_errid=status["x_errid"], y_errid=status["y_errid"],
@@ -439,7 +453,9 @@ class PLCLink:
 
     def _cycle(self):
         client = self._client
-        cycle_start = time.perf_counter()
+        # 反馈时间戳取读取开始：S7 读取和心跳写入都可能耗时数百毫秒，
+        # 用完成时刻会把这段时间里的旧状态标成"刚采样"。
+        read_start = time.perf_counter()
         status = client.read_status_and_position()
         if status is None or not client.connected:
             self._invalidate_feedback()
@@ -450,7 +466,7 @@ class PLCLink:
             self._invalidate_feedback()
             return
         previous = self.feedback
-        feedback = self._publish(status)
+        feedback = self._publish(status, read_start)
         if feedback is None:
             return
         # 死区判据要用轴的实际位置判断"到没到"，不更新会把没走到的目标当成已到达、一直跳过
@@ -477,12 +493,12 @@ class PLCLink:
                 self._arm_pending = False
             target = (self._target if safe and self._armed
                       and not self._stop_event.is_set()
-                      and time.perf_counter() - self._target_at <= TARGET_MAX_AGE else None)
+                      and time.perf_counter() <= self._target_deadline else None)
             armed_now = self._armed
         # 延迟排查统计（非必要功能，任何异常都不能影响通信）
         try:
             self.latency.on_status(
-                status_done, (status_done - cycle_start) * 1000.0,
+                status_done, (status_done - read_start) * 1000.0,
                 (float(status["x_pos"]), float(status["y_pos"])), armed=armed_now,
                 busy=feedback.busy, seq_ack=feedback.seq_ack,
                 remaining=feedback.mc_remaining)
@@ -526,7 +542,7 @@ class PLCLink:
             # 状态读取期间生产者可能更新、清除目标或撤销授权，发送前取最新意图。
             with self._lock:
                 target = (self._target if self._armed and not self._stop_event.is_set()
-                          and time.perf_counter() - self._target_at <= TARGET_MAX_AGE
+                          and time.perf_counter() <= self._target_deadline
                           and time.perf_counter() - feedback.stamp <= TARGET_MAX_AGE else None)
                 target_at = self._target_at
             if target is None:

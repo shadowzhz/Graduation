@@ -80,6 +80,16 @@ def test_missed_frames_go_lost_then_drop():
     assert tracker.track is None
 
 
+def test_blind_grace_is_capped_by_physical_time():
+    """★ F10 回归：8 帧宽限在 10FPS 下是 0.8s，物理时间上限必须提前断开。"""
+    tracker = StoneTracker(max_missed_frames=8, max_missed_seconds=0.25)
+    tracker.update(make_detection(100, 200, 1.0))
+    assert tracker.update(None, 1.1)[0].state.value == "lost"
+    assert tracker.update(None, 1.2)[0].state.value == "lost"
+    assert tracker.update(None, 1.3) == []
+    assert tracker.track is None
+
+
 def test_velocity_is_smoothed():
     tracker = StoneTracker(velocity_alpha=0.5)
     tracker.update(make_detection(0, 0, 0.0))

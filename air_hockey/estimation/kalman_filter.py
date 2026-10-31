@@ -60,6 +60,7 @@ class KalmanFilter:
         self._P = np.eye(_STATE_DIM)
         self._last_timestamp = None
         self._last_measurement = None
+        self._last_measurement_timestamp = None
         self._initialized = False
         self._friction_started = False
         self._confidence = 0.0
@@ -100,11 +101,13 @@ class KalmanFilter:
         if not self._initialized:
             self._initialize(measurement, timestamp)
             self._last_measurement = measurement
+            self._last_measurement_timestamp = timestamp
             self._remember(confidence, radius)
             return self._to_curling_state()
 
         dt = self._elapsed(timestamp)
         previous_measurement = self._last_measurement
+        previous_measurement_timestamp = self._last_measurement_timestamp
         self._advance(dt)
 
         H = self._measurement_matrix()
@@ -117,9 +120,12 @@ class KalmanFilter:
             # 从上一次原始观测重新起步（速度未知），本次观测照常更新：
             # 等价于从最近两次观测重新开始最小二乘拟合，触发这一帧就有新速度。
             # 不用滤波后的位置 —— 它在机动后已滞后几帧，两点差分会严重高估速度。
-            self._initialize(previous_measurement, timestamp)
+            # 时间必须用两次真实观测的间隔：_last_timestamp 可能已被 predict 推进，
+            # 用它会把位移除以最后一个预测帧到现在的短间隔，速度被放大数倍。
+            measurement_dt = min(max(timestamp - previous_measurement_timestamp, 0.0), _MAX_DT)
+            self._initialize(previous_measurement, previous_measurement_timestamp)
             self._friction_started = False
-            self._advance(dt)
+            self._advance(measurement_dt)
             innovation = measurement - H @ self._x
             S = H @ self._P @ Ht + R
         gain = self._P @ Ht @ np.linalg.inv(S)
@@ -128,6 +134,7 @@ class KalmanFilter:
 
         self._last_timestamp = timestamp
         self._last_measurement = measurement
+        self._last_measurement_timestamp = timestamp
         self._remember(confidence, radius)
         return self._to_curling_state()
 

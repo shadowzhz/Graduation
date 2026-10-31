@@ -67,11 +67,30 @@ class RallyController:
         """
         self.state = RallyState.WAITING
         self.reachable_bounds = reachable_bounds
-        # 遮挡保持用的记忆（见 OCCLUSION_* 常量）
+        # 遮挡保持与接触记忆（见 OCCLUSION_* / TOUCH_* 常量）
+        self._track_id = None
         self._last_target = None
         self._last_seen_at = 0.0
         self._last_active_state = RallyState.WAITING
         self._state_changed_at = 0.0
+        self._letting_go = False
+        self._touched_at = -math.inf
+
+    def reset(self) -> None:
+        """清掉跨球记忆：换轨迹、无效状态、撤权/回零/重连后不能复活旧目标。"""
+        self.state = RallyState.WAITING
+        self._track_id = None
+        self._last_target = None
+        self._last_seen_at = 0.0
+        self._last_active_state = RallyState.WAITING
+        self._state_changed_at = 0.0
+        self._letting_go = False
+        self._touched_at = -math.inf
+
+    def _forget_puck(self) -> None:
+        """目标被判无效时作废保持与接触记忆，避免下一帧无球时把旧目标复活。"""
+        self._last_target = None
+        self._last_seen_at = 0.0
         self._letting_go = False
         self._touched_at = -math.inf
 
@@ -87,6 +106,12 @@ class RallyController:
 
     def update(self, result: VisionResult, *, now: float, feedback=None,
                mallet_position=READY_POSITION) -> RallyDecision:
+        track = result.track
+        if track is not None and track.track_id != self._track_id:
+            # 轨迹代号变了就是另一颗球：旧球的接触、放手和遮挡保持记忆全部作废。
+            # AI 已在换身份时 reset，这里必须同步，否则新球会继承旧球的 READY/追击状态。
+            self.reset()
+            self._track_id = track.track_id
         actual = (feedback is not None and feedback.valid
                   and 0 <= now - feedback.stamp <= TARGET_MAX_AGE
                   and all(math.isfinite(v) for v in (feedback.x, feedback.y)))
@@ -104,6 +129,7 @@ class RallyController:
                  and 0 <= now - result.frame.timestamp <= core.MAX_FRAME_GAP)
         if not fresh:
             target = None
+            self._forget_puck()
             reason = "stale camera frame; target cleared"
         elif stone is not None and (not all(math.isfinite(v) for v in
                                            (stone.x, stone.y, stone.vx, stone.vy, stone.timestamp))
@@ -111,6 +137,7 @@ class RallyController:
                                     or not core.RINK_LEFT <= stone.x <= core.RINK_RIGHT
                                     or not core.RINK_TOP <= stone.y <= core.RINK_BOTTOM):
             target = None
+            self._forget_puck()
             reason = "invalid/stale puck state; target cleared"
         elif result.track_confirmed and stone is not None:
             # 速度方向判断引入死区：在真人半场只有明确朝对方门滑行（vy > OUTGOING_VEL_THRESHOLD）才算 outgoing；
@@ -146,11 +173,12 @@ class RallyController:
                     and (prediction is None or max(point[1] for point in prediction.trajectory) > line)))
             self._letting_go = leaving
             if not leaving:
-                # 状态防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
+                # 状态与目标防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
                 desired_state = RallyState.ATTACKING if machine_half else RallyState.DEFENDING
-                if (previous in (RallyState.ATTACKING, RallyState.DEFENDING)
-                        and desired_state != previous
-                        and now - self._state_changed_at < STATE_DWELL_SECONDS):
+                held_state = (previous in (RallyState.ATTACKING, RallyState.DEFENDING)
+                              and desired_state != previous
+                              and now - self._state_changed_at < STATE_DWELL_SECONDS)
+                if held_state:
                     self.state = previous
                 else:
                     self.state = desired_state
@@ -173,15 +201,17 @@ class RallyController:
                         reason = "machine-half puck moving: pursue"
                     else:
                         reason = "human-half puck: defend/prepare"
-                    target = (decision.target_x, decision.target_y)
+                    target = self._last_target if held_state and self._last_target is not None else (decision.target_x, decision.target_y)
                     self._last_target = target
                     self._last_active_state = self.state
             else:
                 reason = "puck moving away; READY"
                 # 主动回 READY 时清掉旧目标，否则之后一次遮挡会把陈旧的追击点复活
                 self._last_target = None
-            # 只要这一帧有确认的轨道（不管走哪一支）就刷新，否则夹一帧"球飞走"保持窗口就会悄悄过期
-            self._last_seen_at = now
+            # 保持期只能从真实观测算起：漏检帧的 stone 是 Kalman 外推值，
+            # 用当前帧时间续期会让低帧率下的遮挡保持被盲预测帧无限拉长。
+            self._last_seen_at = (result.track.last_timestamp
+                                  if result.track is not None else now)
         else:
             # 遮挡保持（见 OCCLUSION_* 常量）
             if (self._last_target is not None

@@ -8,16 +8,18 @@
 
 - **场地坐标改为各向同性**（2026-10-29）：场地 528×968 单位（原 528×668），1 单位 ≈ 0.909mm，中线 y=530、READY (300,181.5)。`calibration/table_homography.npz` 已按存档的去畸变四角重算；旧坐标的记录（version ≤ 3）不能和新记录直接比较。
 - **AI 换球/丢轨时清记忆**：`AirHockeyAI.reset()` 由 `VisionRuntime` 在换身份和丢轨时调用，回收阶段与冲门迟滞不再带到下一颗球。
+- **漏检宽限与遮挡保持按物理时间**（2026-10-31）：追踪器宽限 = min(8 帧, 0.25s)；遮挡保持从最后真实观测起算 1.0s，漏检预测帧不续期。
+- **Rally 记忆绑定轨迹代号**（2026-10-31）：换身份、无效状态、PLC 撤权/回零/重连后清空接触与保持记忆，旧目标不会复活。
 - **回零 = MC_Home Mode 0**：轴不动，直接把当前位置设为原点；轴不在参考位置时按 H / Shift+X / Shift+Y 会让坐标系错位（Caps Lock 下小写 x/y 也会触发）。
 
 ## 2. 核心文件
 - `air_hockey/control/protocol.py`：DB1/DB18 偏移（1211C 版）。
 - `air_hockey/control/interface.py`：`_prepare_move` 坐标换算 + 3mm 死区；`_write_payload` 写 4 个 Real；位置按 Real 读 DB1.2/6。命令余量在 `control/limits.py`：机械行程 X -190..222 / Y -129..187，两轴内缩 5mm，X 再多收 6mm、Y 再多收 10mm（`X/Y_EXTRA_MARGIN_MM`），命令范围 X -179..211 / Y -114..172（启动时打印的为准）。Y 上端报过 16#8002（软限位上限），TIA 的 Y 软限位值和回原点方式还没核对。
-- `air_hockey/ai.py`：冲门判断 `_goal_guard_decision`、提前量 `_lead_target`、迎击 `_strike_through`。
-- `air_hockey/app/rally.py`：连续物理导引、二次追打放手规则与防抖。
+- `air_hockey/ai.py`：冲门判断 `_goal_guard_decision`、提前量 `_lead_target`、迎击 `_strike_through`（带承诺与退出迟滞）、中线进攻迟滞 `ATTACK_HYSTERESIS`。
+- `air_hockey/app/rally.py`：连续物理导引、中线迟滞、状态驻留期间目标同步防抖。
 
 ## 3. 测试与验证状态
-- `python3 tests/run_tests.py`：345 项全过。测试假 PLC 的 DB 长度已改为 120 / 54，读超长会报错，和真 PLC 一致。
+- `python3 tests/run_tests.py`：340 项全过。已覆盖中线交替抖动零跳变与迎击时间窗口承诺防抽搐。
 - 本机用 snap7 3.2.1 自带服务端走过一遍：状态读取、目标块、序号、气缸位都写到了正确地址；旧长度 58 读 DB18 会报 Invalid address（说明旧代码连这台 PLC 必然显示未连接）。**尚未连实机。**
 
 ## 4. PLC 侧待确认 / 待补（TIA 里改，Python 管不到）

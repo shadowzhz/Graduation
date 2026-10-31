@@ -40,8 +40,8 @@ TRACK_REPLACEMENT_HITS = 2
 def _track_usable(track) -> bool:
     """轨道是否可用于下游决策，漏检宽限期内也算。
 
-    不能用 `state == ACTIVE` 判断：追踪器漏检第一帧就把 state 置成 LOST，要等 missed_frames
-    超过 max_missed_frames 才真正丢弃轨道。按 state 判断会让 rally 每两帧在追球和回 READY 之间横跳。
+    不能用 `state == ACTIVE` 判断：追踪器漏检第一帧就把 state 置成 LOST，要等漏检帧数
+    或物理时间超过追踪器宽限才真正丢弃轨道。按 state 判断会让 rally 每两帧在追球和回 READY 之间横跳。
     宽限期内的位置是 Kalman 外推的，但对"球往哪走"的判断仍然有效。
     """
     return track is not None and track.state != TrackState.TENTATIVE
@@ -152,8 +152,9 @@ class VisionRuntime:
         self.tracker = tracker or StoneTracker(
             # 宽限期：漏检 8 帧内仍算"有球"（位置由 Kalman 外推）。球被球槌挡住或刚被撞飞时
             # 常连丢几帧，宽限太短轨道一断 rally 就把球槌叫回 READY。
-            max_missed_frames=8, min_confirmed_hits=1,
-            replacement_hits=TRACK_REPLACEMENT_HITS,
+            # 同时受物理时间限制：10FPS 下 8 帧是 0.8s，盲预测窗口不能随帧率膨胀。
+            max_missed_frames=8, max_missed_seconds=core.MAX_FRAME_GAP,
+            min_confirmed_hits=1, replacement_hits=TRACK_REPLACEMENT_HITS,
         )
         # 带墙反弹的模型：冰壶撞侧墙那一帧估计器自己就把速度反过来。常速模型会继续"穿墙"外推 2~3 帧，
         # 等机动检测触发才改向，期间 AI 目标乱跳 100~280 单位、被排进 PLC 队列，球槌被拉偏。
@@ -262,7 +263,7 @@ class VisionRuntime:
         self.detect_ms = self.detect_ms * 0.9 + detected_ms * 0.1
         if self.profile:
             self.last_detect_ms = detected_ms
-        tracks = self.tracker.update(detection)
+        tracks = self.tracker.update(detection, now)
         track = tracks[0] if tracks else None
 
         curling = None
