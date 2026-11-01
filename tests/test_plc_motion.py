@@ -442,6 +442,32 @@ def test_home_and_reset_revoke_motion_until_rearmed():
 
 
 @memory_binding()
+def test_arm_generation_advances_on_revoke_and_rearm():
+    """授权代号由工作线程记录：撤权/复权各推进一次，已撤权时的失效反馈不重复计数。"""
+    client = MemoryPLC()
+    link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)
+    initial = link.arm_generation
+    link.start()
+    try:
+        assert until(lambda: link.feedback.valid and link.feedback.plc_echo_ok)
+        assert link.enable_axes() and until(lambda: link.armed)
+        armed = link.arm_generation
+        assert armed > initial
+        assert link.axes_reset()
+        assert until(lambda: not link.armed)
+        revoked = link.arm_generation
+        assert revoked > armed
+        # 断线重试每轮都会走 _disarm_locked；已经在撤权状态就不能再推进代号
+        for _ in range(3):
+            link._invalidate_feedback()
+        assert link.arm_generation == revoked
+        assert link.enable_axes() and until(lambda: link.armed)
+        assert link.arm_generation > revoked
+    finally:
+        assert link.stop(timeout=2.0)
+
+
+@memory_binding()
 def test_queued_enable_before_home_or_reset_does_not_rearm_after_command():
     client = MemoryPLC()
     link = PLCLink("memory", period=0.03, client_factory=lambda *args: client)

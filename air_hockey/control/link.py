@@ -59,6 +59,7 @@ class PLCLink:
         self._disable_on_stop = False
         self._armed = False
         self._arm_pending = False
+        self._arm_generation = 0
         self._ever_connected = False
         self._snap7_warned = False
         self._last_retry = 0.0
@@ -179,6 +180,15 @@ class PLCLink:
             return (self._armed and self._client.connected and not self._stop_event.is_set()
                     and self._motion_safe(self._feedback)
                     and time.perf_counter() - self._feedback.stamp <= TARGET_MAX_AGE)
+
+    @property
+    def arm_generation(self):
+        """授权代号：工作线程每真正撤权/复权一次就 +1。
+
+        逐帧只读 armed 布尔值会漏掉两帧之间撤权再复权的跳变；比对代号就不会。
+        """
+        with self._lock:
+            return self._arm_generation
 
     def game_to_physical(self, x, y):
         return game_to_physical(self.zone, self.limits, x, y)
@@ -336,6 +346,9 @@ class PLCLink:
         self._target = None
         self._target_at = 0.0
         self._target_deadline = 0.0
+        if self._armed or self._arm_pending:
+            # 只有真正从授权/待授权状态撤下来才推进代号；断线期间每轮都调这里不会重复计数。
+            self._arm_generation += 1
         self._armed = False
         self._arm_pending = False
 
@@ -491,6 +504,7 @@ class PLCLink:
             elif safe and self._arm_pending:
                 self._armed = True
                 self._arm_pending = False
+                self._arm_generation += 1
             target = (self._target if safe and self._armed
                       and not self._stop_event.is_set()
                       and time.perf_counter() <= self._target_deadline else None)

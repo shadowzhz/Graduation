@@ -175,6 +175,7 @@ class LiveSession:
         self.plc_adapter = PlcControlAdapter()
         self.rally = RallyController()
         self._plc_armed = False
+        self._plc_arm_generation = None
         if args.plc:
             self.plc = start_plc(args, self.runtime, self.rally)
             if self.window is not None and not args.dry_run:
@@ -261,13 +262,20 @@ class LiveSession:
             self.stop.set()
 
     def _note_plc_arming(self, plc):
-        """撤权/回零/复位/故障/断线重连都会让 armed 从 True 变 False。
+        """撤权/回零/复位/故障/断线重连都会让授权代号变化。
 
-        这一跳变时清掉 Rally 的接触与遮挡保持记忆：重新授权后不能复活上一颗球的旧目标。
+        撤权期间视觉仍在逐帧写回保持目标与接触时间；重新授权这一帧必须先把这些记忆清掉，
+        再从本帧的有效观测重新开始，否则会把停机期间攒下的决策带进新回合。
+        只看 armed 布尔值还会漏掉两帧之间撤权再复权的跳变，所以同时比对授权代号。
         """
         armed_now = plc is not None and plc.armed
+        generation = None if plc is None else plc.arm_generation
         if self._plc_armed and not armed_now:
             self.rally.reset()
+        elif self._plc_arm_generation is not None and generation != self._plc_arm_generation:
+            self.rally.reset()
+        self._plc_armed = armed_now
+        self._plc_arm_generation = generation
         return armed_now
 
     def _handle_frame(self, frame):

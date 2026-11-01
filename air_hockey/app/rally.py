@@ -185,6 +185,7 @@ class RallyController:
                 decision = result.ai_decision
                 if decision is None or not all(math.isfinite(v) for v in (decision.target_x, decision.target_y)):
                     target = None
+                    self._forget_puck()
                     reason = "invalid/missing AI target; target cleared"
                 elif machine_half and puck_stopped and not self.can_retrieve(stone):
                     # 不能盲目直穿身后的球回 READY，那会从前侧推向自家球门。
@@ -201,7 +202,12 @@ class RallyController:
                         reason = "machine-half puck moving: pursue"
                     else:
                         reason = "human-half puck: defend/prepare"
-                    target = self._last_target if held_state and self._last_target is not None else (decision.target_x, decision.target_y)
+                    if held_state and self._last_target is not None:
+                        # 驻留只锁策略对应的纵向位置，横向拦截点继续跟最新决策走：
+                        # 整个坐标冻住会把 X 也压 80ms，随后再一起跳，拦快球更吃反应。
+                        target = (decision.target_x, self._last_target[1])
+                    else:
+                        target = (decision.target_x, decision.target_y)
                     self._last_target = target
                     self._last_active_state = self.state
             else:

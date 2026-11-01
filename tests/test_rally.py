@@ -355,21 +355,91 @@ def test_invalid_state_does_not_let_hold_revive_the_old_target():
     assert decision.target == READY_POSITION and not decision.held_target
 
 
+def test_invalid_ai_target_does_not_let_hold_revive_the_old_target():
+    """★ F11 回归：AI 目标缺失/非有限时同样要作废保持记忆，下一帧无球不能复活旧目标。"""
+    for invalid in (None, math.nan):
+        controller = RallyController()
+        result = observation(1.0, x=420, y=250, vy=0)
+        held = tick(controller, result).target
+        assert held is not None and held != READY_POSITION
+        # 球仍可见、状态有效，但这一帧 AI 给不出目标
+        bad = observation(1.05, x=420, y=250, vy=0)
+        bad.ai_decision = (None if invalid is None
+                           else replace(bad.ai_decision, target_x=invalid))
+        assert tick(controller, bad, mallet=held).target is None
+        occluded = observation(1.1, x=420, y=250, vy=0, hard=False, confirmed=False, mallet=held)
+        decision = tick(controller, occluded, now=1.1, mallet=held)
+        assert decision.target == READY_POSITION and not decision.held_target
+
+
 def test_plc_disarm_clears_cross_puck_rally_memory():
     """★ F11 回归：撤权/回零/复位/重连（armed True->False）要清掉 Rally 记忆。"""
     class FakePLC:
-        def __init__(self, armed):
+        def __init__(self, armed, generation=0):
             self.armed = armed
+            self.arm_generation = generation
 
     session = LiveSession.__new__(LiveSession)
     session.rally = RallyController()
     session._plc_armed = True
+    session._plc_arm_generation = 0
     session.rally._last_target = (350.0, 350.0)
     session.rally._touched_at = 1.0
-    assert not session._note_plc_arming(FakePLC(False))
+    assert not session._note_plc_arming(FakePLC(False, 1))
     assert session.rally._last_target is None
     assert session.rally._touched_at == -math.inf
-    assert session._note_plc_arming(FakePLC(True))
+    assert session._note_plc_arming(FakePLC(True, 2))
+
+
+def test_rearm_clears_rally_memory_accumulated_while_disarmed():
+    """★ F11 回归：撤权期间处理线程仍在跑，复权那一帧必须清掉这期间攒下的记忆。"""
+    class FakePLC:
+        def __init__(self, armed, generation):
+            self.armed = armed
+            self.arm_generation = generation
+
+    controller = RallyController()
+    session = LiveSession.__new__(LiveSession)
+    session.rally = controller
+    session._plc_armed = True
+    session._plc_arm_generation = 0
+
+    held = tick(controller, observation(1.0, x=420, y=250, vy=0)).target
+    assert held is not None and held != READY_POSITION
+
+    # 撤权后不停止视觉处理：保持目标与接触时间会被逐帧重新写回
+    assert not session._note_plc_arming(FakePLC(False, 1))
+    for t in (1.1, 1.2, 1.3):
+        tick(controller, observation(t, x=420, y=250, vy=0), mallet=held)
+    assert controller._last_target is not None
+    assert controller._touched_at > 0
+
+    # 重新授权：先清记忆，再从本帧观测重新建立目标
+    assert session._note_plc_arming(FakePLC(True, 2))
+    assert controller._last_target is None
+    assert controller._touched_at == -math.inf
+    decision = tick(controller, observation(1.4, x=300, y=250, vy=0))
+    assert decision.target is not None and decision.target != held
+    assert not decision.held_target
+
+
+def test_arm_generation_catches_disarm_blip_between_frames():
+    """★ F11 回归：两帧之间撤权再复权，逐帧布尔采样看不到，授权代号能看到。"""
+    class FakePLC:
+        def __init__(self, armed, generation):
+            self.armed = armed
+            self.arm_generation = generation
+
+    controller = RallyController()
+    session = LiveSession.__new__(LiveSession)
+    session.rally = controller
+    session._plc_armed = True
+    session._plc_arm_generation = 0
+    controller._last_target = (350.0, 350.0)
+    controller._touched_at = 10.0
+    assert session._note_plc_arming(FakePLC(True, 2))
+    assert controller._last_target is None
+    assert controller._touched_at == -math.inf
 
 
 def test_occlusion_hold_is_published_after_track_deletion_and_expires():
@@ -518,6 +588,53 @@ def test_production_ai_defaults_midline_target_no_chatter():
         assert abs(phys_y_targets[i] - phys_y_targets[i - 1]) < 10.0, (
             f"物理 Y 目标发生大幅跳变: {phys_y_targets[i-1]} -> {phys_y_targets[i]}"
         )
+
+
+def test_state_dwell_keeps_lateral_target_updating():
+    """★ 回归：80ms 驻留只锁策略纵向位置，横向拦截点必须逐帧跟随最新 AI 目标。"""
+    ai = AirHockeyAI()
+    controller = RallyController()
+    first = tick(controller, observation(1.0, x=300.0, y=704.0, vx=0.0, vy=-300.0, ai=ai))
+    assert first.state == RallyState.DEFENDING
+    line_y = first.target[1]
+    xs = []
+    # 驻留期内跨中线，冰壶持续横向滑动
+    for t, x in ((1.02, 380.0), (1.04, 420.0), (1.06, 460.0)):
+        result = observation(t, x=x, y=519.0, vx=0.0, vy=-300.0, ai=ai)
+        decision = tick(controller, result)
+        assert decision.state == RallyState.DEFENDING
+        assert decision.target == (result.ai_decision.target_x, line_y), decision
+        xs.append(decision.target[0])
+    assert xs[0] < xs[1] < xs[2]
+    # 驻留结束：X 连续（继续跟球横移），Y 才切到进攻策略
+    result = observation(1.09, x=500.0, y=519.0, vx=0.0, vy=-300.0, ai=ai)
+    decision = tick(controller, result)
+    assert decision.state == RallyState.ATTACKING
+    assert decision.target == (result.ai_decision.target_x, result.ai_decision.target_y)
+    assert abs(decision.target[0] - xs[-1]) < 60.0
+    assert decision.target[1] - line_y > 100.0
+
+
+def test_state_dwell_fast_shot_keeps_lateral_intercept_updating():
+    """★ 回归：快速来球的驻留期内，守门线横向拦截点必须逐帧更新，不能冻在入线前的 X。"""
+    ai = AirHockeyAI()
+    controller = RallyController()
+    first = tick(controller, observation(1.0, x=300.0, y=704.0, vx=0.0, vy=-900.0, ai=ai))
+    assert first.state == RallyState.DEFENDING
+    line_y = first.target[1]
+    xs = []
+    for t, vx in ((1.02, -30.0), (1.04, -60.0), (1.06, -90.0)):
+        result = observation(t, x=300.0, y=500.0, vx=vx, vy=-900.0, ai=ai)
+        decision = tick(controller, result)
+        assert decision.state == RallyState.DEFENDING
+        assert decision.target == (result.ai_decision.target_x, line_y), decision
+        xs.append(decision.target[0])
+    assert len(set(round(x, 3) for x in xs)) == 3
+    assert xs[0] > xs[1] > xs[2]
+    result = observation(1.09, x=300.0, y=490.0, vx=-120.0, vy=-900.0, ai=ai)
+    decision = tick(controller, result)
+    assert decision.state == RallyState.ATTACKING
+    assert abs(decision.target[0] - xs[-1]) < 40.0
 
 
 def test_strike_threshold_commitment_no_target_jump():
