@@ -884,18 +884,18 @@ def test_busy_target_is_not_requeued_but_changed_and_idle_targets_are_sent():
         assert link.set_target(350.1, 250.1)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count >= cycles + 3)
-        assert len(client.transport.moves) == 1
+        assert len(client.transport.moves) == 2
 
         assert link.set_target(450, 220)
-        assert until(lambda: len(client.transport.moves) >= 2)
+        assert until(lambda: len(client.transport.moves) >= 3)
         cycles = link.cycle_count
         assert until(lambda: link.cycle_count >= cycles + 3)
-        assert len(client.transport.moves) == 2
+        assert len(client.transport.moves) == 3
         assert link.armed and link.feedback.busy
 
         client.transport.db[1][protocol.MOTION_BUSY_BYTE] &= ~1
         assert link.set_target(450, 220)
-        assert until(lambda: len(client.transport.moves) > 2)
+        assert until(lambda: len(client.transport.moves) > 3)
         assert not link.feedback.busy and link.armed
     finally:
         assert link.stop(timeout=2.0)
@@ -1085,3 +1085,30 @@ def test_pending_arm_target_cannot_cross_authorization_generation():
             assert len(client.transport.moves) == 1
         finally:
             client.disconnect()
+
+
+@memory_binding()
+def test_busy_sub_10mm_corrections_send_but_same_real_endpoint_does_not():
+    """运动中X/Y小修正可下发；相同PLC REAL目标不反复启动作业。"""
+    for axis in ('x', 'y'):
+        for delta in (0.1, 1.0, 2.9, 9.9):
+            client = MemoryPLC()
+            assert client.connect()
+            try:
+                client.actual_busy = True
+                client.actual_game = (300, 180)
+                assert client.send_linear_move(350, 250)
+                px, py = client.last_phys_x, client.last_phys_y
+                target = client.physical_to_game(px + (delta if axis == 'x' else 0),
+                                                 py + (delta if axis == 'y' else 0))
+                assert client.send_linear_move(*target)
+                assert len(client.transport.moves) == 2, (axis, delta)
+                assert client.send_linear_move(*target)
+                assert len(client.transport.moves) == 2
+                # 小于REAL分辨率的数值噪声不能制造新作业。
+                same_real = client.physical_to_game(client.last_phys_x + 1e-10,
+                                                    client.last_phys_y + 1e-10)
+                assert client.send_linear_move(*same_real)
+                assert len(client.transport.moves) == 2
+            finally:
+                client.disconnect()

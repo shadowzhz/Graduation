@@ -31,11 +31,7 @@ from .protocol import (
 
 DEAD_ZONE_MM = 3.0
 
-# 只下发 AI 的终点，不切中间点。
-# PLC 是 X/Y 各一个 MC_MoveAbsolute，新序号到来时同一实例重新触发 = 中止当前定位、改去新终点。
-# 轴忙时新终点离上次下发的终点不够远就不发，避免 AI 目标的小抖动让轴反复中止重启。
-# ponytail: 10mm 是估计值；实机若反应迟钝就调小，若又出现一顿一顿就调大。
-ENDPOINT_RESEND_MM = 10.0
+# Busy 时只跳过 PLC REAL 编码完全相同的终点，不设终点变化距离门槛。
 
 
 class PLCInterface:
@@ -243,10 +239,10 @@ class PLCInterface:
         except (ValueError, OverflowError):
             self.last_send_state = "invalid"
             return None
-        # 执行中：新终点离上次下发的终点不到 ENDPOINT_RESEND_MM 就不再排队。
+        # 执行中仅去重相同 REAL 终点，微小修正也可下发；避免同点重复触发作业。
         if (self.actual_busy and self.last_phys_x is not None
-                and max(abs(phys_x - self.last_phys_x),
-                        abs(phys_y - self.last_phys_y)) < ENDPOINT_RESEND_MM):
+                and struct.pack(">ff", phys_x, phys_y)
+                == struct.pack(">ff", self.last_phys_x, self.last_phys_y)):
             self.last_send_state = "pending"
             return None
         # 起点：优先用上次真正发出去的位置，还没有就用轴的实际位置。
