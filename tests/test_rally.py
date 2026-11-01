@@ -677,3 +677,50 @@ def test_strike_threshold_commitment_no_target_jump():
     exit_dec = ai.choose_target(rebound_state)
     _px, py = game_to_physical(DEFAULT_ZONE, DEFAULT_LIMITS, exit_dec.target_x, exit_dec.target_y)
     assert abs(py - (-75.3)) < 1.0, f"反弹后应退出迎击回到防守线，实际为: {py}"
+
+
+def test_live_frame_keeps_generation_captured_before_computation():
+    """真实 _handle_frame 路径：处理中撤权再授权，不能给旧计算贴上新代号。"""
+    from types import SimpleNamespace
+    from test_plc_motion import MemoryPLC, memory_binding
+    with memory_binding(), patch('time.perf_counter', return_value=100.0):
+        client = MemoryPLC()
+        assert client.connect()
+        link = PLCLink('memory', client_factory=lambda *args: client)
+        link._echo_seen = True
+        link._echo_change_at = 100.0
+        link._last_plc_heartbeat = False
+        link._enable_on_worker()
+        link._cycle()
+        session = LiveSession.__new__(LiveSession)
+        session.plc = link
+        session.samples = None
+        session.rally = RallyController()
+        session.plc_adapter = PlcControlAdapter()
+        session._plc_armed = True
+        session._plc_arm_generation = link.arm_generation
+        session.args = SimpleNamespace(dry_run=False)
+        session.decision_ages = []
+        session.recorder = None
+        session.headless = True
+        session._stats_timer = 100.0
+        session._log_gate_change = lambda *args: None
+        result = observation(100.0, x=350, y=350, vy=0)
+        def process(frame):
+            with link._lock:
+                link._disarm_locked()
+            link._enable_on_worker()
+            link._cycle()
+            return result
+        session.runtime = SimpleNamespace(
+            set_ai_feedback=lambda feedback: None, process_frame=process,
+            ai_current_pos=READY_POSITION, camera_geometry=SimpleNamespace(enabled=False))
+        try:
+            with patch('air_hockey.app.live.format_status', return_value=''), \
+                    patch('air_hockey.app.live.plc_status_text', return_value=('', None)):
+                session._handle_frame(result.frame)
+            assert link._target is None
+            link._cycle()
+            assert client.transport.moves == []
+        finally:
+            client.disconnect()

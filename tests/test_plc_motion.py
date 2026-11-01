@@ -1054,3 +1054,34 @@ def test_worker_cycle_feeds_latency_report_and_motion_snapshot():
         assert snapshot["age"] >= 0.0
     finally:
         assert link.stop(timeout=2.0)
+
+
+@memory_binding()
+def test_pending_arm_target_cannot_cross_authorization_generation():
+    """使能清目标后、授权完成前发布的目标不得成为第一条运动指令。"""
+    with patch('time.perf_counter', return_value=100.0):
+        client = MemoryPLC()
+        assert client.connect()
+        link = PLCLink('memory', client_factory=lambda *args: client)
+        link._echo_seen = True
+        link._echo_change_at = 100.0
+        link._last_plc_heartbeat = False
+        try:
+            assert link._enable_on_worker()
+            old_generation = link.arm_generation
+            # 覆盖显式视觉代号和未指定代号的工具调用。
+            assert link.set_target(350, 350, 100.0)
+            assert link.set_target(350, 350, 100.0, arm_generation=old_generation)
+            link._cycle()
+            assert link.armed and link.arm_generation != old_generation
+            assert client.transport.moves == []
+            # 在旧代号开始的慢计算，即使授权后才发布，也必须拒绝。
+            assert not link.set_target(400, 350, 100.0, arm_generation=old_generation)
+            link._cycle()
+            assert client.transport.moves == []
+            # 新授权下重新计算的目标可以正常发送。
+            assert link.set_target(400, 350, 100.0, arm_generation=link.arm_generation)
+            link._cycle()
+            assert len(client.transport.moves) == 1
+        finally:
+            client.disconnect()
