@@ -51,6 +51,7 @@ class PLCLink:
         self._target = None
         self._target_at = 0.0
         self._target_deadline = 0.0
+        self._target_generation = None
         self._feedback = PLCFeedback()
         self._commands = queue.Queue()
         self._messages = queue.Queue()
@@ -232,11 +233,13 @@ class PLCLink:
                 pass
         return snapshot
 
-    def set_target(self, game_x, game_y, source_timestamp=None):
+    def set_target(self, game_x, game_y, source_timestamp=None, *, arm_generation=None):
         """发布目标。source_timestamp 是决策所用观测的 perf_counter 时刻。
 
         有效期从源观测算起而不是从发布算起，处理延迟和 PLC 排队都计入年龄；
         同一帧重复发布得到同一个 deadline，重发不会续期。None 表示人工/工具目标，从当前时刻起算。
+        arm_generation 必须在决策计算前取得；旧授权下计算的目标不能进入新授权。
+        工具未指定时绑定发布时的代号，仍不能跨越之后的重新授权。
         """
         try:
             x, y = validate_game_point(self.zone, game_x, game_y)
@@ -250,6 +253,10 @@ class PLCLink:
         with self._lock:
             if self._stop_event.is_set():
                 return False
+            generation = self._arm_generation if arm_generation is None else arm_generation
+            if generation != self._arm_generation:
+                return False
+            self._target_generation = generation
             self._target = x, y
             self._target_at = now
             self._target_deadline = deadline
@@ -507,6 +514,7 @@ class PLCLink:
                 self._arm_generation += 1
             target = (self._target if safe and self._armed
                       and not self._stop_event.is_set()
+                      and self._target_generation == self._arm_generation
                       and time.perf_counter() <= self._target_deadline else None)
             armed_now = self._armed
         # 延迟排查统计（非必要功能，任何异常都不能影响通信）
@@ -556,6 +564,7 @@ class PLCLink:
             # 状态读取期间生产者可能更新、清除目标或撤销授权，发送前取最新意图。
             with self._lock:
                 target = (self._target if self._armed and not self._stop_event.is_set()
+                          and self._target_generation == self._arm_generation
                           and time.perf_counter() <= self._target_deadline
                           and time.perf_counter() - feedback.stamp <= TARGET_MAX_AGE else None)
                 target_at = self._target_at

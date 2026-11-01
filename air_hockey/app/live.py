@@ -27,7 +27,7 @@ from .vision_runtime import VisionRuntime
 STATS_INTERVAL = 5.0        # 统计间隔
 
 
-def submit_rally_target(result, adapter, plc, *, dry_run=False):
+def submit_rally_target(result, adapter, plc, *, dry_run=False, arm_generation=None):
     """直接发布防守/击球意图，PLCLink 仍负责人工授权和实机互锁。"""
     rally = result.rally
     if (rally is None or rally.target is None or
@@ -46,7 +46,8 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False):
     if plc is not None:
         if dry_run:
             plc.clear_target()
-        elif not plc.set_target(request.target_x, request.target_y, request.timestamp):
+        elif not plc.set_target(request.target_x, request.target_y, request.timestamp,
+                                arm_generation=arm_generation):
             plc.clear_target()
             return None
     return request
@@ -286,6 +287,8 @@ class LiveSession:
             for message in plc.drain_messages():
                 print(f"[PLC] {message}")
         self._plc_armed = self._note_plc_arming(plc)
+        # 捕获与本次记忆重置对应的代号，计算完成后不得换成最新代号。
+        decision_generation = self._plc_arm_generation
         runtime.set_ai_feedback(feedback)
         process_start = time.perf_counter() if samples is not None else 0.0
         result = runtime.process_frame(frame)
@@ -305,7 +308,8 @@ class LiveSession:
         result.rally = self.rally.update(result, now=time.perf_counter(), feedback=feedback,
                                          mallet_position=runtime.ai_current_pos)
         plc_prepare_start = time.perf_counter() if samples is not None else 0.0
-        plc_request = submit_rally_target(result, self.plc_adapter, plc, dry_run=self.args.dry_run)
+        plc_request = submit_rally_target(result, self.plc_adapter, plc, dry_run=self.args.dry_run,
+                                          arm_generation=decision_generation)
         if plc_request is not None:
             self.decision_ages.append((time.perf_counter() - frame.timestamp) * 1000.0)
         if samples is not None:
