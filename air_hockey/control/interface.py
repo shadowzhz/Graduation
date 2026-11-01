@@ -25,8 +25,8 @@ from .protocol import (
     CYLINDER_BYTE, CYLINDER_START_BIT,
     GROUP_COMM_LOST_LATCH_BIT, GROUP_CTRL_BYTE, GROUP_RESET_BIT, GROUP_STOP_BIT,
     HOMING_BYTE, MOTION_BLOCK_START, MOTION_BUSY_BYTE, MOTION_CMD_BYTE,
-    MOTION_STATUS_BYTE, STATUS_READ_SIZE, STATUS_READ_START, TRIGGER_BYTE,
-    TRIGGER_LINEAR_BIT, X_POS_OFFSET, Y_POS_OFFSET,
+    MOTION_STATUS_BYTE, STATUS_READ_SIZE, STATUS_READ_START,
+    X_POS_OFFSET, Y_POS_OFFSET,
 )
 
 DEAD_ZONE_MM = 3.0
@@ -76,7 +76,6 @@ class PLCInterface:
             self._client.connect(self.ip, self.rack, self.slot)
             self._connected = True
             self._write_bool(DB_COMM, COMM_BYTE, COMM_HEARTBEAT_BIT, False)
-            self.clear_trigger()
             self.reset_tracking()
             self.last_heartbeat_time = 0.0
             self.heartbeat_state = False
@@ -138,36 +137,38 @@ class PLCInterface:
         return [self._client.db_read(db, start, size) for db, start, size in specs]
 
     def _read_multi_vars(self, specs):
-        """一次请求读多个区域：直接调底层 Cli_ReadMultiVars，把两次往返（约 9ms）压成一次。"""
-        library = getattr(self._client, "_library", None)
-        pointer = getattr(self._client, "_pointer", None)
-        if library is None or pointer is None:
-            raise RuntimeError("snap7 native handle unavailable")
-        from snap7.types import S7AreaDB, S7DataItem, S7WLByte
-
-        count = len(specs)
-        items = (S7DataItem * count)()
-        buffers = []
-        for index, (db, start, size) in enumerate(specs):
-            buffer = (ctypes.c_ubyte * size)()
-            buffers.append(buffer)
-            items[index].Area = S7AreaDB
-            items[index].WordLen = S7WLByte
-            items[index].DBNumber = db
-            items[index].Start = start
-            items[index].Amount = size
-            items[index].pData = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
-        result = library.Cli_ReadMultiVars(pointer, items, count)
-        if result != 0:
-            raise RuntimeError(self._client.error_text(result))
-        for index, buffer in enumerate(buffers):
-            if items[index].Result != 0:
-                raise RuntimeError(f"item {index} failed: {items[index].Result}")
-        return [bytearray(bytes(buffer)) for buffer in buffers]
-
-    def clear_trigger(self):
-        self._write_bool(DB_MOTION, TRIGGER_BYTE, TRIGGER_LINEAR_BIT, False)
-
+        """一次请求读多个区域：优先调底层 Cli_ReadMultiVars 或客户端 read_multi_vars，把两次往返压成一次。"""
+        library = getattr(self._client, "_lib", None) or getattr(self._client, "_library", None)
+        pointer = getattr(self._client, "_s7_client", None) or getattr(self._client, "_pointer", None)
+        if hasattr(library, "Cli_ReadMultiVars") and pointer is not None and protocol.S7DataItem is not None:
+            count = len(specs)
+            items = (protocol.S7DataItem * count)()
+            buffers = []
+            for index, (db, start, size) in enumerate(specs):
+                buffer = (ctypes.c_ubyte * size)()
+                buffers.append(buffer)
+                items[index].Area = protocol.Areas.DB.value
+                items[index].WordLen = protocol.WordLen.Byte.value
+                items[index].DBNumber = db
+                items[index].Start = start
+                items[index].Amount = size
+                items[index].pData = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+            result = library.Cli_ReadMultiVars(pointer, items, count)
+            if result != 0:
+                raise RuntimeError(self._client.error_text(result))
+            for index, buffer in enumerate(buffers):
+                if items[index].Result != 0:
+                    raise RuntimeError(f"item {index} failed: {items[index].Result}")
+            return [bytearray(bytes(buffer)) for buffer in buffers]
+        if hasattr(self._client, "read_multi_vars"):
+            result, buffers = self._client.read_multi_vars([
+                {"area": protocol.Areas.DB, "db_number": db, "start": start, "size": size}
+                for db, start, size in specs
+            ])
+            if result != 0:
+                raise RuntimeError(self._client.error_text(result))
+            return [bytearray(buffer) for buffer in buffers]
+        raise RuntimeError("snap7 multi-read unavailable")
     def _write_command_bit(self, byte, bit, value=None):
         """写 DB1 命令位；value=None 时发一个 50ms 脉冲（写 1 再写 0）。失败返回 False 并标记断线。"""
         if not self.connected or bit is None:

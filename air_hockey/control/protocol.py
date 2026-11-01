@@ -9,15 +9,17 @@ snap7 / Areas / WordLen / HAS_SNAP7 由 interface.py、link.py 通过 `protocol.
 try:
     import snap7
     try:
-        from snap7.type import Areas, WordLen
+        from snap7.type import Areas, S7DataItem, WordLen
     except ModuleNotFoundError as exc:
         if exc.name != "snap7.type":
             raise
-        from snap7.types import Areas, WordLen
+        from snap7.types import Areas, S7DataItem, WordLen
     SNAP7_ERROR = ""
 except ImportError as exc:
     snap7 = None
     Areas = None
+    S7DataItem = None
+    WordLen = None
     SNAP7_ERROR = f"PLC 无法加载 python-snap7：{exc}"
 
 HAS_SNAP7 = snap7 is not None
@@ -34,7 +36,6 @@ DB_COMM = 18
 #   2.0 / 6.0  X/Y轴实时位置 Real
 #   10.0 XY轴直线busy（= X 或 Y 的 MC_MoveAbsolute.Busy）
 #   12.0 XY轴直线绝对 Array[1..4] of Real（FC1 网络 6 的两个 MC_MoveAbsolute.Position）
-#   32.0 XY轴直线绝对启动
 #   88.2 停止所有运动触发  88.3 XY系统复位  88.4 通信丢失锁存
 #   90.0 指令序号 DInt   94.0 上次序号 DInt   118.0 气缸启动
 MOTION_CMD_BYTE = 0
@@ -48,8 +49,6 @@ X_POS_OFFSET = 2
 Y_POS_OFFSET = 6
 MOTION_BUSY_BYTE = 10
 MOTION_BLOCK_START = 12
-TRIGGER_BYTE = 32
-TRIGGER_LINEAR_BIT = 0
 GROUP_CTRL_BYTE = 88
 GROUP_STOP_BIT = 2
 GROUP_RESET_BIT = 3

@@ -33,7 +33,6 @@ class MemoryS7:
         # 长度与 1211kongqi 工程一致：读超过 DB 实际长度在真 PLC 上会失败
         self.db = {1: bytearray(120), 18: bytearray(54)}
         self.db[1][1] = 0x0C  # enabled；home Done 脉冲已经结束
-        self.db[1][protocol.TRIGGER_BYTE] = 0x02  # 其他调用者的圆弧启动位
         self.db[18][0] = 0x08  # 轴已就绪
         self.moves = []
         self.connected = False
@@ -163,7 +162,6 @@ class MemoryPLC(PLCInterface):
         self._connected = True
         try:
             self._write_bool(18, 0, 0, False)
-            self.clear_trigger()
             self.reset_tracking()
             self.last_heartbeat_time = 0.0
             self.heartbeat_state = False
@@ -200,7 +198,6 @@ def test_target_block_layout_and_circular_bit_survive():
         assert plc.transport.operations[-2:] == [
             ("payload", 1, protocol.MOTION_BLOCK_START, move),
             ("sequence", 1, protocol.COMM_SEQ_OFFSET, struct.pack(">i", plc.sequence))]
-        assert plc.transport.db[1][protocol.TRIGGER_BYTE] == 0x02  # 圆弧启动位不被碰
         assert plc.transport.db[1][0] == 0  # 不能覆盖使能与复位控制位
     finally:
         plc.disconnect()
@@ -237,14 +234,12 @@ def test_atomic_trigger_preserves_deadzone_and_clipping():
         for x, sent in ((0.0, True), (2.0, False), (8.0, True), (25.0, True)):
             game = client.physical_to_game(x, 0.0)
             before = len(client.transport.moves)
-            client.clear_trigger()
             assert client.send_linear_move(*game)
             if not sent:
                 assert client.last_send_state == "deadzone"
                 assert len(client.transport.moves) == before
             else:
                 assert len(client.transport.moves) == before + 1
-        client.clear_trigger()
         before = len(client.transport.moves)
         before_operations = len(client.transport.operations)
         previous_target = (client.last_phys_x, client.last_phys_y)
@@ -275,13 +270,11 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
             ((right, bottom), (DEFAULT_LIMITS.command_x_max, DEFAULT_LIMITS.command_y_max)),
         ):
             client.reset_tracking()
-            client.clear_trigger()
             assert client.send_linear_move(*game_point)
             move = client.transport.moves[-1]
             assert struct.unpack(">ff", move[:8]) == (f32(physical_point[0]), f32(physical_point[1]))
 
         client.reset_tracking()
-        client.clear_trigger()
         assert client.send_linear_move(left - COORD_EPSILON / 2,
                                        top - COORD_EPSILON / 2)
         move = client.transport.moves[-1]
@@ -289,7 +282,6 @@ def test_plc_game_zone_edges_and_epsilon_tolerance():
             f32(DEFAULT_LIMITS.command_x_min), f32(DEFAULT_LIMITS.command_y_min))
 
         before = len(client.transport.moves)
-        client.clear_trigger()
         assert not client.send_linear_move(left - COORD_EPSILON * 2, top)
         assert client.last_send_state == "invalid"
         assert len(client.transport.moves) == before
@@ -390,7 +382,7 @@ def test_home_and_reset_pulses_preserve_plc_changes_to_neighbor_bits():
     client.connect()
 
     def plc_updates_neighbors(db, offset, bit, value):
-        masks = {(18, 0): 0x14, (1, protocol.TRIGGER_BYTE): 0x82, (1, 0): 0x08,
+        masks = {(18, 0): 0x14, (1, 0): 0x08,
                  (1, 1): 0x30, (1, protocol.GROUP_CTRL_BYTE): 0x14}
         client.transport.db[db][offset] |= masks[(db, offset)]
 
@@ -398,9 +390,7 @@ def test_home_and_reset_pulses_preserve_plc_changes_to_neighbor_bits():
     try:
         client.keep_alive()
         assert client.transport.db[18][0] & 0x14 == 0x14
-        client.clear_trigger()
         assert client.send_linear_move(300, 180)
-        assert client.transport.db[1][protocol.TRIGGER_BYTE] & 0x82 == 0x82
         assert client.enable_axes()
         assert client.disable_axes()
         assert client.transport.db[1][0] & 0x08
@@ -676,7 +666,7 @@ def test_payload_or_sequence_failure_does_not_publish_or_cache_success():
 
 @memory_binding()
 def test_native_bit_failure_fails_connection_and_pulses_closed():
-    for bit in ((18, 0, 0, False), (1, protocol.TRIGGER_BYTE, 0, False)):
+    for bit in ((18, 0, 0, False),):
         client = MemoryPLC()
         try:
             client.transport.fail_bit = bit
@@ -703,7 +693,7 @@ def test_native_bit_failure_fails_connection_and_pulses_closed():
 def test_production_connection_probes_native_bits_before_accepting_motion():
     factory = protocol.snap7.client.Client
     try:
-        for failure in (None, (18, 0, 0, False), (1, protocol.TRIGGER_BYTE, 0, False)):
+        for failure in (None, (18, 0, 0, False)):
             transport = MemoryS7()
             transport.fail_bit = failure
             protocol.snap7.client.Client = lambda: transport
@@ -713,8 +703,7 @@ def test_production_connection_probes_native_bits_before_accepting_motion():
                 assert client.connected == (failure is None)
                 assert transport.moves == []
                 if failure is None:
-                    assert transport.operations == [
-                        ("bit", 18, 0, 0, False), ("bit", 1, protocol.TRIGGER_BYTE, 0, False)]
+                    assert transport.operations == [("bit", 18, 0, 0, False)]
                 else:
                     assert not client.send_linear_move(300, 180)
             finally:
@@ -737,7 +726,6 @@ def test_connection_and_motion_preserve_other_bits_with_modern_clients():
                 assert client.enable_axes()
                 assert transport.db[1][0] == 0xCD
                 assert client.send_linear_move(300, 180)
-                assert transport.db[1][protocol.TRIGGER_BYTE] == 0x02
                 assert client.disable_axes()
                 assert transport.db[1][0] == 0x0D
                 assert struct.unpack_from(">f", transport.moves[0])[0] == f32(client.game_to_physical(300, 180)[0])

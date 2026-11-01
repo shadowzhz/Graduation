@@ -54,16 +54,18 @@ class CameraManager:
             self._stop.set()
             thread, backend = self._thread, self._backend
             self._running = False
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(2.0)
-            if thread.is_alive():
-                raise RuntimeError("摄像头采集线程未停止，不能重新打开设备")
-        if thread is None and backend is not None:
-            backend.release()
-        with self._lock:
-            self._thread = None
-            self._backend = None
-        self.frame_buffer.clear()
+        try:
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(2.0)
+                if thread.is_alive():
+                    raise RuntimeError("摄像头采集线程未停止，不能重新打开设备")
+            if thread is None and backend is not None:
+                backend.release()
+        finally:
+            with self._lock:
+                self._thread = None
+                self._backend = None
+            self.frame_buffer.clear()
 
     def start(self, timeout: float = 2.0) -> None:
         with self._lifecycle_lock:

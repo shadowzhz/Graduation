@@ -179,6 +179,7 @@ class LiveSession:
         self._plc_arm_generation = None
         if args.plc:
             self.plc = start_plc(args, self.runtime, self.rally)
+            self.plc_adapter = PlcControlAdapter(self.plc.reachable_bounds)
             if self.window is not None and not args.dry_run:
                 self.window.attach_plc(self.plc)
             print(f"PLC 状态读取与运动控制已启动：{args.plc} @ {args.plc_rate:g} Hz；轴需现场主动使能")

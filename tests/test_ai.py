@@ -287,8 +287,13 @@ def test_fast_shot_guard_has_hysteresis_against_velocity_noise():
     ai = AirHockeyAI()
     with patch.object(ai_module, "STRIKE_THROUGH", 0.0):
         assert ai.choose_target(_live_state(300.0, 200.0, 0.0, -300.0)).target_y == home
-        assert ai.choose_target(_live_state(300.0, 180.0, 0.0, -100.0)).target_y == home
-        assert ai.choose_target(_live_state(300.0, 150.0, 0.0, -45.0)).target_y == home
+        assert ai.choose_target(_live_state(300.0, 195.0, 0.0, -100.0)).target_y == home
+        assert ai.choose_target(_live_state(300.0, 184.0, 0.0, -45.0)).target_y == home
+        assert ai._goal_guard
+        # 冰壶已越过防守线且仍在球槌前方时，退守球门侧拦截而非倒退回 home
+        past_home = replace(_live_state(300.0, 160.0, 60.0, -300.0), ai_y=120.0)
+        decision = ai.choose_target(past_home)
+        assert decision.target_y == 120.0 and decision.target_x > 300.0
 
 
 def test_goal_guard_strikes_through_only_when_puck_is_about_to_arrive():

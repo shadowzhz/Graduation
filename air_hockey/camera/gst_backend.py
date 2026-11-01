@@ -36,13 +36,13 @@ class GStreamerBackend:
         width = self.config.width
         height = self.config.height
         fps = Fraction(str(self.config.requested_fps)).limit_denominator(1000)
-        decoder = ("nvv4l2decoder mjpeg=1 ! nvvidconv"
-                   if all(Gst.ElementFactory.find(name) for name in ("nvv4l2decoder", "nvvidconv"))
-                   else "jpegdec ! videoconvert")
+        has_nv = all(Gst.ElementFactory.find(name) for name in ("nvv4l2decoder", "nvvidconv"))
+        decoder = "nvv4l2decoder mjpeg=1 ! nvvidconv" if has_nv else "jpegdec ! videoconvert"
+        raw_format = "BGRx" if has_nv else "BGR"
         pipeline_desc = (
             f"v4l2src device={device} io-mode=2 ! "
             f"image/jpeg,width={width},height={height},framerate={fps.numerator}/{fps.denominator} ! "
-            f"{decoder} ! video/x-raw,format=BGRx ! "
+            f"{decoder} ! video/x-raw,format={raw_format} ! "
             "appsink name=sink emit-signals=false max-buffers=1 drop=true sync=false "
             "qos=false enable-last-sample=false wait-on-eos=false"
         )
@@ -87,8 +87,8 @@ class GStreamerBackend:
         valid_fps, numerator, denominator = structure.get_fraction("framerate")
         if not valid_fps or numerator <= 0 or denominator <= 0:
             raise RuntimeError("GStreamer caps 中帧率无效")
-        if structure.get_value("format") != "BGRx":
-            raise RuntimeError("GStreamer appsink 未协商 BGRx 输出")
+        if structure.get_value("format") not in ("BGR", "BGRx"):
+            raise RuntimeError("GStreamer appsink 未协商 BGR/BGRx 输出")
         self.info = CameraInfo(
             device=self._device,
             backend="GStreamer",
@@ -127,17 +127,19 @@ class GStreamerBackend:
             raise RuntimeError(f"GStreamer {self._device} buffer map 失败")
         try:
             # GstVideoMeta may specify padded strides/offsets. Without querying
-            # them, only tightly packed BGRx is safe to interpret as pixels.
-            expected = height * width * 4
+            # them, only tightly packed BGR/BGRx is safe to interpret as pixels.
+            fmt = structure.get_value("format")
+            channels = 3 if fmt == "BGR" else 4
+            expected = height * width * channels
             if len(mapped.data) != expected:
                 raise RuntimeError(
-                    f"GStreamer {self._device} BGRx buffer 大小 {len(mapped.data)} != {expected}; "
+                    f"GStreamer {self._device} {fmt} buffer 大小 {len(mapped.data)} != {expected}; "
                     "可能存在 stride/offset，不能安全转换"
                 )
-            pixels = np.frombuffer(mapped.data, dtype=np.uint8).reshape((height, width, 4))
+            pixels = np.frombuffer(mapped.data, dtype=np.uint8).reshape((height, width, channels))
             convert_started = time.perf_counter()
-            image = cv2.cvtColor(pixels, cv2.COLOR_BGRA2BGR)
-            convert_ms = (time.perf_counter() - convert_started) * 1000.0
+            image = pixels.copy() if channels == 3 else cv2.cvtColor(pixels, cv2.COLOR_BGRA2BGR)
+            convert_ms = 0.0 if channels == 3 else (time.perf_counter() - convert_started) * 1000.0
         finally:
             buffer.unmap(mapped)
         self.last_read_ms = (time.perf_counter() - started) * 1000.0

@@ -77,7 +77,7 @@ class AirHockeyAI:
             return replace(self.choose_target(state, prediction=prediction), reaction_timer=state.reaction_timer)
         reaction_timer = state.reaction_timer - dt
         if reaction_timer <= 0:
-            reaction_timer += state.difficulty.reaction_delay
+            reaction_timer = state.difficulty.reaction_delay
             return replace(self.choose_target(state, prediction=prediction), reaction_timer=reaction_timer)
         return AIDecision(state.target_x, state.target_y, state.stalled_stone_phase, reaction_timer)
 
@@ -182,7 +182,8 @@ class AirHockeyAI:
 
     def _goal_guard_decision(self, state, prediction, error, safe_left, safe_right, safe_top, safe_bottom):
         """冲门球：守在防守线上、横移到穿线点堵截；不是冲门球返回 None。"""
-        guard_y = state.ai_home_y
+        guard_y = (state.ai_home_y if state.stone.y >= state.ai_home_y
+                   else max(safe_top, min(state.ai_y, state.stone.y - core.STONE_RADIUS)))
         vy_limit = FAST_SHOT_EXIT_VY if self._goal_guard else FAST_SHOT_ENTER_VY
         margin = FAST_SHOT_EXIT_MARGIN if self._goal_guard else FAST_SHOT_ENTER_MARGIN
         self._goal_guard = False

@@ -198,7 +198,7 @@ def _assert_vision_runtime_threat_predicts_once(stone_y):
     assert result.prediction is not None
     assert result.prediction.source_state is result.curling_state
     assert isinstance(result.ai_decision, AIDecision)
-    assert abs(result.ai_decision.reaction_timer + 0.001) < 1e-9
+    assert result.ai_decision.reaction_timer == 0.0
 
     baseline_ai = AirHockeyAI()
     baseline_ai._random.seed(120)

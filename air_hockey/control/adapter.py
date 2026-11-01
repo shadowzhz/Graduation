@@ -28,9 +28,20 @@ class PlcControlAdapter:
     Y_MIN = core.RINK_TOP + core.MALLET_RADIUS
     Y_MAX = core.RINK_CENTER_Y - core.MALLET_RADIUS
 
+    def __init__(self, bounds: tuple[float, float, float, float] | None = None) -> None:
+        if bounds is None:
+            self.x_min, self.x_max = self.X_MIN, self.X_MAX
+            self.y_min, self.y_max = self.Y_MIN, self.Y_MAX
+        else:
+            left, right, top, bottom = map(float, bounds)
+            self.x_min = max(self.X_MIN, left)
+            self.x_max = min(self.X_MAX, right)
+            self.y_min = max(self.Y_MIN, top)
+            self.y_max = min(self.Y_MAX, bottom)
+
     def build_target(self, target_x: float, target_y: float, timestamp: float) -> PlcTarget:
         target_x, target_y = float(target_x), float(target_y)
         if not (math.isfinite(target_x) and math.isfinite(target_y)):
             raise ValueError("target must be finite")
-        return PlcTarget(min(max(target_x, self.X_MIN), self.X_MAX),
-                         min(max(target_y, self.Y_MIN), self.Y_MAX), float(timestamp))
+        return PlcTarget(min(max(target_x, self.x_min), self.x_max),
+                         min(max(target_y, self.y_min), self.y_max), float(timestamp))
