@@ -27,9 +27,9 @@ FAST_SHOT_EXIT_MARGIN = core.STONE_RADIUS * 3.0
 # 迎击：终点模式下球槌开到目标就停住，球只是撞上一个静止的球槌弹回去。
 # 冰壶再过 STRIKE_WINDOW 秒就碰到球槌时，把目标沿来球方向往回推 STRIKE_THROUGH，
 # 球槌在接触瞬间还在朝球冲，把球打回去。窗口之前照常等在原位，不提前离开防守位置。
-STRIKE_WINDOW = 0.15
+STRIKE_WINDOW = 0.20
 STRIKE_WINDOW_EXIT = 0.22       # 迎击时间迟滞退出阈值（秒），承诺迎击后防止边界时间抖动退回
-STRIKE_THROUGH = 60.0
+STRIKE_THROUGH = 80.0
 ATTACK_HYSTERESIS = 17.0        # 进攻区空间迟滞（与 Rally MIDLINE_HYSTERESIS 保持一致，约 15.5mm）
 
 @dataclass
