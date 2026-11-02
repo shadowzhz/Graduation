@@ -161,16 +161,9 @@ class RallyController:
             puck_stopped = direction == "still"
             if math.dist(position, (stone.x, stone.y)) <= core.STONE_RADIUS + core.MALLET_RADIUS + TOUCH_MARGIN:
                 self._touched_at = now
-            # 冰壶往对方飞时，只有**刚被我们打过**、且它自己能飞出机器半场才放手回 READY（不追第二次）；
-            # 打软了、按物理会停在机器半场的慢球，以及没碰过、从角落弹出来的球照样进攻。
-            prediction = result.prediction
-            # 判据是"预测路线会不会越过中线"，不是停点：快球会在对方半场撞墙弹回、停点落回我方半场，
-            # 那也是先进了人那半场，回来时按来球防守。放手后回落到中线以内 LET_GO_HYSTERESIS 才重新进攻。
-            line = core.RINK_CENTER_Y - (LET_GO_HYSTERESIS if self._letting_go else 0.0)
-            leaving = direction == "outgoing" and (
-                not machine_half
-                or (now - self._touched_at <= TOUCH_MEMORY
-                    and (prediction is None or max(point[1] for point in prediction.trajectory) > line)))
+            # 冰壶明确朝对方飞（direction == "outgoing"）时直接回 READY，绝不在后面猛追再急刹折返；
+            # 若打轻了没出半场，等它减速停下（不再是 outgoing）后再上去回收。
+            leaving = direction == "outgoing"
             self._letting_go = leaving
             if not leaving:
                 # 状态与目标防抖：在 ATTACKING 与 DEFENDING 之间切换时受最小驻留时间保护
@@ -187,8 +180,8 @@ class RallyController:
                     target = None
                     self._forget_puck()
                     reason = "invalid/missing AI target; target cleared"
-                elif machine_half and puck_stopped and not self.can_retrieve(stone):
-                    # 不能盲目直穿身后的球回 READY，那会从前侧推向自家球门。
+                elif machine_half and (puck_stopped or stone.y < position[1]) and not self.can_retrieve(stone):
+                    # 不能盲目直穿身后的球回 READY，也绝不在后场不可达盲区里跟着噪点乱跑。
                     self.state = RallyState.RECOVERING
                     target = None
                     reason = (f"puck unreachable (stopped at y={stone.y:.0f}, "
@@ -208,7 +201,8 @@ class RallyController:
                         target = (decision.target_x, self._last_target[1])
                     else:
                         target = (decision.target_x, decision.target_y)
-                    self._last_target = target
+                    # 防守线后方（后场盲区边缘）不保留遮挡保持目标，避免盲区丢帧/重现时来回乱跑
+                    self._last_target = None if stone.y < core.AI_HOME_Y else target
                     self._last_active_state = self.state
             else:
                 reason = "puck moving away; READY"

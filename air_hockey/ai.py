@@ -157,6 +157,8 @@ class AirHockeyAI:
         if stone_in_attack_zone and not stone_behind_ai:
             self._attacking = True
             lead_x, lead_y = self._lead_target(state, state.stone.x, state.stone.y)
+            if state.stone.y <= state.ai_y + core.STONE_RADIUS + core.MALLET_RADIUS:
+                lead_y = max(lead_y, state.ai_y)
             strike_x, strike_y = self._strike_through(state, lead_x + error, lead_y)
             return AIDecision(
                 clamp(strike_x, safe_left, safe_right),
@@ -269,7 +271,7 @@ class AirHockeyAI:
         striking_x = clamp(state.stone.x, safe_left, safe_right)
         striking = state.stalled_stone_phase == "striking" and state.stone.y >= state.ai_y
         if not striking and state.ai_y > staging_y + tolerance:
-            if abs(state.ai_x - state.stone.x) < clearance - tolerance:
+            if abs(state.ai_x - state.stone.x) < clearance - tolerance or state.stone.vy < -core.STONE_STOP_SPEED:
                 return AIDecision(staging_x, state.ai_y, "sidestepping")
             return AIDecision(staging_x, staging_y, "positioning")
         # 实机若连球心后方都退不到，不能对齐后从前侧把球推向自家门。

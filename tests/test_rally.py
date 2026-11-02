@@ -298,6 +298,9 @@ def test_rally_gives_up_on_puck_it_cannot_get_behind():
     assert decision.target is None
     assert decision.state is RallyState.RECOVERING, decision
     assert submit_rally_target(result, PlcControlAdapter(), None) is None
+    # 后场不可达盲区即使检测框抖动带有速度，也必须清空目标不乱跑
+    moving_blind = observation(1.1, x=217, y=112, vx=20, vy=-30, mallet=(217, 250))
+    assert tick(controller, moving_blind, mallet=(217, 250)).target is None
 
 
 def test_rally_without_bounds_still_retrieves_stopped_puck():
@@ -326,19 +329,17 @@ def test_rally_rejects_stopped_pucks_outside_contact_reach():
         assert tick(controller, result).target is None
 
 
-def test_new_track_identity_does_not_inherit_touch_memory():
-    """★ F11 回归：换轨迹代号后不能沿用上一颗球的接触/放手记忆。"""
+def test_new_track_identity_resets_rally_memory():
+    """★ F11 回归：换轨迹代号后清空上一颗球的保持与接触记忆。"""
     controller = RallyController()
-    # 旧球停在球槌下：建立接触记忆
     old = observation(1.0, identity=1, x=400, y=400, vx=0, vy=0)
     assert tick(controller, old, mallet=(400, 400)).state == RallyState.ATTACKING
-    # 新球（新代号）在机器半场朝对方飞，且离球槌很远：
-    # 若沿用旧接触记忆会被误判为"刚被我们打过"而放手回 READY
-    new = observation(1.1, identity=2, x=200, y=400, vx=0, vy=400)
+    assert controller._touched_at > 0
+    new = observation(1.1, identity=2, x=200, y=400, vx=0, vy=0)
     decision = tick(controller, new, mallet=(400, 400))
+    assert controller._touched_at == -math.inf
     assert decision.state == RallyState.ATTACKING
     assert decision.target != READY_POSITION
-
 
 def test_invalid_state_does_not_let_hold_revive_the_old_target():
     """★ F11 回归：无效帧清目标后，下一帧无球不能从保持记忆恢复旧目标。"""
@@ -549,25 +550,13 @@ def test_puck_hit_away_in_machine_half_is_not_chased_again():
     mallet = (330, 195)     # 击出那一刻球槌就贴在冰壶后面
     hit = tick(controller, observation(1.0, x=340, y=250, vx=460, vy=627, mallet=mallet), mallet=mallet)
     assert hit.target == READY_POSITION, hit
+    # 即使碰撞瞬间遮挡未记到接触或球速较慢（vy=60~300），只要还在往外飞就不追上去折返震台
+    for vy in (60.0, 300.0):
+        outgoing = tick(RallyController(), observation(1.0, x=340, y=250, vx=0, vy=vy))
+        assert outgoing.target == READY_POSITION, outgoing
     # 冰壶停在机器半场以后，照常上去回收
     still = tick(controller, observation(2.0, x=340, y=300, vx=0, vy=0))
     assert still.target is not None and still.target != READY_POSITION, still
-
-
-def test_untouched_puck_bouncing_out_of_machine_corner_is_attacked():
-    """球槌没碰过、从机器端角落弹出来往外飞的球不能当成"刚打出去"放走，要上去打一次。"""
-    controller = RallyController()
-    rebound = tick(controller, observation(1.0, x=500, y=120, vx=-150, vy=300))
-    assert rebound.state == RallyState.ATTACKING, rebound
-    assert rebound.target is not None and rebound.target != READY_POSITION, rebound
-
-
-def test_weak_outgoing_puck_that_stays_in_machine_half_is_still_attacked():
-    """往外溜、但按物理会停在机器半场的慢球（打软了 / 撞墙弹回）要继续进攻，不能回 READY 干等。"""
-    controller = RallyController()
-    weak = tick(controller, observation(1.0, x=340, y=250, vx=0, vy=60))
-    assert weak.state == RallyState.ATTACKING, weak
-    assert weak.target is not None and weak.target != READY_POSITION, weak
 
 
 def test_production_ai_defaults_midline_target_no_chatter():

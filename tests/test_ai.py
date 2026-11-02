@@ -123,6 +123,13 @@ def test_moving_behind_puck_is_bypassed_and_outgoing_puck_ends_recovery():
     state.stalled_stone_phase = decision.stalled_stone_phase
     state.stone.y, state.stone.vy = 450, 100
     assert ai.choose_target(state).stalled_stone_phase == "idle"
+    # 已经横移让开但身后球仍在向底线滑行时，保持当前 Y 不后退包球
+    sliding_rear = make_state(300, 180, vy=-100, ai_y=250)
+    sliding_rear.ai_x = 400
+    assert ai.choose_target(sliding_rear).target_y == 250
+    # 侧前方近距离追击时，lead_y 不得退到球槌当前位置后方
+    side_close = make_state(420.0, 290.0, vx=200.0, vy=-400.0, ai_y=260.0)
+    assert AirHockeyAI(mallet_speed=500.0).choose_target(side_close).target_y >= 260.0
 
 
 def test_recovery_aligns_to_puck_near_own_goal():
@@ -300,7 +307,7 @@ def test_goal_guard_strikes_through_only_when_puck_is_about_to_arrive():
     """守门线等球时，冰壶快到了才迎着来球方向冲出去打，远的时候老老实实等在防守线。"""
     home = ai_home_y()
     contact = layout.STONE_RADIUS + layout.MALLET_RADIUS
-    far = AirHockeyAI().choose_target(_live_state(300.0, 330.0, 0.0, -600.0))
+    far = AirHockeyAI().choose_target(_live_state(300.0, 380.0, 0.0, -600.0))
     assert far.target_y == home
     # 再过约 0.05s 就碰到球槌：目标沿来球方向（+y）往前推
     near = AirHockeyAI().choose_target(_live_state(300.0, home + contact + 30.0, 0.0, -600.0))
