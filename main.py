@@ -52,9 +52,9 @@ def build_parser():
     parser.add_argument("--record", default=None, metavar="PATH", help="记录运行数据到 JSON 文件（CurlingState/PredictionState/timestamp/FPS）")
     parser.add_argument("--dry-run", action="store_true", help="完整回合影子运行：显示/记录请求目标，不发送 PLC 运动或现场轴命令")
     parser.add_argument("--plc", default=None, metavar="IP", help="连接已配置 DB1/DB18 的 S7-1200（1211C）；轴需现场主动使能")
-    parser.add_argument("--plc-rate", type=float, default=40.0, help="PLC 通信周期频率（Hz，默认 40）")
-    parser.add_argument("--mallet-speed", type=float, default=50.0, metavar="UNITS_PER_SEC",
-                        help="球槌可达速度估计（球台单位/秒，默认 50）。用来算提前量："
+    parser.add_argument("--plc-rate", type=float, default=80.0, help="PLC 通信周期频率（Hz，默认 40）")
+    parser.add_argument("--mallet-speed", type=float, default=1000.0, metavar="UNITS_PER_SEC",
+                        help="球槌可达速度估计（球台单位/秒，默认 1000）。用来算提前量："
                              "目标瞄冰壶再走 lead_time 之后的位置，而不是它现在的位置 —— "
                              "不然轴总是慢一拍、球走了才追到。设 0 关闭提前量。"
                              "这不是 PLC 轴速度设置，需要在现场实测后调准")
