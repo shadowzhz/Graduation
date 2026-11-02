@@ -191,13 +191,15 @@ class AirHockeyAI:
         self._goal_guard = False
         if state.stone.vy >= vy_limit:
             return None
+        approach = self._current_approach(prediction.trajectory)
         # 滑不到这条线就停下的慢球不算冲门 —— 这种球应该上前击打
-        if not any(point_y <= guard_y for _x, point_y in prediction.trajectory):
+        if not any(point_y <= guard_y for _x, point_y in approach):
             return None
-        predicted_x = self._predict_stone_x(state, guard_y, prediction)
-        if not core.GOAL_LEFT - margin <= predicted_x <= core.GOAL_RIGHT + margin:
+        threat_x = self._predict_stone_x(state, core.RINK_TOP, prediction)
+        if not core.GOAL_LEFT - margin <= threat_x <= core.GOAL_RIGHT + margin:
             return None
         self._goal_guard = True
+        predicted_x = self._predict_stone_x(state, guard_y, prediction)
         blended_x = self._blend_with_center(predicted_x, state.difficulty)
         strike_x, strike_y = self._strike_through(state, blended_x + error, guard_y)
         return AIDecision(clamp(strike_x, safe_left, safe_right), clamp(strike_y, safe_top, safe_bottom), "idle")
@@ -349,11 +351,25 @@ class AirHockeyAI:
                 break
         return motion.x, motion.y
 
+    @staticmethod
+    def _current_approach(trajectory):
+        """只取冰壶本次朝本方球门逼近的轨迹段；一旦反弹远离（y 回升），后续折返不算本次威胁。"""
+        if not trajectory:
+            return []
+        approach = [trajectory[0]]
+        for point in trajectory[1:]:
+            if point[1] > approach[-1][1] + core.COLLISION_EPSILON:
+                break
+            approach.append(point)
+        return approach
+
     def _predict_stone_x(
         self, state: GameState, target_y: float, prediction: PredictionState | None = None
     ) -> float:
-        """从共享 TrajectoryPredictor 的 PredictionState 中获取冰壶到达 target_y 横线附近时的横坐标。"""
-        trajectory = (prediction if prediction is not None else self.predictor.predict(state.stone)).trajectory
+        """从共享 TrajectoryPredictor 的 PredictionState 中获取冰壶本次逼近到达 target_y 横线附近时的横坐标。"""
+        trajectory = self._current_approach(
+            (prediction if prediction is not None else self.predictor.predict(state.stone)).trajectory
+        )
         if not trajectory:
             return state.stone.x
         if len(trajectory) == 1:

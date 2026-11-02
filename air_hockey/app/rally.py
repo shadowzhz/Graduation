@@ -49,7 +49,9 @@ OCCLUSION_KEEP_RADIUS = 150.0      # 球槌离最后目标多近算"就是它挡
 # 迟滞与防抖参数：消除状态机在分界线和速度零点附近的高频横跳
 # （2026-10-29 场地 Y 方向改为各向同性单位，下面纯 Y 的量按 ×1.449 换算，毫米含义不变。）
 MIDLINE_HYSTERESIS = 17.0          # 中线迟滞带（球台单位，约 16mm），进攻态需退至中线 +17 才解除
-OUTGOING_VEL_THRESHOLD = 29.0      # 人类半场离开球门的速度阈值，低于此值不提前放弃防守
+OUTGOING_ENTER_VY = 45.0           # 进入放手回位的速度门槛（高于 28~30 慢球抖动带，低于 60+ 真实击出球）
+OUTGOING_EXIT_VY = 15.0            # 退出放手回位的速度门槛（高于静止阈值 8.0，覆盖 ±15 卡尔曼速度噪声）
+OUTGOING_VEL_THRESHOLD = OUTGOING_ENTER_VY
 STATE_DWELL_SECONDS = 0.03         # 最小状态驻留时间（30ms），防止单帧图像噪点引起状态来回抽搐
 # 放手迟滞：往外飞的球预测路线越过中线就放手；放手后要回落到中线以内这么多才重新进攻。
 # 打软的球预测随速度估计抖动，没有迟滞会在放手/进攻之间来回切。
@@ -142,9 +144,10 @@ class RallyController:
         elif result.track_confirmed and stone is not None:
             # 速度方向判断引入死区：在真人半场只有明确朝对方门滑行（vy > OUTGOING_VEL_THRESHOLD）才算 outgoing；
             # 速度在零点附近波动或横向滑动时维持防守准备，避免水平横跳。
+            outgoing_vy = OUTGOING_EXIT_VY if self._letting_go else OUTGOING_ENTER_VY
             if stone.speed <= core.STONE_STOP_SPEED:
                 direction = "still"
-            elif stone.vy > OUTGOING_VEL_THRESHOLD:
+            elif stone.vy > outgoing_vy:
                 direction = "outgoing"
             elif stone.vy < -core.STONE_STOP_SPEED:
                 direction = "incoming"

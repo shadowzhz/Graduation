@@ -588,7 +588,7 @@ def test_state_dwell_keeps_lateral_target_updating():
     line_y = first.target[1]
     xs = []
     # 驻留期内跨中线，冰壶持续横向滑动
-    for t, x in ((1.02, 380.0), (1.04, 420.0), (1.06, 460.0)):
+    for t, x in ((1.008, 380.0), (1.016, 420.0), (1.024, 460.0)):
         result = observation(t, x=x, y=519.0, vx=0.0, vy=-300.0, ai=ai)
         decision = tick(controller, result)
         assert decision.state == RallyState.DEFENDING
@@ -596,7 +596,7 @@ def test_state_dwell_keeps_lateral_target_updating():
         xs.append(decision.target[0])
     assert xs[0] < xs[1] < xs[2]
     # 驻留结束：X 连续（继续跟球横移），Y 才切到进攻策略
-    result = observation(1.09, x=500.0, y=519.0, vx=0.0, vy=-300.0, ai=ai)
+    result = observation(1.035, x=500.0, y=519.0, vx=0.0, vy=-300.0, ai=ai)
     decision = tick(controller, result)
     assert decision.state == RallyState.ATTACKING
     assert decision.target == (result.ai_decision.target_x, result.ai_decision.target_y)
@@ -612,7 +612,7 @@ def test_state_dwell_fast_shot_keeps_lateral_intercept_updating():
     assert first.state == RallyState.DEFENDING
     line_y = first.target[1]
     xs = []
-    for t, vx in ((1.02, -30.0), (1.04, -60.0), (1.06, -90.0)):
+    for t, vx in ((1.008, -30.0), (1.016, -60.0), (1.024, -90.0)):
         result = observation(t, x=300.0, y=500.0, vx=vx, vy=-900.0, ai=ai)
         decision = tick(controller, result)
         assert decision.state == RallyState.DEFENDING
@@ -620,7 +620,7 @@ def test_state_dwell_fast_shot_keeps_lateral_intercept_updating():
         xs.append(decision.target[0])
     assert len(set(round(x, 3) for x in xs)) == 3
     assert xs[0] > xs[1] > xs[2]
-    result = observation(1.09, x=300.0, y=490.0, vx=-120.0, vy=-900.0, ai=ai)
+    result = observation(1.035, x=300.0, y=490.0, vx=-120.0, vy=-900.0, ai=ai)
     decision = tick(controller, result)
     assert decision.state == RallyState.ATTACKING
     assert abs(decision.target[0] - xs[-1]) < 40.0
@@ -713,3 +713,36 @@ def test_live_frame_keeps_generation_captured_before_computation():
             assert client.transport.moves == []
         finally:
             client.disconnect()
+
+
+def test_slow_outgoing_puck_velocity_hysteresis_prevents_chatter():
+    """慢球朝对方滑动（vy 在 28、30 交替 8 帧）时，追球与回 READY 严禁来回切换。"""
+    controller = RallyController()
+    vys = (28.0, 30.0) * 4
+    modes = []
+    for i, vy in enumerate(vys):
+        dec = tick(controller, observation(1.0 + i * 0.01, x=420.0, y=320.0, vx=0.0, vy=vy))
+        modes.append("ready" if dec.target == READY_POSITION else "pursue")
+    switches = sum(a != b for a, b in zip(modes, modes[1:]))
+    assert switches == 0 and modes == ["pursue"] * 8, f"切换了 {switches} 次: {modes}"
+
+    # 明确打出去的快球应当帧回位
+    fast_out = tick(controller, observation(1.10, x=420.0, y=320.0, vx=0.0, vy=200.0))
+    assert fast_out.target == READY_POSITION
+
+    # 已进入放手回位后，vy 在 28、30 之间交替 8 帧应保持回位，0 次切换
+    hold_modes = []
+    for i, vy in enumerate(vys):
+        dec = tick(controller, observation(1.11 + i * 0.01, x=420.0, y=320.0, vx=0.0, vy=vy))
+        hold_modes.append("ready" if dec.target == READY_POSITION else "pursue")
+    hold_switches = sum(a != b for a, b in zip(hold_modes, hold_modes[1:]))
+    assert hold_switches == 0 and hold_modes == ["ready"] * 8, f"切换了 {hold_switches} 次: {hold_modes}"
+
+    # 明确反向的来球应当帧解除放手
+    incoming = tick(controller, observation(1.20, x=420.0, y=320.0, vx=0.0, vy=-200.0))
+    assert incoming.state == RallyState.ATTACKING and incoming.target != READY_POSITION
+
+    # 再次打出去进入放手后，慢球停在机器半场仍能回收
+    assert tick(controller, observation(1.21, x=420.0, y=320.0, vx=0.0, vy=200.0)).target == READY_POSITION
+    stopped = tick(controller, observation(1.30, x=420.0, y=320.0, vx=0.0, vy=0.0))
+    assert stopped.state == RallyState.ATTACKING and stopped.target != READY_POSITION

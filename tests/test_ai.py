@@ -331,3 +331,41 @@ def test_reset_clears_retrieve_memory_so_next_puck_starts_from_idle():
     second = make_state(480.0, 300.0, ai_y=200.0)
     second.ai_x = 300.0
     assert ai.choose_target(second) == AirHockeyAI().choose_target(second)
+
+
+def test_diagonal_fast_shots_separate_goal_threat_from_defense_line_intercept():
+    """斜射守门：用本次逼近底线的预测判断进球威胁，用防守线交点选择拦截位置。"""
+    home = ai_home_y()
+    predictor = TrajectoryPredictor()
+
+    # 1. 斜射进门球：穿防守线时 x≈425（在门柱外），但无人拦截会进门 -> 必须进入守门模式并在防守线 x≈425 拦截
+    diag_in = _live_state(507.0, 300.0, -400.0, -575.0)
+    pred_in = predictor.predict(diag_in.stone)
+    ai_in = AirHockeyAI(predictor=predictor)
+    dec_in = ai_in.choose_target(diag_in, prediction=pred_in)
+    assert ai_in._goal_guard and not ai_in._attacking
+    assert dec_in.target_y == home
+    assert abs(dec_in.target_x - 424.58) < 1.0
+
+    # 2. 斜射偏出球：穿防守线时 x≈350（在门内），但到本方底墙时已偏出 -> 不进守门模式，走普通追击
+    diag_out = _live_state(210.0, 350.0, 500.0, -600.0)
+    pred_out = predictor.predict(diag_out.stone)
+    ai_out = AirHockeyAI(predictor=predictor)
+    dec_out = ai_out.choose_target(diag_out, prediction=pred_out)
+    assert not ai_out._goal_guard and ai_out._attacking
+    assert (dec_out.target_x, dec_out.target_y) == (210.0, 350.0)
+
+    # 若偏出球反弹远离后又绕回球门，也不能把后续折返威胁提前算到当前
+    rebound_return = replace(pred_out, trajectory=list(pred_out.trajectory) + [(300.0, 20.0)])
+    ai_rebound = AirHockeyAI(predictor=predictor)
+    dec_rebound = ai_rebound.choose_target(diag_out, prediction=rebound_return)
+    assert not ai_rebound._goal_guard and ai_rebound._attacking
+    assert (dec_rebound.target_x, dec_rebound.target_y) == (210.0, 350.0)
+
+    # 3. 正面快球：威胁点与防守线交点都在门内 -> 进入守门模式
+    front = _live_state(300.0, 380.0, 0.0, -600.0)
+    pred_front = predictor.predict(front.stone)
+    ai_front = AirHockeyAI(predictor=predictor)
+    dec_front = ai_front.choose_target(front, prediction=pred_front)
+    assert ai_front._goal_guard and not ai_front._attacking
+    assert (dec_front.target_x, dec_front.target_y) == (300.0, home)
