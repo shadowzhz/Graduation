@@ -30,8 +30,13 @@ FAST_SHOT_EXIT_MARGIN = core.STONE_RADIUS * 3.0
 STRIKE_WINDOW = 0.20
 STRIKE_WINDOW_EXIT = 0.22       # 迎击时间迟滞退出阈值（秒），承诺迎击后防止边界时间抖动退回
 STRIKE_THROUGH = 80.0
+SLOW_ATTACK_SPEED = 120.0       # 慢球可控进攻速度上限（先完成 X 横向对齐，再沿 Y 纵向击球）
+FAST_STRIKE_SPEED = 240.0       # 迎击满冲量速度门槛（低速按比例衰减并限制过冲）
+ATTACK_ALIGN_ENTER = core.STONE_RADIUS
+ATTACK_ALIGN_EXIT = core.STONE_RADIUS + core.MALLET_RADIUS * 0.5
+RETRIEVE_EXIT_SPEED = 25.0      # 死球回收退出速度门槛（覆盖 ±15 卡尔曼速度噪声，防阶段反复重置）
+RETRIEVE_SLIDING_VY = 18.0      # 身后球向底线滑行让道门槛（高于静止视觉噪声）
 ATTACK_HYSTERESIS = 17.0        # 进攻区空间迟滞（与 Rally MIDLINE_HYSTERESIS 保持一致，约 15.5mm）
-
 @dataclass
 class AIDecision:
     target_x: float
@@ -52,12 +57,16 @@ class AirHockeyAI:
         self._retrieving = False
         # 回收走到第几步（只前进不后退）。实机没人推进 GameState.stalled_stone_phase，由 AI 自己算
         self._retrieve_step = 0
+        self._retrieve_side: float | None = None
+        self._retrieve_anchor: tuple[float, float] | None = None
         # 可覆盖范围（left, right, top, bottom，游戏坐标），来自 plc.reachable_bounds；None = 不额外限制
         self.recovery_bounds = recovery_bounds
         # 冲门快球"守门线"模式（带迟滞，见 FAST_SHOT_* 常量）
         self._goal_guard = False
         # 进攻区追击粘性状态（带迟滞，防止中线处目标在进攻与防守之间大幅横跳）
         self._attacking = False
+        # 慢球进攻横向对齐状态（带迟滞，未对齐前禁止横梁提前跨球）
+        self._attack_aligned = False
         # 迎击承诺阶段（防止迎击时间窗口边界产生约 54.5mm 目标跳变）
         self._striking = False
     def reset(self) -> None:
@@ -68,9 +77,13 @@ class AirHockeyAI:
         """
         self._retrieving = False
         self._retrieve_step = 0
+        self._retrieve_side = None
+        self._retrieve_anchor = None
         self._goal_guard = False
         self._attacking = False
+        self._attack_aligned = False
         self._striking = False
+
     def update(self, state: GameState, dt: float, *, prediction: PredictionState | None = None) -> AIDecision:
         """按难度反应延迟刷新目标。"""
         if state.awaiting_serve and state.current_server == "ai":
@@ -99,49 +112,83 @@ class AirHockeyAI:
             safe_left, safe_right = max(safe_left, left), min(safe_right, right)
             safe_top, safe_bottom = max(safe_top, top), min(safe_bottom, bottom)
         stone_speed = math.hypot(state.stone.vx, state.stone.vy)
-        # 球一旦动起来就退出死球回收
-        if stone_speed > core.STONE_STOP_SPEED:
+        stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
+        anchor_moved = (
+            self._retrieve_anchor is not None
+            and math.hypot(state.stone.x - self._retrieve_anchor[0],
+                           state.stone.y - self._retrieve_anchor[1]) > core.STONE_RADIUS * 0.8
+        )
+        # 球真正动起来才退出死球回收；静止球在 ±15 卡尔曼速度噪声下保持回收阶段不重置
+        if (stone_speed > RETRIEVE_EXIT_SPEED
+                or (stone_speed > core.STONE_STOP_SPEED and anchor_moved)
+                or (state.stone.vy > core.STONE_STOP_SPEED and not stone_behind_ai)):
             self._retrieving = False
             self._retrieve_step = 0
+            self._retrieve_side = None
+            self._retrieve_anchor = None
         stone_near_center = state.stone.y <= core.RINK_CENTER_Y + core.STONE_RADIUS + 2.0
         # 冲门判断与下面的防守分支共用一次预测（实时链路会直接传进来）
         if prediction is None and state.stone.vy < FAST_SHOT_EXIT_VY:
             prediction = self.predictor.predict(state.stone)
-        stone_behind_ai = state.stone.y < state.ai_y - core.STONE_RADIUS * 0.35
-        if stone_behind_ai or (state.stalled_stone_phase != "idle" and stone_speed <= core.STONE_STOP_SPEED):
+        if stone_behind_ai and stone_speed <= RETRIEVE_EXIT_SPEED and state.stone.vy >= -RETRIEVE_SLIDING_VY:
+            self._retrieving = True
+        if stone_behind_ai or (
+            (self._retrieving or state.stalled_stone_phase != "idle")
+            and stone_speed <= RETRIEVE_EXIT_SPEED
+        ):
             self._goal_guard = False
-            return self._choose_stalled_stone_target(state, safe_left, safe_right, safe_top, safe_bottom)
+            self._attacking = False
+            self._attack_aligned = False
+            self._striking = False
+            if self._retrieve_anchor is None:
+                self._retrieve_anchor = (state.stone.x, state.stone.y)
+            phase = self._retrieve_phase(state, safe_left, safe_right, safe_top, safe_bottom)
+            if (state.stalled_stone_phase in self.RETRIEVE_PHASES
+                    and self.RETRIEVE_PHASES.index(state.stalled_stone_phase) > self._retrieve_step):
+                self._retrieve_step = self.RETRIEVE_PHASES.index(state.stalled_stone_phase)
+                phase = state.stalled_stone_phase
+            return self._choose_stalled_stone_target(
+                replace(state, stalled_stone_phase=phase),
+                safe_left, safe_right, safe_top, safe_bottom)
         stalled_stone_phase = "idle"
 
+        contact = core.STONE_RADIUS + core.MALLET_RADIUS
         attack_threshold = difficulty.attack_line + (ATTACK_HYSTERESIS if self._attacking else 0.0)
         stone_in_attack_zone = state.stone.y <= attack_threshold
-        if stone_speed <= core.STONE_STOP_SPEED and stone_near_center:
+        if stone_speed <= RETRIEVE_EXIT_SPEED and stone_near_center:
             self._goal_guard = False
             self._attacking = False
             self._striking = False
             # 球槌还没到球边：照旧瞄球心；已在球边而球不动：改用停滞球规划器绕到后面推。
             # 击球点 stone.y + MALLET_RADIUS 必须在行程内才推得动；进入回收后保持粘性直到球动起来。
-            reach = (core.STONE_RADIUS + core.MALLET_RADIUS) * 1.6
+            reach = contact * 1.6
             can_push = state.stone.y + core.MALLET_RADIUS <= safe_bottom
             if not can_push:
                 self._retrieving = False
                 self._retrieve_step = 0
+                self._retrieve_side = None
+                self._retrieve_anchor = None
             elif self._retrieving or math.hypot(state.ai_x - state.stone.x,
                                                 state.ai_y - state.stone.y) <= reach:
                 self._retrieving = True
-                # 状态里已有非 idle 阶段（仿真）就以状态为准，否则（实机）由 AI 自己推进
-                phase = self._retrieve_phase(state)
-                if state.stalled_stone_phase != "idle":
+                if self._retrieve_anchor is None:
+                    self._retrieve_anchor = (state.stone.x, state.stone.y)
+                phase = self._retrieve_phase(state, safe_left, safe_right, safe_top, safe_bottom)
+                if (state.stalled_stone_phase in self.RETRIEVE_PHASES
+                        and self.RETRIEVE_PHASES.index(state.stalled_stone_phase) > self._retrieve_step):
+                    self._retrieve_step = self.RETRIEVE_PHASES.index(state.stalled_stone_phase)
                     phase = state.stalled_stone_phase
                 return self._choose_stalled_stone_target(
                     replace(state, stalled_stone_phase=phase),
                     safe_left, safe_right, safe_top, safe_bottom)
-            # 这里故意瞄球心：击球就是朝球撞过去
-            return AIDecision(
-                clamp(state.stone.x + error, safe_left, safe_right),
-                clamp(state.stone.y, safe_top, safe_bottom),
-                stalled_stone_phase,
-            )
+            aim_x = clamp(state.stone.x + error, safe_left, safe_right)
+            aim_y = clamp(state.stone.y, safe_top, safe_bottom)
+            align_limit = ATTACK_ALIGN_EXIT if self._attack_aligned else ATTACK_ALIGN_ENTER
+            self._attack_aligned = abs(state.ai_x - aim_x) <= align_limit
+            # 若横梁已逼近静止球接触范围而 X 仍未对齐，先停住 Y 完成 X 对齐，防止横梁提前跨球
+            if not self._attack_aligned and state.stone.y - state.ai_y <= contact:
+                aim_y = clamp(min(state.ai_y, state.stone.y - contact), safe_top, safe_bottom)
+            return AIDecision(aim_x, aim_y, stalled_stone_phase)
 
         # 冲门快球拦截优先：冰壶冲向我方球门（vy 足够负、在球槌前方），
         # 预测轨迹真的能滑到防守线，且穿过防守线的位置落在球门有效防御区内：
@@ -151,15 +198,38 @@ class AirHockeyAI:
                                           safe_left, safe_right, safe_top, safe_bottom)
         if guard is not None:
             self._attacking = False
+            self._attack_aligned = False
             return guard
 
-        # 冰壶在自己前方且进了攻击区才主动追；_lead_target 补上球槌响应延迟的提前量
+        # 冰壶在自己前方且进了攻击区才主动追；可控慢球先完成 X 对齐再纵向击球，快球直接协同拦截
         if stone_in_attack_zone and not stone_behind_ai:
             self._attacking = True
             lead_x, lead_y = self._lead_target(state, state.stone.x, state.stone.y)
-            if state.stone.y <= state.ai_y + core.STONE_RADIUS + core.MALLET_RADIUS:
+            aim_x = clamp(lead_x + error, safe_left, safe_right)
+            align_limit = ATTACK_ALIGN_EXIT if self._attack_aligned else ATTACK_ALIGN_ENTER
+            self._attack_aligned = (
+                abs(state.ai_x - aim_x) <= align_limit
+                and abs(state.ai_x - state.stone.x) <= contact
+            )
+            if (
+                not self._attack_aligned
+                and stone_speed <= SLOW_ATTACK_SPEED
+                and (state.stone.vy < -core.STONE_STOP_SPEED or state.stone.y - state.ai_y <= contact)
+            ):
+                self._striking = False
+                hold_y = (state.ai_y if state.stone.vy < -core.STONE_STOP_SPEED
+                          else min(state.ai_y, state.stone.y - contact))
+                hold_y = min(hold_y, max(state.ai_y, state.stone.y - core.STONE_RADIUS))
+                return AIDecision(
+                    aim_x,
+                    clamp(hold_y, safe_top, safe_bottom),
+                    stalled_stone_phase,
+                )
+            if state.stone.y <= state.ai_y + contact:
                 lead_y = max(lead_y, state.ai_y)
-            strike_x, strike_y = self._strike_through(state, lead_x + error, lead_y)
+                if not self._attack_aligned:
+                    lead_y = min(lead_y, max(state.ai_y, state.stone.y - core.STONE_RADIUS))
+            strike_x, strike_y = self._strike_through(state, aim_x, lead_y)
             return AIDecision(
                 clamp(strike_x, safe_left, safe_right),
                 clamp(strike_y, safe_top, safe_bottom),
@@ -167,6 +237,7 @@ class AirHockeyAI:
             )
 
         self._attacking = False
+        self._attack_aligned = False
         if state.stone.vy < INCOMING_VY:
             # 冲门快球之外的来球（含先撞墙再进门的）：预判它从防守线哪个 X 穿过。
             # 仿真难度的 prediction 系数靠这一支区分强弱，不能并进冲门快球那一支。
@@ -213,29 +284,40 @@ class AirHockeyAI:
         """冰壶快要碰到等在 target 的球槌时，把目标沿来球方向往回推，让球槌迎着球打出去。"""
         vx, vy = state.stone.vx, state.stone.vy
         speed = math.hypot(vx, vy)
-        if speed <= core.STONE_STOP_SPEED:
+        if speed <= RETRIEVE_EXIT_SPEED or vy >= -core.STONE_STOP_SPEED or state.stone.y < state.ai_y:
             self._striking = False
             return target_x, target_y
         dx, dy = target_x - state.stone.x, target_y - state.stone.y
         contact = core.STONE_RADIUS + core.MALLET_RADIUS
-        gap = math.hypot(dx, dy) - contact
-        approaching = (dx * vx + dy * vy) > 0.0
+        gap_target = math.hypot(dx, dy) - contact
+        gap_mallet = math.hypot(state.ai_x - state.stone.x, state.ai_y - state.stone.y) - contact
+        gap = max(gap_target, gap_mallet)
+        approaching = (dx * vx + dy * vy) > 0.0 or (
+            (state.ai_x - state.stone.x) * vx + (state.ai_y - state.stone.y) * vy > 0.0
+        )
         on_path = abs(dx * vy - dy * vx) / speed <= contact
         time_to_contact = gap / speed
+        strike_dist = STRIKE_THROUGH * min(1.0, speed / FAST_STRIKE_SPEED)
 
         if self._striking:
-            # 迎击承诺阶段与退出条件：球反弹离开、偏离轨迹、或超出退出迟滞时间窗口
-            if not approaching or not on_path or time_to_contact > STRIKE_WINDOW_EXIT:
+            # 迎击承诺阶段与退出条件：球反弹离开、横向失准、偏离轨迹、或超出退出迟滞时间窗口
+            aligned_x = abs(state.ai_x - target_x) <= ATTACK_ALIGN_EXIT
+            if not aligned_x or not approaching or not on_path or time_to_contact > STRIKE_WINDOW_EXIT:
                 self._striking = False
                 return target_x, target_y
-            return target_x - vx / speed * STRIKE_THROUGH, target_y - vy / speed * STRIKE_THROUGH
+        else:
+            # 球槌必须已在目标位置附近且已完成横向对齐：X 未对齐时前推会让横梁提前跨过球
+            aligned_x = abs(state.ai_x - target_x) <= ATTACK_ALIGN_ENTER
+            waiting = aligned_x and math.hypot(state.ai_x - target_x, state.ai_y - target_y) <= STRIKE_THROUGH
+            if not waiting or not approaching or not on_path or time_to_contact > STRIKE_WINDOW:
+                return target_x, target_y
+            self._striking = True
 
-        # 球槌得已经**等在**那个位置附近：还在赶路时它本来就在动，往回推只会把它带离拦截点
-        waiting = math.hypot(state.ai_x - target_x, state.ai_y - target_y) <= STRIKE_THROUGH
-        if not waiting or not approaching or not on_path or time_to_contact > STRIKE_WINDOW:
-            return target_x, target_y
-        self._striking = True
-        return target_x - vx / speed * STRIKE_THROUGH, target_y - vy / speed * STRIKE_THROUGH
+        strike_x = target_x - vx / speed * strike_dist
+        strike_y = target_y - vy / speed * strike_dist
+        if speed <= SLOW_ATTACK_SPEED:
+            strike_y = min(strike_y, state.stone.y + core.MALLET_RADIUS)
+        return strike_x, strike_y
     def advance_serve_phase(self, state: GameState, dt: float) -> str:
         """AI 开球时，就位了才切到击球阶段。"""
         if not (state.awaiting_serve and state.current_server == "ai" and state.serve_phase == "positioning"):
@@ -264,16 +346,29 @@ class AirHockeyAI:
         """先侧移、后退、对齐，避免穿过身后的冰壶造成乌龙球。"""
         clearance, tolerance, staging_y = self._retrieve_geometry(state.stone.y)
         staging_y = clamp(staging_y, safe_top, safe_bottom)
-        # 侧移途中沿用已经选择的方向，不因球心在球槌左右抖动而反复换边。
-        side_x = state.target_x if state.stalled_stone_phase == "sidestepping" else state.ai_x
-        side = 1.0 if side_x >= state.stone.x else -1.0
-        if not safe_left <= state.stone.x + side * clearance <= safe_right:
-            side = -side
+        # 同一颗球回收期间锁定绕行方向，不因阶段切换或球心观测抖动而反复换边。
+        if self._retrieve_side is None:
+            side_x = state.target_x if state.stalled_stone_phase == "sidestepping" else state.ai_x
+            side = 1.0 if side_x >= state.stone.x else -1.0
+            if not safe_left <= state.stone.x + side * clearance <= safe_right:
+                side = -side
+            self._retrieve_side = side
+        else:
+            side = self._retrieve_side
+            if (not safe_left <= state.stone.x + side * clearance <= safe_right
+                    and safe_left <= state.stone.x - side * clearance <= safe_right):
+                side = -side
+                self._retrieve_side = side
         staging_x = clamp(state.stone.x + side * clearance, safe_left, safe_right)
         striking_x = clamp(state.stone.x, safe_left, safe_right)
-        striking = state.stalled_stone_phase == "striking" and state.stone.y >= state.ai_y
-        if not striking and state.ai_y > staging_y + tolerance:
-            if abs(state.ai_x - state.stone.x) < clearance - tolerance or state.stone.vy < -core.STONE_STOP_SPEED:
+        phase_idx = (self.RETRIEVE_PHASES.index(state.stalled_stone_phase)
+                     if state.stalled_stone_phase in self.RETRIEVE_PHASES else 0)
+        striking = phase_idx >= 3 and state.stone.y >= state.ai_y - core.STONE_RADIUS * 0.35
+        aligning = phase_idx >= 2 and state.ai_y <= staging_y + tolerance * 2.0
+        if not striking and not aligning and state.ai_y > staging_y + tolerance:
+            side_gap = (core.STONE_RADIUS + core.MALLET_RADIUS
+                        if phase_idx >= 1 else clearance - tolerance)
+            if abs(state.ai_x - state.stone.x) < side_gap or state.stone.vy < -RETRIEVE_SLIDING_VY:
                 return AIDecision(staging_x, state.ai_y, "sidestepping")
             return AIDecision(staging_x, staging_y, "positioning")
         # 实机若连球心后方都退不到，不能对齐后从前侧把球推向自家门。
@@ -300,14 +395,24 @@ class AirHockeyAI:
         back_line = core.RINK_TOP + core.MALLET_RADIUS + core.GOAL_POST_RADIUS + 8.0
         return clearance, max(3.0, contact * 0.1), max(back_line, stone_y - clearance)
 
-    def _retrieve_phase(self, state) -> str:
+    def _retrieve_phase(
+        self,
+        state,
+        safe_left: float = core.RINK_LEFT + core.MALLET_RADIUS,
+        safe_right: float = core.RINK_RIGHT - core.MALLET_RADIUS,
+        safe_top: float = core.RINK_TOP + core.MALLET_RADIUS,
+        safe_bottom: float = core.RINK_CENTER_Y - core.MALLET_RADIUS,
+    ) -> str:
         """按球槌当前位置判断回收走到哪一步，只前进不后退。
 
         推球时球槌会越过绕后站位线，若按位置重算就会退回侧移、又绕一圈。
+        必须按夹取后的可达站位（staging_y / striking_x）判定到位，否则实机行程受限时永远卡在 positioning。
         """
         clearance, tolerance, staging_y = self._retrieve_geometry(state.stone.y)
+        staging_y = clamp(staging_y, safe_top, safe_bottom)
+        striking_x = clamp(state.stone.x, safe_left, safe_right)
         behind = state.ai_y <= staging_y + tolerance
-        aligned = abs(state.ai_x - state.stone.x) <= tolerance
+        aligned = abs(state.ai_x - striking_x) <= tolerance
         if behind and aligned:
             natural = "striking"
         elif behind:
@@ -334,9 +439,8 @@ class AirHockeyAI:
         if self.mallet_speed is None or self.mallet_speed <= 0.0:
             return lead_x, lead_y
         stone = state.stone
-        if math.hypot(stone.vx, stone.vy) <= core.STONE_STOP_SPEED:
-            return lead_x, lead_y          # 基本静止，提前量没有意义
-
+        if math.hypot(stone.vx, stone.vy) <= RETRIEVE_EXIT_SPEED:
+            return lead_x, lead_y          # 基本静止或处于噪声带内，提前量没有意义
         motion = StoneMotion(stone.x, stone.y)
         motion.set_immediate_velocity(stone.vx, stone.vy)
         substep = core.PREDICTION_SUBSTEP

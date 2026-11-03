@@ -97,15 +97,22 @@ class RallyController:
         self._touched_at = -math.inf
 
     def can_retrieve(self, stone) -> bool:
-        """命令范围内是否存在朝真人方向接触的位置；不要求整段回撤间距。"""
+        """命令范围内是否存在朝真人方向安全接触的位置；排除后场侧边死角。"""
         if self.reachable_bounds is None:
             return True
         left, right, top, bottom = self.reachable_bounds
+        contact = core.STONE_RADIUS + core.MALLET_RADIUS
         closest_x = min(max(stone.x, left), right)
         closest_y = min(stone.y, bottom)
-        return (stone.y > top and math.hypot(stone.x - closest_x, stone.y - closest_y)
-                < core.STONE_RADIUS + core.MALLET_RADIUS)
-
+        if stone.y <= top or math.hypot(stone.x - closest_x, stone.y - closest_y) >= contact:
+            return False
+        # 后场侧墙死角：球槌在 Y 上退不到球后方（stone.y < top + contact），
+        # 且在 X 上也绕不到球外侧（贴近左右命令边界），此时从内侧靠近只会把球横向顶死在边墙/导轨上。
+        in_rear_side_corner = (
+            (stone.x < left + core.STONE_RADIUS or stone.x > right - core.STONE_RADIUS)
+            and stone.y < top + contact
+        )
+        return not in_rear_side_corner
     def update(self, result: VisionResult, *, now: float, feedback=None,
                mallet_position=READY_POSITION) -> RallyDecision:
         track = result.track
@@ -183,8 +190,11 @@ class RallyController:
                     target = None
                     self._forget_puck()
                     reason = "invalid/missing AI target; target cleared"
-                elif machine_half and (puck_stopped or stone.y < position[1]) and not self.can_retrieve(stone):
-                    # 不能盲目直穿身后的球回 READY，也绝不在后场不可达盲区里跟着噪点乱跑。
+                elif (machine_half
+                      and (puck_stopped or stone.speed <= OUTGOING_EXIT_VY
+                           or stone.y < position[1] or decision.stalled_stone_phase != "idle")
+                      and not self.can_retrieve(stone)):
+                    # 不能盲目直穿身后的球回 READY，也绝不在后场/死角不可达区里跟着噪点乱跑。
                     self.state = RallyState.RECOVERING
                     target = None
                     reason = (f"puck unreachable (stopped at y={stone.y:.0f}, "

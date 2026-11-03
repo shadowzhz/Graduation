@@ -489,9 +489,10 @@ class PLCLink:
         feedback = self._publish(status, read_start)
         if feedback is None:
             return
-        # 死区判据要用轴的实际位置判断"到没到"，不更新会把没走到的目标当成已到达、一直跳过
+        # 死区判据要用轴的实际位置、busy 与 seq_ack 判断"到没到/是否已确认"
         client.actual_game = (feedback.x, feedback.y)
         client.actual_busy = feedback.busy
+        client.actual_seq_ack = feedback.seq_ack
         safe = self._motion_safe(feedback)
         revoked = False
         interrupted_target = None

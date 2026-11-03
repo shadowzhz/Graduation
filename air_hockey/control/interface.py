@@ -30,18 +30,21 @@ from .protocol import (
 )
 
 DEAD_ZONE_MM = 3.0
+MAX_IDLE_RESENDS = 2
 
 # Busy 时只跳过 PLC REAL 编码完全相同的终点，不设终点变化距离门槛。
-
 
 class PLCInterface:
     """Blocking S7 transport, exclusively operated by PLCLink's worker."""
 
     def __init__(self, ip="192.168.0.64", rack=0, slot=1, zone=None, limits=None):
         self.ip, self.rack, self.slot = ip, rack, slot
-        # 轴的实际位置（游戏坐标）和 busy，由 PLCLink 每周期从反馈更新，_prepare_move 的死区判据要用
+        # 轴的实际位置（游戏坐标）、busy 与 seq_ack，由 PLCLink 每周期从反馈更新
         self.actual_game = None
         self.actual_busy = False
+        self.actual_seq_ack = None
+        self._idle_resend_count = 0
+        self._idle_resend_pos = None
         self.zone = validated_zone(DEFAULT_ZONE if zone is None else zone)
         # 命令包络（PLCLink 会用它自己的那份覆盖，和 zone 一样）
         self.limits = DEFAULT_LIMITS if limits is None else limits
@@ -100,8 +103,9 @@ class PLCInterface:
     def reset_tracking(self):
         self.last_phys_x = None
         self.last_phys_y = None
+        self._idle_resend_count = 0
+        self._idle_resend_pos = None
         return True
-
     def _write_bool(self, db, offset, bit, value):
         try:
             library = getattr(self._client, "_lib", None) or getattr(self._client, "_library", None)
@@ -240,10 +244,17 @@ class PLCInterface:
         except (ValueError, OverflowError):
             self.last_send_state = "invalid"
             return None
-        # 执行中仅去重相同 REAL 终点，微小修正也可下发；避免同点重复触发作业。
-        if (self.actual_busy and self.last_phys_x is not None
-                and struct.pack(">ff", phys_x, phys_y)
-                == struct.pack(">ff", self.last_phys_x, self.last_phys_y)):
+        same_real_endpoint = (
+            self.last_phys_x is not None
+            and struct.pack(">ff", phys_x, phys_y)
+            == struct.pack(">ff", self.last_phys_x, self.last_phys_y)
+        )
+        unacked_in_flight = (
+            self.actual_seq_ack not in (None, 0)
+            and self.actual_seq_ack != self.sequence
+        )
+        # 执行中或上一条指令序号尚未被 PLC 确认时，仅去重相同 REAL 终点，避免同点重复触发作业。
+        if (self.actual_busy or unacked_in_flight) and same_real_endpoint:
             self.last_send_state = "pending"
             return None
         # 起点：优先用上次真正发出去的位置，还没有就用轴的实际位置。
@@ -258,9 +269,12 @@ class PLCInterface:
         if origin_x is None:
             return phys_x, phys_y, None
         distance = max(abs(phys_x - origin_x), abs(phys_y - origin_y))
-        # 同点：轴也已到位就跳过；空闲但未到位时重发，执行中的同点已在上面跳过。
+        # 同点：轴也已到位就跳过；空闲但未到位时有限次重发，执行中或未确认的同点已在上面跳过。
         if distance < DEAD_ZONE_MM:
+            if self.actual_busy or unacked_in_flight:
+                return phys_x, phys_y, distance
             actual_gap = None
+            ax = ay = None
             if actual is not None:
                 try:
                     ax, ay = self.game_to_physical_raw(actual[0], actual[1])
@@ -268,9 +282,23 @@ class PLCInterface:
                 except (ValueError, OverflowError):
                     actual_gap = None
             if actual_gap is None or actual_gap < DEAD_ZONE_MM:
+                self._idle_resend_count = 0
+                self._idle_resend_pos = None
                 self.last_send_state = "deadzone"
                 return None
+            if ax is not None and self._idle_resend_pos is not None:
+                moved = max(abs(ax - self._idle_resend_pos[0]), abs(ay - self._idle_resend_pos[1]))
+                if moved >= 1.0:
+                    self._idle_resend_count = 0
+                    self._idle_resend_pos = (ax, ay)
+            if self._idle_resend_count >= MAX_IDLE_RESENDS:
+                self.last_send_state = "stalled"
+                return None
+            self._idle_resend_count += 1
+            if ax is not None and self._idle_resend_pos is None:
+                self._idle_resend_pos = (ax, ay)
             self.last_send_state = "deadzone-resend"
+            return phys_x, phys_y, distance
         return phys_x, phys_y, distance
 
     def _write_payload(self, phys_x, phys_y):
@@ -282,8 +310,10 @@ class PLCInterface:
         self.last_phys_x, self.last_phys_y = phys_x, phys_y
         if distance is not None:
             self.last_send_dist_mm = distance
+        if self.last_send_state != "deadzone-resend":
+            self._idle_resend_count = 0
+            self._idle_resend_pos = None
         self.last_send_state = "sent"
-
     def send_linear_move(self, game_x, game_y):
         """序号握手：先写目标块，再写递增的序号，PLC 比较序号后执行。
 

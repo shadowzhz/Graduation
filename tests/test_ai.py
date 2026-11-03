@@ -369,3 +369,137 @@ def test_diagonal_fast_shots_separate_goal_threat_from_defense_line_intercept():
     dec_front = ai_front.choose_target(front, prediction=pred_front)
     assert ai_front._goal_guard and not ai_front._attacking
     assert (dec_front.target_x, dec_front.target_y) == (300.0, home)
+
+
+def test_slow_ball_unaligned_x_holds_y_and_realigns_if_target_invalidated():
+    """慢球到来时 X 轴未对齐，Y 轴不得提前跨球；运动中击球点失准时退回对齐。"""
+    bounds = PLCLink("offline").reachable_bounds
+    ai = AirHockeyAI(mallet_speed=1000.0, recovery_bounds=bounds)
+    # 复现视频 13.4s 场景：推手在左后方 (118.5, 144.8)，慢球在 (380.0, 490.0) 緩慢滑入
+    state = replace(_live_state(380.0, 490.0, 20.0, -55.0), ai_x=118.5, ai_y=144.8)
+    dec_unaligned = ai.choose_target(state)
+    assert abs(dec_unaligned.target_x - 380.0) < 30.0
+    assert dec_unaligned.target_y == 144.8, f"X 未对齐时 Y 不得提前前冲: {dec_unaligned}"
+
+    # X 轴完成对齐后，才允许沿 Y 轴纵向出击
+    aligned_state = replace(state, ai_x=dec_unaligned.target_x, ai_y=144.8)
+    dec_aligned = ai.choose_target(aligned_state)
+    assert dec_aligned.target_y > 400.0, f"X 对齐后应纵向出击: {dec_aligned}"
+
+    # 纵向出击途中球发生横向偏折（原定击球点失效），立即中止纵向推进重新对齐 X
+    deflected_state = replace(_live_state(460.0, 420.0, 60.0, -55.0), ai_x=380.0, ai_y=260.0)
+    dec_deflected = ai.choose_target(deflected_state)
+    assert dec_deflected.target_y == 260.0, f"原击球点失效后应停住 Y 重新对齐 X: {dec_deflected}"
+
+
+def test_low_speed_close_range_strike_does_not_overshoot():
+    """低速近距离迎击不会产生 STRIKE_THROUGH=80 的危险过冲，且 X 未对齐时不触发迎击。"""
+    ai = AirHockeyAI(mallet_speed=1000.0)
+    # 近距离慢球（y=260, vy=-50），推手已对齐在 (300, 210)
+    close_slow = replace(_live_state(300.0, 260.0, 0.0, -50.0), ai_x=300.0, ai_y=210.0)
+    dec = ai.choose_target(close_slow)
+    assert dec.target_y <= close_slow.stone.y + layout.MALLET_RADIUS
+
+    # 若 X 未对齐（ai_x=235 偏离 65 单位），即使总距离在 80 以内也严禁触发 _strike_through
+    unaligned_close = replace(_live_state(300.0, 220.0, 0.0, -400.0), ai_x=235.0, ai_y=ai_home_y())
+    dec_unaligned = ai.choose_target(unaligned_close)
+    assert not ai._striking
+    assert dec_unaligned.target_y == ai_home_y()
+
+
+def test_behind_puck_recovery_does_not_reset_under_velocity_and_position_noise():
+    """球落到推手身后且伴随卡尔曼速度抖动（±15）时，回收阶段单调推进不反复重置。"""
+    bounds = PLCLink("offline").reachable_bounds
+    ai = AirHockeyAI(mallet_speed=1000.0, recovery_bounds=bounds)
+    state = replace(_live_state(320.0, 185.0, 0.0, 0.0), ai_x=320.0, ai_y=260.0)
+    phases = []
+    phase_order = ai.RETRIEVE_PHASES
+    noise_seq = [(-8.0, -14.0), (10.0, 12.0), (-12.0, -16.0), (6.0, -11.0)]
+    for step in range(120):
+        nvx, nvy = noise_seq[step % len(noise_seq)]
+        jitter_x = 1.5 if step % 2 == 0 else -1.5
+        state.stone = StoneState(x=320.0 + jitter_x, y=185.0, vx=nvx, vy=nvy)
+        decision = ai.choose_target(state)
+        assert decision.stalled_stone_phase in phase_order, decision
+        if phases:
+            assert phase_order.index(decision.stalled_stone_phase) >= phase_order.index(phases[-1]), (
+                f"回收阶段发生倒退重置: {phases[-1]} -> {decision.stalled_stone_phase}"
+            )
+        phases.append(decision.stalled_stone_phase)
+        dx, dy = decision.target_x - state.ai_x, decision.target_y - state.ai_y
+        dist = math.hypot(dx, dy)
+        travel = min(dist, 8.0)
+        if dist > 1e-6:
+            state.ai_x += dx * travel / dist
+            state.ai_y += dy * travel / dist
+        state.target_x, state.target_y = decision.target_x, decision.target_y
+        state.stalled_stone_phase = decision.stalled_stone_phase
+        if decision.stalled_stone_phase == "striking" and state.ai_y >= 185.0:
+            break
+    assert "striking" in phases, f"实机行程下未能完成绕后推进到 striking: {phases}"
+
+
+def test_stationary_puck_with_visual_noise_does_not_oscillate_wildly():
+    """静止球在视觉/卡尔曼速度噪声下，不会在死球后撤与迎击前冲之间大幅往返。"""
+    bounds = PLCLink("offline").reachable_bounds
+    ai = AirHockeyAI(mallet_speed=1000.0, recovery_bounds=bounds)
+    # 情况 1：球槌尚在远处 READY 位，静止球在 (360, 300) 带 ±15 速度噪声
+    targets_far = []
+    for i in range(20):
+        vx = 12.0 if i % 2 == 0 else -12.0
+        vy = -14.0 if i % 3 == 0 else 10.0
+        state = replace(_live_state(360.0 + (i % 2), 300.0 - (i % 2), vx, vy),
+                        ai_x=300.0, ai_y=ai_home_y())
+        dec = ai.choose_target(state)
+        targets_far.append((dec.target_x, dec.target_y))
+    for (x0, y0), (x1, y1) in zip(targets_far[:-1], targets_far[1:]):
+        assert math.hypot(x1 - x0, y1 - y0) <= 5.0, f"远处静止球目标大幅跳变: {(x0, y0)} -> {(x1, y1)}"
+
+    # 情况 2：球槌已贴近静止球进入回收，速度在 5 与 16 单位/秒之间抖动，严禁跳出回收前冲 +80
+    ai.reset()
+    state_near = replace(_live_state(300.0, 260.0, 0.0, -5.0), ai_x=300.0, ai_y=240.0)
+    first = ai.choose_target(state_near)
+    assert first.stalled_stone_phase == "sidestepping"
+    for vy in (-15.0, -4.0, 12.0, -16.0):
+        noisy = replace(state_near, stone=StoneState(300.0, 260.0, 0.0, vy),
+                        target_x=first.target_x, target_y=first.target_y,
+                        stalled_stone_phase=first.stalled_stone_phase)
+        dec = ai.choose_target(noisy)
+        assert dec.stalled_stone_phase != "idle"
+        assert abs(dec.target_y - first.target_y) < 5.0
+
+
+def test_independent_xy_axes_never_cross_slow_ball_before_x_alignment():
+    """独立 X/Y 轴仿真（即使 X 比 Y 快但 Y 距离极近、X 距离极远）：横梁绝不提前跨球，最终从球门侧击中。"""
+    bounds = PLCLink("offline").reachable_bounds
+    ai = AirHockeyAI(mallet_speed=1000.0, recovery_bounds=bounds)
+    # Y 仅差 35 单位，X 相差 360 单位；即便 X 轴速度 (700) 比 Y 轴 (500) 快，不锁 Y 也会在 0.07s 内跨球
+    state = replace(_live_state(460.0, 445.0, 0.0, -45.0), ai_x=100.0, ai_y=410.0)
+    dt = 0.01
+    vx_axis_max, vy_axis_max = 700.0, 500.0
+    contact = layout.STONE_RADIUS + layout.MALLET_RADIUS
+    contacted = False
+    for _ in range(100):
+        dec = ai.choose_target(state)
+        # X 尚未进入接触宽度前，横梁 Y 坐标绝不能越过球心 Y
+        if abs(state.ai_x - state.stone.x) > contact:
+            assert state.ai_y < state.stone.y, (
+                f"X 未对齐时横梁已跨过球: ai=({state.ai_x:.1f},{state.ai_y:.1f}), stone=({state.stone.x:.1f},{state.stone.y:.1f})"
+            )
+        # 模拟 PLC 两个独立 MC_MoveAbsolute 分别以各自速度逼近终点
+        dx = dec.target_x - state.ai_x
+        dy = dec.target_y - state.ai_y
+        state.ai_x += math.copysign(min(abs(dx), vx_axis_max * dt), dx) if abs(dx) > 1e-9 else 0.0
+        state.ai_y += math.copysign(min(abs(dy), vy_axis_max * dt), dy) if abs(dy) > 1e-9 else 0.0
+        state.stone = StoneState(
+            x=state.stone.x + state.stone.vx * dt,
+            y=state.stone.y + state.stone.vy * dt,
+            vx=state.stone.vx,
+            vy=max(0.0, abs(state.stone.vy) - layout.STONE_FRICTION_DECELERATION * dt) * -1.0,
+        )
+        if math.hypot(state.ai_x - state.stone.x, state.ai_y - state.stone.y) <= contact:
+            assert state.ai_y <= state.stone.y, "必须从球门侧（后方）完成接触击球"
+            assert abs(state.ai_x - state.stone.x) <= layout.STONE_RADIUS + 2.0
+            contacted = True
+            break
+    assert contacted, "独立 X/Y 轴在对齐后未能完成纵向击球接触"

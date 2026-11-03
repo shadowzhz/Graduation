@@ -746,3 +746,43 @@ def test_slow_outgoing_puck_velocity_hysteresis_prevents_chatter():
     assert tick(controller, observation(1.21, x=420.0, y=320.0, vx=0.0, vy=200.0)).target == READY_POSITION
     stopped = tick(controller, observation(1.30, x=420.0, y=320.0, vx=0.0, vy=0.0))
     assert stopped.state == RallyState.ATTACKING and stopped.target != READY_POSITION
+
+
+def test_unreachable_rear_corner_puck_clears_target_even_with_velocity_noise():
+    """无法安全回收的后场边角死球（复现视频 17~25s 右后死角）即使带速度噪声也必须清目标。"""
+    link = PLCLink("offline")
+    bounds = link.reachable_bounds
+    controller = RallyController(reachable_bounds=bounds)
+    ai = AirHockeyAI(mallet_speed=1000.0, recovery_bounds=bounds)
+    # (505, 180) 位于右命令极限 (515.05) 旁且 y < safe_top + contact (195.95)，无法绕到后方或外侧
+    for vy in (0.0, -12.0, 10.0):
+        result = observation(1.0, x=505.0, y=180.0, vx=5.0, vy=vy,
+                             mallet=(440.0, bounds[2]), ai=ai)
+        assert not controller.can_retrieve(result.curling_state)
+        decision = tick(controller, result, mallet=(440.0, bounds[2]))
+        assert decision.target is None, f"边角死球不应生成危险目标: {decision}"
+        assert submit_rally_target(result, PlcControlAdapter(bounds), link) is None
+
+
+def test_submitted_targets_respect_both_collision_and_plc_command_bounds():
+    """下发目标必须同时符合球槌防撞边界与 PLC 命令包络，非法余量配置立即报错。"""
+    from air_hockey.control.limits import MotionLimits
+
+    link = PLCLink("offline", limits=MotionLimits(margin_mm=20.0))
+    left, right, top, bottom = link.reachable_bounds
+    # 即使传入未绑定 bounds 的默认 PlcControlAdapter()，submit_rally_target 也会按 plc.reachable_bounds 限幅
+    for raw_x, raw_y in ((70.0, 140.0), (530.0, 490.0)):
+        result = observation(time.perf_counter(), x=300.0, y=300.0, vx=0.0, vy=0.0)
+        result.rally = replace(tick(RallyController(), result), target=(raw_x, raw_y))
+        req = submit_rally_target(result, PlcControlAdapter(), link, dry_run=True)
+        assert req is not None
+        assert left <= req.target_x <= right
+        assert top <= req.target_y <= bottom
+
+    for bad_margin in (-1.0, 500.0, float("nan")):
+        try:
+            MotionLimits(margin_mm=bad_margin)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法余量 {bad_margin} 未被拦截")

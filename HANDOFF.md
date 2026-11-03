@@ -12,18 +12,18 @@
 - **Rally 记忆绑定轨迹代号**（2026-10-31）：换身份、无效状态、AI 目标缺失/非有限、PLC 撤权/回零/重连后清空接触与保持记忆，旧目标不会复活。
 - **PLC 授权代号驱动重置**（2026-11-01）：`PLCLink.arm_generation` 在真正撤权/复权时各 +1；LiveSession 比对代号，复权那一帧先清 Rally 记忆再用本帧观测重建；撤权期间攒下的记忆不会带进来，两帧之间的撤权再复权也认得出。
 - **目标绑定授权代号**（2026-11-01）：视觉在处理帧前捕获 `arm_generation` 并随目标传递；PLC 在接收与最终发送时都检查代号。等待授权期间发布、或跨越撤权/复权计算的旧目标不能进入新授权；工具未指定代号时绑定发布时的代号。此门禁不能撤回已进入网络写入或 PLC 已接受的运动，不能代替独立停止。
-- **防折返震台、防侧面包球与防盲区乱跑**（2026-11-02）：外飞放手带进入/退出双门槛迟滞（`OUTGOING_ENTER_VY=45.0` / `OUTGOING_EXIT_VY=15.0`，中间沿用 `_letting_go`）；侧前方近距离追击与身后滑行球禁止后退包球；防守线后方盲区不开启遮挡保持，后场不可达盲区无论有无速度均清目标停住。
+- **防折返震台、慢球先对齐后击球与死球回收防抖**（2026-11-02）：外飞放手双门槛迟滞（`OUTGOING_ENTER_VY=45.0` / `OUTGOING_EXIT_VY=15.0`）；可控慢球（`<=120` 单位/s）先完成 X 对齐再沿 Y 出击，未对齐时禁止 `_strike_through` 且低速冲量按速度衰减防过冲；死球回收按夹取后可达站位推进并带 `RETRIEVE_EXIT_SPEED=25.0` 抗噪与绕行方向锁定；后场侧墙死角（`can_retrieve`）直接清目标停住；`seq_ack` 未确认或轴受阻未到位（`MAX_IDLE_RESENDS=2`）不重复轰炸作业。
 - **回零 = MC_Home Mode 0**：轴不动，直接把当前位置设为原点；轴不在参考位置时按 H / Shift+X / Shift+Y 会让坐标系错位（Caps Lock 下小写 x/y 也会触发）。
 
 ## 2. 核心文件
 - `air_hockey/control/protocol.py`：DB1/DB18 偏移（1211C 版，已清理旧 `TRIGGER_BYTE` 触发位并兼容 `snap7.type` 多变量读取）。
-- `air_hockey/control/interface.py`：`_prepare_move` 坐标换算 + 3mm 死区；`_write_payload` 写 4 个 Real；`_read_multi_vars` 兼容 `Cli_ReadMultiVars` 与 `read_multi_vars`。命令余量在 `control/limits.py`：机械行程 X -190..222 / Y -129..187，两轴内缩 5mm，X 再多收 6mm、Y 再多收 10mm，命令范围 X -179..211 / Y -114..172；`PlcControlAdapter` 已同步采用 `plc.reachable_bounds`。
-- `air_hockey/ai.py`：冲门判断 `_goal_guard_decision`（斜射威胁与防守线截点分离、含越过防守线退守）、提前量 `_lead_target`、迎击 `_strike_through`、中线进攻迟滞 `ATTACK_HYSTERESIS`、`reaction_timer` 重置修复。
+- `air_hockey/control/interface.py`：`_prepare_move` 坐标换算 + 3mm 死区 + `seq_ack` 未确认去重 + 受阻限次补发；命令余量在 `control/limits.py`（机械行程 X -190..222 / Y -129..187，命令范围 X -179..211 / Y -114..172）；`PlcControlAdapter` 与 `submit_rally_target` 均强制交集限幅。
+- `air_hockey/ai.py`：冲门判断 `_goal_guard_decision`、提前量 `_lead_target`、对齐门控与低速衰减 `_strike_through`、夹取可达站位死球回收 `_retrieve_phase` / `_choose_stalled_stone_target`。
 - `air_hockey/camera/`：非 Jetson 软件解码直接协商 `BGR` 免除每帧四通道转换拷贝；`_stop_locked` 异常退出确保清理线程与后端引用。
 
 ## 3. 测试与验证状态
-- `python3 tests/run_tests.py`：349 项完整回归通过（无多变量读取回退告警）。已清理废弃空目录 `air_hockey/planning`。
-- 本机用 snap7 3.2.1 自带服务端走过一遍：状态读取、目标块、序号、气缸位都写到了正确地址；旧长度 58 读 DB18 会报 Invalid address（说明旧代码连这台 PLC 必然显示未连接）。**尚未连实机。**
+- `python3 tests/run_tests.py`：356 项完整回归通过（含慢球 X 未对齐禁跨球、低速迎击防过冲、身后球抗噪单调回收、后场边角死球清目标、PLC 未确认/受阻防重复下发）。
+- 本机用 snap7 服务端验证通过；**实机机械包络、夹具外扩尺寸与停机时刻 PLC 诊断寄存器待现场实测确认。**
 
 ## 4. PLC 侧待确认 / 待补（TIA 里改，Python 管不到）
 - [ ] FC1 网络 6 两个 MC_MoveAbsolute 的 Position 接的是 `XY轴直线绝对` 哪个下标；确认后把 `_write_payload` 里多写的 Y 去掉。

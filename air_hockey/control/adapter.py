@@ -34,11 +34,14 @@ class PlcControlAdapter:
             self.y_min, self.y_max = self.Y_MIN, self.Y_MAX
         else:
             left, right, top, bottom = map(float, bounds)
+            if not all(math.isfinite(v) for v in (left, right, top, bottom)):
+                raise ValueError("bounds must be finite")
             self.x_min = max(self.X_MIN, left)
             self.x_max = min(self.X_MAX, right)
             self.y_min = max(self.Y_MIN, top)
             self.y_max = min(self.Y_MAX, bottom)
-
+            if self.x_min > self.x_max or self.y_min > self.y_max:
+                raise ValueError("bounds leave no valid safe envelope")
     def build_target(self, target_x: float, target_y: float, timestamp: float) -> PlcTarget:
         target_x, target_y = float(target_x), float(target_y)
         if not (math.isfinite(target_x) and math.isfinite(target_y)):

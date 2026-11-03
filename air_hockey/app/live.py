@@ -38,7 +38,15 @@ def submit_rally_target(result, adapter, plc, *, dry_run=False, arm_generation=N
             plc.clear_target()
         return None
     try:
-        request = adapter.build_target(*rally.target, result.frame.timestamp)
+        bounds = getattr(plc, "reachable_bounds", None) if plc is not None else None
+        effective_adapter = (
+            PlcControlAdapter(
+                (max(adapter.x_min, bounds[0]), min(adapter.x_max, bounds[1]),
+                 max(adapter.y_min, bounds[2]), min(adapter.y_max, bounds[3]))
+            )
+            if bounds is not None else adapter
+        )
+        request = effective_adapter.build_target(*rally.target, result.frame.timestamp)
     except ValueError:
         if plc is not None:
             plc.clear_target()

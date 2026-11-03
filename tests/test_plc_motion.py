@@ -1100,3 +1100,39 @@ def test_busy_sub_10mm_corrections_send_but_same_real_endpoint_does_not():
                 assert len(client.transport.moves) == 2
             finally:
                 client.disconnect()
+
+
+@memory_binding()
+def test_unacked_sequence_and_stalled_axis_do_not_spam_duplicate_moves():
+    """PLC Busy、反馈延迟（seq_ack 未追上）和机械受阻无法到位时，不会反复轰炸错误运动作业。"""
+    client = MemoryPLC()
+    assert client.connect()
+    try:
+        # 1. 反馈延迟窗口：刚发出指令 sequence 已递增，但 PLC 尚未更新 seq_ack 且 busy 仍为 False
+        client.actual_busy = False
+        client.actual_game = (250.0, 150.0)
+        assert client.send_linear_move(350.0, 250.0)
+        assert len(client.transport.moves) == 1
+        client.actual_seq_ack = client.sequence - 1  # 模拟 PLC 尚未确认上一条序号
+        for _ in range(5):
+            assert client.send_linear_move(350.0, 250.0)
+            assert client.last_send_state == "pending"
+        assert len(client.transport.moves) == 1
+
+        # 2. PLC 已确认序号（seq_ack 追上），但轴空闲且受阻完全不动：最多补发 MAX_IDLE_RESENDS 次后进入 stalled
+        client.actual_seq_ack = client.sequence
+        resends = 0
+        for _ in range(10):
+            before = len(client.transport.moves)
+            assert client.send_linear_move(350.0, 250.0)
+            if len(client.transport.moves) > before:
+                resends += 1
+                client.actual_seq_ack = client.sequence
+        assert resends == 2, f"受阻未到位应限制补发 2 次，实际补发: {resends}"
+        assert client.last_send_state == "stalled"
+
+        # 3. 目标发生实质改变（跨越死区）时，立即恢复正常下发
+        assert client.send_linear_move(300.0, 180.0)
+        assert client.last_send_state == "sent"
+    finally:
+        client.disconnect()

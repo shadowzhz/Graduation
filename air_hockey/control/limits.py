@@ -52,9 +52,10 @@ class MotionLimits:
 
     def __post_init__(self):
         object.__setattr__(self, "margin_mm", float(self.margin_mm))
-        if self.margin_mm < 0.0:
+        if not math.isfinite(self.margin_mm) or self.margin_mm < 0.0:
             raise ValueError("motion margin must be >= 0")
-
+        if self.command_x_min > self.command_x_max or self.command_y_min > self.command_y_max:
+            raise ValueError("motion margin exceeds mechanical travel")
     # 命令夹取的上/下限（= TRAVEL_* 再内缩 margin_mm 和各轴 *_EXTRA_MARGIN_MM）
     @property
     def command_x_min(self):
